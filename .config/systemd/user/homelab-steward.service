@@ -1,0 +1,18 @@
+[Unit]
+Description=Homelab steward — nightly orchestrator (updates, audit, work queue)
+Wants=network-online.target
+After=network-online.target
+OnFailure=notify-failure@%n.service
+
+[Service]
+Type=oneshot
+Environment="PATH=/home/carter/.rbenv/shims:/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="KUBECONFIG=/home/carter/.kube/config"
+ExecStart=/usr/bin/python3 /home/carter/scripts/steward_runner.py
+# The steward stops Dependabot during P0. Re-arm it even if Python crashes,
+# times out, or is killed before its in-process cleanup runs.
+ExecStopPost=/usr/bin/systemctl --user start dependabot-webhook.service
+TimeoutStartSec=7200
+MemoryHigh=6G
+MemoryMax=8G
+TasksMax=1024

@@ -1,0 +1,5 @@
+Target tokens: 50,000
+Actual tokens: 49,810
+Error: -0.4%
+Chars: 240,007
+File: /home/carter/benchmarks/context-window/context_50_000.md

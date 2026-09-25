@@ -1,0 +1,26 @@
+{
+  ".config/hyperliquid-agent/omp-dependabot-guard.ts": {
+    "by": "jev",
+    "confidence": 0.86,
+    "date": "2026-09-25",
+    "model": "jev-1.13.0",
+    "probabilities": {
+      "credential": 0.02,
+      "homelab": 0.93,
+      "personal": 0.04
+    },
+    "scope": "public"
+  },
+  ".config/neofetch/config.conf": {
+    "by": "jev",
+    "confidence": 0.96,
+    "date": "2026-09-25",
+    "model": "jev-1.13.0",
+    "probabilities": {
+      "credential": 0.02,
+      "homelab": 0.99,
+      "personal": 0.02
+    },
+    "scope": "public"
+  }
+}

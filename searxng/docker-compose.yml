@@ -1,0 +1,30 @@
+name: searxng
+
+services:
+  core:
+    container_name: searxng
+    image: docker.io/searxng/searxng@sha256:a31763b7af3caf6ae9aac1816ba774214eb550252e06a4998f276ded8d60461b
+    restart: unless-stopped
+    mem_limit: 512m
+    pids_limit: 128
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./core-config/:/etc/searxng/:Z
+      - core-data:/var/cache/searxng/
+    networks:
+      - default
+      - chat-search          # shared with open-webui so 'searxng' hostname resolves in-app
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  core-data:
+
+networks:
+  chat-search:
+    external: true
+    name: homelab-chat-search

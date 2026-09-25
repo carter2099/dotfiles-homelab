@@ -1,0 +1,52 @@
+[Unit]
+Description=Homelab Steward fixed OpenCode proxy relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=steward-proxy
+Group=steward-worker
+ExecStart=/usr/local/libexec/steward-worker-proxy
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=15
+TimeoutStopSec=10
+UMask=0077
+
+# This process has no Carter credentials and has one hard-coded destination in
+# steward-worker-proxy.  It is not a general HTTP/SOCKS/CONNECT proxy.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+DevicePolicy=closed
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1/32
+RuntimeDirectory=steward-worker
+RuntimeDirectoryMode=0750
+ReadWritePaths=/run/steward-worker
+CPUQuota=100%
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target

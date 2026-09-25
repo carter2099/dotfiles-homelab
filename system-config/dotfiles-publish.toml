@@ -1,0 +1,102 @@
+# Publish policy for the public showcase repo carter2099/dotfiles-homelab.
+#
+# The private repo carter2099/dotfiles-homelab-private stays the source of truth;
+# ~/scripts/steward/showcase.py publishes a squashed snapshot of the tracked
+# paths whose scope is public (nightly P9c, or `dotfiles-commit --publish`).
+#
+# Order: `private` glob -> never published.  Deterministic secret scan hit ->
+# held (never sent to Jev).  `public` glob -> published.  A path matching
+# neither is ambiguous: a recorded decision in dotfiles-publish-decisions.json
+# wins, otherwise Jev decides and only a confident safe answer publishes.
+#
+# Globs match paths relative to $HOME: `**/` = any directories (or none),
+# `*` and `?` stay within one path component.
+# Internal IPs, hostnames and firewall/sandbox policy are fine to publish.
+
+private = [
+    # Carter's explicit private list.
+    ".ssh/**",
+    # SSH client config, known hosts and authorized keys anywhere (hosts, users, key paths).
+    "**/.ssh/**",
+    "**/ssh/**",
+    "**/ssh_config",
+    "**/known_hosts*",
+    "**/authorized_keys*",
+    "**/*authorized-key*",
+    ".config/rig-dashboard/env",
+    ".local/bin/rigwake",
+    "k3s/**",
+    # Credential and key material anywhere.
+    "**/env",
+    "**/.env",
+    "**/.env.*",
+    "**/*.env",
+    "**/*token*",
+    "**/*secret*",
+    "**/*password*",
+    "**/*passwd*",
+    "**/*credential*",
+    "**/*api-key*",
+    "**/*api_key*",
+    "**/*.key",
+    "**/*.pem",
+    "**/*.p12",
+    "**/*.pfx",
+    "**/*.kdbx",
+    "**/*.ovpn",
+    "**/id_rsa*",
+    "**/id_ecdsa*",
+    "**/id_ed25519*",
+    "**/auth.json",
+    "**/master.key",
+    "**/.htpasswd*",
+    "**/.netrc",
+    "**/.pgpass",
+    "**/.git-credentials",
+    "**/.smtp_config",
+    "**/.npmrc",
+    "**/.pypirc",
+    ".config/cloudflare/**",
+    ".config/gh/**",
+    ".kube/**",
+    ".gnupg/**",
+    ".local/state/**",
+    ".local/share/**",
+    ".omp/agent/sessions/**",
+    # Databases and runtime data.
+    "**/*.db",
+    "**/*.db-*",
+    "**/*.sqlite",
+    "**/*.sqlite3",
+    "**/*.sqlite-*",
+]
+
+public = [
+    "AGENTS.md",
+    "README.md",
+    ".gitconfig",
+    ".gitignore",
+    ".tmux.conf",
+    ".zprofile",
+    ".zshrc",
+    ".github/**",
+    ".config/systemd/**",
+    ".local/bin/**",
+    ".omp/agent/**",
+    "scripts/**",
+    "system-config/**",
+    "benchmarks/**",
+    "news/**",
+    "searxng/**",
+    "open-webui/**",
+    "freshrss/**",
+    "digests/**",
+    "ideas/**",
+]
+
+# Data paths where the high-entropy heuristic is skipped (model file names,
+# tool-call ids).  Every other scan rule still applies there: bare tokens,
+# private-key blocks, named credential assignments, MAC addresses.
+entropy_exempt = [
+    "benchmarks/**",
+]

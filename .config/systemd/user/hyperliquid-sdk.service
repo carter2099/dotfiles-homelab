@@ -1,0 +1,21 @@
+[Unit]
+Description=Hyperliquid Ruby SDK autonomous maintenance run via omp (GLM 5.3)
+# Bound retry: allow one restart per failure within an hour (initial start +
+# one retry), so transient failures (e.g. upstream connection refused) are
+# retried without an infinite loop on persistent breakage.
+StartLimitIntervalSec=1h
+StartLimitBurst=2
+OnFailure=notify-failure@%n.service
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/bin:/bin
+ExecStart=/home/carter/scripts/run_hyperliquid_sdk.sh
+TimeoutStartSec=3600
+Restart=on-failure
+RestartSec=5min
+MemoryHigh=2G
+MemoryMax=4G
+TasksMax=512
+NoNewPrivileges=true
+UMask=0077

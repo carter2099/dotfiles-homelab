@@ -1,0 +1,27 @@
+#!/bin/bash
+# rigsleep — put an online Windows gaming session to sleep.
+set -euo pipefail
+
+echo "Sending sleep signal to the pinned Windows host..."
+output=$(
+    ssh \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -o ControlMaster=no \
+        -o ControlPath=none \
+        -o ServerAliveInterval=2 \
+        -o ServerAliveCountMax=1 \
+        -o StrictHostKeyChecking=yes \
+        gamingrig-windows \
+        'rundll32.exe powrprof.dll,SetSuspendState 0,1,0' \
+        2>&1
+) && rc=0 || rc=$?
+
+if [[ "$rc" -eq 0 || "$rc" -eq 255 ]]; then
+    echo "Windows sleep command sent."
+    exit 0
+fi
+
+printf '%s\n' "$output" >&2
+echo "Windows sleep command failed with code $rc." >&2
+exit "$rc"

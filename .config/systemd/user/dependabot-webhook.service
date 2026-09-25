@@ -1,0 +1,20 @@
+[Unit]
+Description=Dependabot webhook receiver
+After=network.target
+OnFailure=notify-failure@%n.service
+
+[Service]
+Type=simple
+ExecStart=/home/carter/.local/bin/dependabot-webhook
+EnvironmentFile=/home/carter/.config/dependabot-webhook/env
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=15s
+MemoryHigh=4G
+MemoryMax=6G
+TasksMax=512
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

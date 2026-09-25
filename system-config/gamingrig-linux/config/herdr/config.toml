@@ -1,0 +1,13 @@
+onboarding = false
+
+[keys]
+prefix = "ctrl+space"
+split_horizontal = "prefix+\""
+split_vertical = "prefix+%"
+
+[theme]
+name = "one-dark"
+auto_switch = false
+
+[ui]
+show_agent_labels_on_pane_borders = true

@@ -1,0 +1,2604 @@
+{
+  "created_at": "2026-08-05T19:10:05.731085+00:00",
+  "endpoint": "http://localhost:8081/v1/chat/completions",
+  "method": "One unmeasured warm-up, then streamed requests with unique prompts. TTFT is POST start to the first non-empty content delta, excluding llama-swap loading-state text in reasoning_content. Final warm requests and cold-fixed model-swap requests use this definition; older cold requests under np2/final are retained but marked invalid.",
+  "models": [
+    {
+      "model": "ornith-1.0-35b-q8",
+      "tag": "np2",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.00887,
+        "ttft_seconds": null,
+        "elapsed_seconds": 31.292505,
+        "client_generation_seconds": 31.28355,
+        "client_tokens_per_second": 1.5343527429045327,
+        "content": "Reliable engineering rests on the integrity of data and the rigor of the scientific method. To ensure that systems perform as expected, we must adhere to three core principles:\n\n1. Measurements must be reproducible to establish trust. If an experiment",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: ornith-1.0-35b-q8\n\nFilling the key-value cache with the ghost of prompts past ............\nPolling for readiness in a loop that would make your CS professor weep .............\nApplying duct tape to the context window .......\nDone! (27.33s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 2199.231,
+          "prompt_per_token_ms": 26.819890243902442,
+          "prompt_per_second": 37.285760340773656,
+          "predicted_n": 48,
+          "predicted_ms": 1596.804,
+          "predicted_per_token_ms": 33.26675,
+          "predicted_per_second": 30.06004493976718
+        },
+        "error": null,
+        "ttft_seconds_raw_loading_state": 0.008956,
+        "ttft_valid": false,
+        "ttft_note": "Invalid for model TTFT: first delta was llama-swap loading-state text."
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.036111,
+          "ttft_seconds": 1.713079,
+          "elapsed_seconds": 7.23933,
+          "client_generation_seconds": 5.526251,
+          "client_tokens_per_second": 30.038445277823413,
+          "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or equipment error; when an experiment can be repeated with consistent outcomes, it establishes a reliable baseline of truth that others can verify and build upon.\n\n2. Recording failures is essential because they provide critical data on what does not work, preventing the repetition of mistakes and offering insights into system limits and edge cases that successful trials often obscure.\n\n3. Changing one variable at a time allows engineers to isolate cause and effect, ensuring that any observed change in the outcome can be definitively attributed to the specific factor being modified rather than a complex interaction of multiple variables.\n\nRecommendation: Adopt a rigorous documentation protocol where every test, including failed attempts and single-variable adjustments, is logged immediately to build a cumulative knowledge base for future engineering decisions.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 166,
+            "prompt_tokens": 81,
+            "total_tokens": 247,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1685.446,
+            "prompt_per_token_ms": 20.807975308641975,
+            "prompt_per_second": 48.05849608946238,
+            "predicted_n": 166,
+            "predicted_ms": 5526.061,
+            "predicted_per_token_ms": 33.28952409638554,
+            "predicted_per_second": 30.039480201177657
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 2,
+        "wall_seconds": 11.334333,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.08915,
+            "ttft_seconds": 1.765678,
+            "elapsed_seconds": 10.668252,
+            "client_generation_seconds": 8.902574,
+            "client_tokens_per_second": 19.432582263606943,
+            "content": "Reliable engineering rests on the foundation of empirical rigor, ensuring that systems perform consistently under defined conditions. To achieve this, three core principles must be observed:\n\n1. Measurements must be reproducible to establish trust in data; if results cannot be replicated by independent observers or repeated trials, they cannot serve as a valid basis for engineering decisions or quality control.\n2. Failures should be meticulously recorded because they provide critical insights into system weaknesses and edge cases, transforming setbacks into valuable learning opportunities that prevent recurrence and drive robust design improvements.\n3. Changing one variable at a time isolates cause and effect, allowing engineers to clearly attribute outcomes to specific factors rather than conflating multiple influences, which ensures that experimental conclusions are accurate and actionable.\n\nRecommendation: Implement a standardized logging protocol for all experimental variables and outcomes to ensure data integrity and facilitate continuous improvement.",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 173,
+              "prompt_tokens": 81,
+              "total_tokens": 254,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 1679.287,
+              "prompt_per_token_ms": 20.73193827160494,
+              "prompt_per_second": 48.23475677475023,
+              "predicted_n": 173,
+              "predicted_ms": 8902.217,
+              "predicted_per_token_ms": 51.45790173410405,
+              "predicted_per_second": 19.43336137503725
+            },
+            "error": null
+          },
+          {
+            "nonce": "concurrent-2",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.086207,
+            "ttft_seconds": 1.764792,
+            "elapsed_seconds": 11.328301,
+            "client_generation_seconds": 9.563509,
+            "client_tokens_per_second": 20.076313537213643,
+            "content": "Reliable engineering rests on the foundation of empirical rigor, ensuring that systems perform consistently under defined conditions. To achieve this, three core practices must be prioritized:\n\n1. **Measurements must be reproducible** to establish trust in data. If an experiment cannot be repeated with the same results, the findings are anecdotal rather than scientific, making it impossible to verify performance or diagnose issues with confidence.\n2. **Failures should be recorded** because they provide critical insights that successes often obscure. Documenting what went wrong creates a knowledge base that prevents the recurrence of errors and guides future design improvements.\n3. **Changing one variable at a time** ensures causal clarity. When multiple factors are altered simultaneously, it becomes impossible to determine which specific change led to the observed outcome, rendering the experiment inconclusive.\n\nRecommendation: Implement a standardized logging protocol that captures every measurement, failure, and experimental variable change to build a verifiable history of engineering",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 192,
+              "prompt_tokens": 81,
+              "total_tokens": 273,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 1683.506,
+              "prompt_per_token_ms": 20.784024691358027,
+              "prompt_per_second": 48.1138766360203,
+              "predicted_n": 192,
+              "predicted_ms": 9563.096,
+              "predicted_per_token_ms": 49.80779166666667,
+              "predicted_per_second": 20.07718002621745
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "qwen-3.6-35b-q8",
+      "tag": "np2",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.001588,
+        "ttft_seconds": null,
+        "elapsed_seconds": 34.191592,
+        "client_generation_seconds": 34.189955,
+        "client_tokens_per_second": 1.4039211059393286,
+        "content": "1. Measurements must be reproducible to establish trust in the data; if results cannot be consistently replicated under the same conditions, the findings are likely due to random error or bias rather than genuine engineering principles, rendering them useless for decision-making.",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: qwen-3.6-35b-q8\n\nInitializing 7B parameters by rolling 7B 16-sided dice ...........\nRunning inference on the concept of 'soon' to estimate remaining time .........\nRunning `nvidia-smi` and sighing heavily .......\nPopulating the context with filler while you wait for actual content ........\nDone! (30.12s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 2260.23,
+          "prompt_per_token_ms": 27.563780487804877,
+          "prompt_per_second": 36.27949367984674,
+          "predicted_n": 48,
+          "predicted_ms": 1641.702,
+          "predicted_per_token_ms": 34.202125,
+          "predicted_per_second": 29.237949396419083
+        },
+        "error": null,
+        "ttft_seconds_raw_loading_state": 0.001636,
+        "ttft_valid": false,
+        "ttft_note": "Invalid for model TTFT: first delta was llama-swap loading-state text."
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.030241,
+          "ttft_seconds": 1.692775,
+          "elapsed_seconds": 6.107205,
+          "client_generation_seconds": 4.414429,
+          "client_tokens_per_second": 29.22235068560656,
+          "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or experimental error, thereby establishing the reliability and validity of the engineering data.\n2. Recording failures is critical because they provide essential insights into system limitations and edge cases, allowing engineers to learn from mistakes and prevent recurrence in future designs.\n3. Changing only one variable at a time isolates the cause-and-effect relationship, ensuring that any observed changes in the outcome can be definitively attributed to that specific modification rather than external factors.\n\nRecommendation: Implement a standardized logging protocol for all experimental trials to capture both successful metrics and failure modes systematically.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 129,
+            "prompt_tokens": 81,
+            "total_tokens": 210,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1666.537,
+            "prompt_per_token_ms": 20.57453086419753,
+            "prompt_per_second": 48.60378137419091,
+            "predicted_n": 129,
+            "predicted_ms": 4414.211,
+            "predicted_per_token_ms": 34.21868992248062,
+            "predicted_per_second": 29.223795600165012
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 2,
+        "wall_seconds": 7.859781,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.100111,
+            "ttft_seconds": 1.836374,
+            "elapsed_seconds": 7.85903,
+            "client_generation_seconds": 6.022656,
+            "client_tokens_per_second": 22.58139873676941,
+            "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or experimental error, thereby establishing the reliability and validity of the engineering data.\n2. Recording failures is critical because they provide essential insights into system limitations and edge cases, allowing engineers to learn from mistakes and prevent recurrence in future designs.\n3. Changing only one variable at a time isolates the cause-and-effect relationship, ensuring that any observed outcome can be definitively attributed to that specific change rather than confounding factors.\n\nRecommendation: Implement a standardized documentation protocol that mandates the logging of all experimental conditions, including failed attempts, to build a robust knowledge base for continuous improvement.",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 136,
+              "prompt_tokens": 81,
+              "total_tokens": 217,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 1740.992,
+              "prompt_per_token_ms": 21.493728395061726,
+              "prompt_per_second": 46.52519942653384,
+              "predicted_n": 136,
+              "predicted_ms": 6022.234,
+              "predicted_per_token_ms": 44.28113235294118,
+              "predicted_per_second": 22.582981664279398
+            },
+            "error": null
+          },
+          {
+            "nonce": "concurrent-2",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.095214,
+            "ttft_seconds": 1.835521,
+            "elapsed_seconds": 7.814695,
+            "client_generation_seconds": 5.979174,
+            "client_tokens_per_second": 22.578369120318996,
+            "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or experimental error, thereby establishing the reliability and validity of the engineering data.\n2. Recording failures is critical because they provide essential insights into system limitations and edge cases, allowing engineers to learn from mistakes and prevent recurrence in future designs.\n3. Changing one variable at a time isolates the specific impact of each factor, ensuring that observed outcomes can be accurately attributed to the intended modification rather than confounding influences.\n\nRecommendation: Implement a standardized documentation protocol that mandates the logging of all experimental conditions, results, and anomalies to foster a culture of continuous improvement and data integrity.",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 135,
+              "prompt_tokens": 81,
+              "total_tokens": 216,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 1744.646,
+              "prompt_per_token_ms": 21.538839506172838,
+              "prompt_per_second": 46.42775669104219,
+              "predicted_n": 135,
+              "predicted_ms": 5978.954,
+              "predicted_per_token_ms": 44.288548148148145,
+              "predicted_per_second": 22.57920030828135
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "tag": "np2",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.003087,
+        "ttft_seconds": null,
+        "elapsed_seconds": 27.393529,
+        "client_generation_seconds": 27.3904,
+        "client_tokens_per_second": 1.7524387822712273,
+        "content": "Reliable engineering is built upon the foundation of predictable, verifiable data. To ensure that systems perform as intended under varying conditions, engineers must adhere to rigorous methodological standards.\n\n1. **Reproducibility of Measurements**: For a measurement to be",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: gemma-4-26b-q8\n\nComing soon: llama-swap v2 with actual performance improvements. Probably. .........\nDeciding which facts to hallucinate today ...........\nStaring at the abyss, the abyss is buffering .......\nDone! (23.20s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 1964.98,
+          "prompt_per_token_ms": 23.96317073170732,
+          "prompt_per_second": 41.730704638215144,
+          "predicted_n": 48,
+          "predicted_ms": 2076.885,
+          "predicted_per_token_ms": 43.268437500000005,
+          "predicted_per_second": 23.111534822582854,
+          "draft_n": 67,
+          "draft_n_accepted": 30
+        },
+        "error": null,
+        "ttft_seconds_raw_loading_state": 0.003128,
+        "ttft_valid": false,
+        "ttft_note": "Invalid for model TTFT: first delta was llama-swap loading-state text."
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.007855,
+          "ttft_seconds": 1.307983,
+          "elapsed_seconds": 8.885176,
+          "client_generation_seconds": 7.577193,
+          "client_tokens_per_second": 25.33919995694856,
+          "content": "Reliable engineering depends on the ability to predict outcomes and understand the underlying mechanics of a system. To achieve this, engineers must adhere to rigorous methodological standards.\n\n1. **Reproducibility of Measurements**: For a measurement to be meaningful, it must be consistent. If a result cannot be replicated under the same conditions, it is impossible to distinguish between a true signal and random noise. Reproducibility ensures that data is a reliable foundation for decision-making rather than a statistical anomaly.\n\n2. **Recording of Failures**: Failure is often the most informative data point in an engineering lifecycle. Documenting exactly how, when, and why a component fails provides the necessary evidence to identify edge cases and structural weaknesses. Without a formal record of failure, the same errors are destined to be repeated.\n\n3. **Single-Variable Testing**: Changing only one variable at a time allows an engineer to establish a direct causal link between an input and an output. When",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 1300.864,
+            "prompt_per_token_ms": 16.2608,
+            "prompt_per_second": 61.497589294499654,
+            "predicted_n": 192,
+            "predicted_ms": 7576.766,
+            "predicted_per_token_ms": 39.462322916666665,
+            "predicted_per_second": 25.34062685847762,
+            "draft_n": 253,
+            "draft_n_accepted": 127
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 2,
+        "wall_seconds": 14.16345,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.029289,
+            "ttft_seconds": 1.431886,
+            "elapsed_seconds": 13.809589,
+            "client_generation_seconds": 12.377703,
+            "client_tokens_per_second": 15.511763501576302,
+            "content": "Reliable engineering is built upon the foundation of predictable, verifiable data. To ensure that systems perform as intended under real-world conditions, engineers must adhere to rigorous methodological standards.\n\n1. **The Necessity of Reproducibility**: Measurements must be reproducible to ensure that data is a true reflection of physical reality rather than a statistical anomaly or an error in instrumentation. If a result cannot be replicated by different operators or under similar conditions, it cannot be used to validate a design or certify safety.\n\n2. **The Importance of Recording Failures**: Documenting failures is essential for understanding the boundaries of a system's operational envelope. A recorded failure provides a roadmap for identifying root causes, preventing the repetition of costly mistakes, and uncovering latent vulnerabilities that might otherwise remain hidden until a catastrophic event occurs.\n\n3. **The Value of Single-Variable Testing**: Changing only one variable at a time during an experiment isolates the specific cause of an effect. When multiple factors",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 192,
+              "prompt_tokens": 81,
+              "total_tokens": 273,
+              "prompt_tokens_details": {
+                "cached_tokens": 1
+              }
+            },
+            "timings": {
+              "cache_n": 1,
+              "prompt_n": 80,
+              "prompt_ms": 1403.461,
+              "prompt_per_token_ms": 17.5432625,
+              "prompt_per_second": 57.00194020353968,
+              "predicted_n": 192,
+              "predicted_ms": 12377.041,
+              "predicted_per_token_ms": 64.46375520833332,
+              "predicted_per_second": 15.512593034150893,
+              "draft_n": 281,
+              "draft_n_accepted": 120
+            },
+            "error": null
+          },
+          {
+            "nonce": "concurrent-2",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.02762,
+            "ttft_seconds": 1.430573,
+            "elapsed_seconds": 14.162542,
+            "client_generation_seconds": 12.731969,
+            "client_tokens_per_second": 15.080150073976556,
+            "content": "Reliable engineering is built upon the foundation of rigorous data and disciplined methodology. To ensure systems are safe, predictable, and efficient, engineers must adhere to the following principles:\n\n1. **Reproducibility ensures validity.** A measurement is only meaningful if it can be repeated with consistent results under the same conditions. If a value fluctuates without a clear cause, it indicates either faulty instrumentation or an uncontrolled environmental factor, making it impossible to establish a reliable baseline for design.\n\n2. **Failure documentation prevents recurrence.** Recording failures is not merely an exercise in accounting; it is a critical tool for root cause analysis. By documenting exactly how, when, and why a component failed, engineers can identify systemic weaknesses and implement preventative design changes that stop the same error from propagating through future iterations.\n\n3. **Isolating variables clarifies causality.** Changing only one variable at a time allows an engineer to establish a direct relationship between a specific input and its resulting output. When",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 192,
+              "prompt_tokens": 81,
+              "total_tokens": 273,
+              "prompt_tokens_details": {
+                "cached_tokens": 1
+              }
+            },
+            "timings": {
+              "cache_n": 1,
+              "prompt_n": 80,
+              "prompt_ms": 1403.858,
+              "prompt_per_token_ms": 17.548225,
+              "prompt_per_second": 56.98582050321329,
+              "predicted_n": 192,
+              "predicted_ms": 12731.436,
+              "predicted_per_token_ms": 66.3095625,
+              "predicted_per_second": 15.08078114676145,
+              "draft_n": 293,
+              "draft_n_accepted": 117
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "tag": "np2",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.003635,
+        "ttft_seconds": null,
+        "elapsed_seconds": 9.337662,
+        "client_generation_seconds": 9.333969,
+        "client_tokens_per_second": 5.142506738870404,
+        "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, functional, and scalable, engineers must adhere to rigorous testing protocols.\n\n1. **Reproducibility of Measurements**\nA measurement",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: gemma-4-12b-q5\n\nManually untangling the residual connections with a tiny comb .........\nDone! (8.59s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 136.427,
+          "prompt_per_token_ms": 1.6637439024390244,
+          "prompt_per_second": 601.0540435544284,
+          "predicted_n": 48,
+          "predicted_ms": 473.219,
+          "predicted_per_token_ms": 9.858729166666667,
+          "predicted_per_second": 101.43295176229188,
+          "draft_n": 55,
+          "draft_n_accepted": 32
+        },
+        "error": null,
+        "ttft_seconds_raw_loading_state": 0.003693,
+        "ttft_valid": false,
+        "ttft_note": "Invalid for model TTFT: first delta was llama-swap loading-state text."
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.006679,
+          "ttft_seconds": 0.080088,
+          "elapsed_seconds": 2.083319,
+          "client_generation_seconds": 2.003231,
+          "client_tokens_per_second": 95.84516735563656,
+          "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, functional, and scalable, engineers must adhere to the following principles:\n\n1. **Reproducibility of Measurements:** A measurement is only useful if it can be verified. If a result cannot be replicated under the same conditions, it is indistinguishable from noise or error. Reproducibility ensures that data is objective rather than anecdotal, allowing for the establishment of baseline standards and the validation of new designs.\n\n2. **Documentation of Failures:** Recording failures is as critical as recording successes. Every malfunction provides a data point that defines the boundaries of a system's operational limits. By documenting why and how a component failed, engineers can perform root-cause analysis, prevent recurrence, and develop more robust safety margins in future iterations.\n\n3. **Isolation of Variables:** Changing multiple factors simultaneously makes it impossible to determine which specific change caused the observed effect",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 74.619,
+            "prompt_per_token_ms": 0.9327375,
+            "prompt_per_second": 1072.1130007102747,
+            "predicted_n": 192,
+            "predicted_ms": 2003.087,
+            "predicted_per_token_ms": 10.432744791666666,
+            "predicted_per_second": 95.85205235718668,
+            "draft_n": 260,
+            "draft_n_accepted": 125
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 2,
+        "wall_seconds": 2.701077,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.026093,
+            "ttft_seconds": 0.142271,
+            "elapsed_seconds": 2.700303,
+            "client_generation_seconds": 2.558032,
+            "client_tokens_per_second": 75.05768725687793,
+            "content": "Reliable engineering is built upon the foundation of empirical consistency and systematic observation. To ensure that designs are safe, functional, and scalable, engineers must adhere to rigorous testing protocols.\n\n1. **Reproducibility of Measurements**\nMeasurements must be reproducible to validate that a result is a true property of the system rather than a statistical anomaly or a measurement error. If a test cannot be repeated with the same outcome under identical conditions, the data is unreliable for making engineering decisions, as it fails to provide a stable baseline for performance expectations.\n\n2. **Recording of Failures**\nDocumenting failures is critical for identifying patterns, root causes, and systemic weaknesses. A recorded failure serves as a diagnostic tool that prevents the recurrence of the same issue and provides a knowledge base for future designs. Without a formal record, engineers risk repeating costly mistakes and overlooking subtle trends that indicate looming structural or functional risks.\n\n3. **Isolation of Variables**\nChanging only one",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 192,
+              "prompt_tokens": 81,
+              "total_tokens": 273,
+              "prompt_tokens_details": {
+                "cached_tokens": 1
+              }
+            },
+            "timings": {
+              "cache_n": 1,
+              "prompt_n": 80,
+              "prompt_ms": 117.533,
+              "prompt_per_token_ms": 1.4691625,
+              "prompt_per_second": 680.6598997728298,
+              "predicted_n": 192,
+              "predicted_ms": 2557.638,
+              "predicted_per_token_ms": 13.321031249999999,
+              "predicted_per_second": 75.06926312480499,
+              "draft_n": 309,
+              "draft_n_accepted": 113
+            },
+            "error": null
+          },
+          {
+            "nonce": "concurrent-2",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.028024,
+            "ttft_seconds": 0.14259,
+            "elapsed_seconds": 2.50063,
+            "client_generation_seconds": 2.358039,
+            "client_tokens_per_second": 81.4235766337787,
+            "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, functional, and scalable, engineers must adhere to rigorous testing protocols.\n\n1. **Reproducibility of Measurements**\nMeasurements must be reproducible to validate that a result is a true property of the system rather than a statistical anomaly or a measurement error. If a result cannot be replicated under the same conditions, it cannot be used to establish a baseline, verify a design, or ensure consistent manufacturing quality.\n\n2. **Recording of Failures**\nDocumenting failures is as critical as recording successes. A failure provides a diagnostic map of a system's limitations and identifies specific points of weakness. By maintaining a detailed record of what went wrong, engineers can perform root-cause analysis, prevent recurring issues, and develop preventative measures that enhance overall system resilience.\n\n3. **Isolation of Variables**\nChanging only one variable at a time is essential for",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 192,
+              "prompt_tokens": 81,
+              "total_tokens": 273,
+              "prompt_tokens_details": {
+                "cached_tokens": 1
+              }
+            },
+            "timings": {
+              "cache_n": 1,
+              "prompt_n": 80,
+              "prompt_ms": 115.774,
+              "prompt_per_token_ms": 1.447175,
+              "prompt_per_second": 691.0014338279751,
+              "predicted_n": 192,
+              "predicted_ms": 2357.502,
+              "predicted_per_token_ms": 12.27865625,
+              "predicted_per_second": 81.44213663445461,
+              "draft_n": 283,
+              "draft_n_accepted": 119
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "tag": "np2",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.001752,
+        "ttft_seconds": null,
+        "elapsed_seconds": 8.342635,
+        "client_generation_seconds": 8.340826,
+        "client_tokens_per_second": 5.754825526528451,
+        "content": "In the pursuit of reliable engineering, rigorous methodology transforms raw data into actionable truth. First, measurements must be reproducible because consistency across repeated trials is the only way to distinguish genuine physical phenomena from random noise or observer bias; without this repeatab",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: ornith-1.0-9b-q6\n\nSpinning up the cloud GPU, please be patient while we burn your credits ........\nDone! (7.37s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 158.113,
+          "prompt_per_token_ms": 1.9282073170731708,
+          "prompt_per_second": 518.6164325514031,
+          "predicted_n": 48,
+          "predicted_ms": 657.014,
+          "predicted_per_token_ms": 13.687791666666667,
+          "predicted_per_second": 73.05780394329497
+        },
+        "error": null,
+        "ttft_seconds_raw_loading_state": 0.001809,
+        "ttft_valid": false,
+        "ttft_note": "Invalid for model TTFT: first delta was llama-swap loading-state text."
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.029165,
+          "ttft_seconds": 0.084272,
+          "elapsed_seconds": 2.313791,
+          "client_generation_seconds": 2.229519,
+          "client_tokens_per_second": 72.66141750721293,
+          "content": "In the pursuit of reliable engineering, rigorous methodology serves as the foundation for trust and safety. First, measurements must be reproducible because they provide the empirical evidence needed to validate designs; if results cannot be consistently replicated under similar conditions, any conclusions drawn are merely speculation rather than fact. Second, failures should be meticulously recorded because every breakdown contains critical data about material limits, design flaws, or environmental stressors that, when analyzed, prevent recurrence and drive continuous improvement. Third, changing one variable at a time isolates cause-and-effect relationships, ensuring that observed outcomes can be definitively attributed to a specific change rather than an ambiguous combination of factors.\n\n**Recommendation:** Establish a mandatory documentation protocol where every experiment logs all inputs, outputs, and anomalies to ensure full traceability from design intent to final performance.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 162,
+            "prompt_tokens": 81,
+            "total_tokens": 243,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 59.285,
+            "prompt_per_token_ms": 0.7319135802469136,
+            "prompt_per_second": 1366.2815214641141,
+            "predicted_n": 162,
+            "predicted_ms": 2229.316,
+            "predicted_per_token_ms": 13.761209876543209,
+            "predicted_per_second": 72.66802911745128
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 2,
+        "wall_seconds": 3.069697,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.065464,
+            "ttft_seconds": 0.167225,
+            "elapsed_seconds": 3.0689,
+            "client_generation_seconds": 2.901676,
+            "client_tokens_per_second": 63.75626496832644,
+            "content": "In the pursuit of reliable engineering, rigorous methodology serves as the foundation for trust and safety. First, measurements must be reproducible because only when independent observers can arrive at the same results can data be considered valid evidence rather than random noise or observer bias; without reproducibility, no design decision can be confidently justified. Second, failures should be meticulously recorded because every breakdown contains critical diagnostic information about material limits, environmental stressors, and design flaws that, if ignored, risk repeating the same catastrophe under different conditions. Third, changing one variable at a time improves an experiment by isolating cause-and-effect relationships, ensuring that any observed outcome can be definitively attributed to the specific change made rather than a confounding interaction between multiple factors.\n\n**Recommendation:** Adopt a standardized protocol where every test run logs environmental conditions, raw data, and failure modes in real time to ensure full traceability and reproducibility across all engineering teams.",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 185,
+              "prompt_tokens": 81,
+              "total_tokens": 266,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 103.414,
+              "prompt_per_token_ms": 1.276716049382716,
+              "prompt_per_second": 783.2595199876225,
+              "predicted_n": 185,
+              "predicted_ms": 2901.295,
+              "predicted_per_token_ms": 15.682675675675677,
+              "predicted_per_second": 63.76462924314832
+            },
+            "error": null
+          },
+          {
+            "nonce": "concurrent-2",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.063808,
+            "ttft_seconds": 0.165697,
+            "elapsed_seconds": 2.815746,
+            "client_generation_seconds": 2.650048,
+            "client_tokens_per_second": 63.39507011269726,
+            "content": "In the pursuit of reliable engineering, rigorous methodology serves as the foundation for trust and safety. First, measurements must be reproducible because they provide the empirical evidence needed to validate designs; if results cannot be consistently replicated under similar conditions, any conclusions drawn are merely speculation rather than fact. Second, failures should be meticulously recorded because every breakdown contains critical data about material limits, design flaws, or environmental stressors that, when analyzed, prevent recurrence and drive continuous improvement. Third, changing one variable at a time isolates cause-and-effect relationships, ensuring that observed outcomes can be definitively attributed to a specific change rather than a confusing interplay of multiple factors.\n\n**Recommendation:** Adopt a standardized protocol where every test run logs environmental conditions, input parameters, and full failure modes to ensure that future experiments build upon verified, reproducible data.",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 168,
+              "prompt_tokens": 81,
+              "total_tokens": 249,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 103.768,
+              "prompt_per_token_ms": 1.2810864197530865,
+              "prompt_per_second": 780.5874643435355,
+              "predicted_n": 168,
+              "predicted_ms": 2649.781,
+              "predicted_per_token_ms": 15.772505952380952,
+              "predicted_per_second": 63.40146600794556
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "tag": "final",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.003596,
+        "ttft_seconds": null,
+        "elapsed_seconds": 33.232612,
+        "client_generation_seconds": 33.228833,
+        "client_tokens_per_second": 1.4445286165549034,
+        "content": "Reliable engineering rests on the integrity of data and the rigor of the scientific method. To ensure that systems perform as expected, we must adhere to three core principles:\n\n1. Measurements must be reproducible to establish trust. If an experiment",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: ornith-1.0-35b-q8\n\nUnpacking the blobs. All 300GB of them. .........\nDid you know loading screens were invented to prevent users from smashing their monitors? Now you do. .............\nHot swapping your sanity for an LLM ........\nWe could have used a smaller model but someone wanted 'quality' ....\nDone! (29.30s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 2210.958,
+          "prompt_per_token_ms": 26.96290243902439,
+          "prompt_per_second": 37.08799533957678,
+          "predicted_n": 48,
+          "predicted_ms": 1552.772,
+          "predicted_per_token_ms": 32.34941666666666,
+          "predicted_per_second": 30.91245849358438
+        },
+        "error": null,
+        "ttft_seconds_raw_loading_state": 0.003779,
+        "ttft_valid": false,
+        "ttft_note": "Invalid for model TTFT: first delta was llama-swap loading-state text."
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.032375,
+          "ttft_seconds": 1.629752,
+          "elapsed_seconds": 7.008461,
+          "client_generation_seconds": 5.378709,
+          "client_tokens_per_second": 30.86242297025465,
+          "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or equipment error; when an experiment can be repeated with consistent outcomes, it establishes a reliable baseline of truth that others can verify and build upon.\n\n2. Recording failures is essential because they provide critical data on what does not work, preventing the repetition of mistakes and offering insights into system limits and edge cases that successful trials often obscure.\n\n3. Changing one variable at a time allows engineers to isolate cause and effect, ensuring that any observed change in the outcome can be definitively attributed to the specific factor being modified rather than a complex interaction of multiple variables.\n\nRecommendation: Adopt a rigorous documentation protocol where every test, including failed attempts and single-variable adjustments, is logged immediately to build a cumulative knowledge base for future engineering decisions.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 166,
+            "prompt_tokens": 81,
+            "total_tokens": 247,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1601.772,
+            "prompt_per_token_ms": 19.774962962962963,
+            "prompt_per_second": 50.56899483821668,
+            "predicted_n": 166,
+            "predicted_ms": 5378.437,
+            "predicted_per_token_ms": 32.400222891566266,
+            "predicted_per_second": 30.863985206110993
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-2",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.06527,
+          "ttft_seconds": 1.660297,
+          "elapsed_seconds": 7.915506,
+          "client_generation_seconds": 6.255209,
+          "client_tokens_per_second": 30.694415973459613,
+          "content": "Reliable engineering rests on the foundation of rigorous experimental discipline. To ensure that systems perform as expected under varying conditions, we must adhere to three core principles:\n\n1. **Measurements must be reproducible** to establish trust in the data. If an experiment cannot be repeated with the same results, the findings are anecdotal rather than scientific, making it impossible to distinguish between genuine performance characteristics and random noise.\n2. **Failures should be recorded** because they provide critical insights that successes often obscure. Documenting what went wrong allows teams to identify root causes, prevent recurrence, and refine design margins, turning setbacks into valuable learning opportunities.\n3. **Changing one variable at a time** ensures that any observed effect can be clearly attributed to a specific cause. This isolation prevents confounding factors from masking the true relationship between inputs and outputs, allowing for precise and actionable conclusions.\n\n**Recommendation:** Implement a standardized logging protocol that mandates the documentation of",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1598.663,
+            "prompt_per_token_ms": 19.73658024691358,
+            "prompt_per_second": 50.66733889506419,
+            "predicted_n": 192,
+            "predicted_ms": 6254.938,
+            "predicted_per_token_ms": 32.57780208333333,
+            "predicted_per_second": 30.695747903496404
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-3",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.066345,
+          "ttft_seconds": 1.652896,
+          "elapsed_seconds": 7.873664,
+          "client_generation_seconds": 6.220768,
+          "client_tokens_per_second": 30.86435621373189,
+          "content": "Reliable engineering rests on the foundation of rigorous experimental discipline. To ensure that systems perform as expected under varying conditions, we must adhere to three core principles:\n\n1. **Measurements must be reproducible** to establish trust in the data. If an experiment cannot be repeated with the same results, the findings are anecdotal rather than scientific, making it impossible to distinguish between genuine performance characteristics and random noise.\n2. **Failures should be recorded** because they provide critical insights that successes often obscure. Documenting what went wrong allows teams to identify root causes, prevent recurrence, and refine design margins, turning setbacks into valuable learning opportunities.\n3. **Changing one variable at a time** ensures that any observed effect can be clearly attributed to a specific cause. This isolation prevents confounding factors from masking the true relationship between inputs and outputs, leading to more accurate and actionable conclusions.\n\n**Recommendation:** Implement a standardized logging protocol that mandates the documentation",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1590.205,
+            "prompt_per_token_ms": 19.63216049382716,
+            "prompt_per_second": 50.936828899418636,
+            "predicted_n": 192,
+            "predicted_ms": 6220.501,
+            "predicted_per_token_ms": 32.398442708333334,
+            "predicted_per_second": 30.865681076170553
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-4",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.083723,
+          "ttft_seconds": 1.669625,
+          "elapsed_seconds": 7.916539,
+          "client_generation_seconds": 6.246914,
+          "client_tokens_per_second": 30.73517447199143,
+          "content": "Reliable engineering rests on the foundation of rigorous experimental discipline. To ensure that systems perform as expected under varying conditions, we must adhere to three core principles:\n\n1. **Measurements must be reproducible** to establish trust in the data. If an experiment cannot be repeated with the same results, the findings are anecdotal rather than scientific, making it impossible to distinguish between a genuine phenomenon and random noise.\n2. **Failures should be recorded** because they provide critical insights that successes often obscure. Documenting what went wrong allows teams to identify root causes, prevent recurrence, and refine designs, turning setbacks into valuable learning opportunities.\n3. **Changing one variable at a time** ensures that any observed effect can be clearly attributed to a specific cause. This isolation prevents confounding factors from muddying the results, allowing for precise diagnosis and effective optimization.\n\n**Recommendation:** Implement a standardized logging protocol that captures every measurement, failure, and",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1589.639,
+            "prompt_per_token_ms": 19.62517283950617,
+            "prompt_per_second": 50.95496524682648,
+            "predicted_n": 192,
+            "predicted_ms": 6246.621,
+            "predicted_per_token_ms": 32.534484375,
+            "predicted_per_second": 30.736617444855387
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-5",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.088778,
+          "ttft_seconds": 1.68477,
+          "elapsed_seconds": 7.899885,
+          "client_generation_seconds": 6.215115,
+          "client_tokens_per_second": 30.892428685673984,
+          "content": "Reliable engineering rests on the foundation of rigorous experimental discipline. To ensure that systems perform as expected under varying conditions, we must adhere to three core principles:\n\n1. **Measurements must be reproducible** to establish trust in the data. If an experiment cannot be repeated with the same results, the findings are anecdotal rather than scientific, making it impossible to distinguish between genuine performance characteristics and random noise.\n2. **Failures should be recorded** because they provide critical insights that successes often obscure. Documenting what went wrong allows teams to identify root causes, prevent recurrence, and refine design margins, turning setbacks into valuable learning opportunities.\n3. **Changing one variable at a time** ensures that any observed effect can be clearly attributed to a specific cause. This isolation prevents confounding factors from masking the true relationship between inputs and outputs, thereby maintaining the integrity of the experimental conclusion.\n\n**Recommendation:** Adopt a standardized logging protocol that captures every",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1599.45,
+            "prompt_per_token_ms": 19.746296296296297,
+            "prompt_per_second": 50.642408327862704,
+            "predicted_n": 192,
+            "predicted_ms": 6214.838,
+            "predicted_per_token_ms": 32.36894791666666,
+            "predicted_per_second": 30.89380608151009
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 1,
+        "wall_seconds": 6.486579,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.073495,
+            "ttft_seconds": 1.664475,
+            "elapsed_seconds": 6.484298,
+            "client_generation_seconds": 4.819824,
+            "client_tokens_per_second": 30.913992431774716,
+            "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or specific environmental anomalies, thereby establishing a baseline of trust in the data that supports sound engineering decisions.\n2. Recording failures is essential because they provide critical insights into system limits and edge cases, allowing teams to learn from mistakes and prevent similar issues from recurring in future projects.\n3. Changing one variable at a time isolates the cause-and-effect relationship, ensuring that any observed change in the outcome can be definitively attributed to the specific factor being tested rather than a confounding interaction.\n\nRecommendation: Implement a standardized documentation protocol that mandates the recording of all experimental conditions, outcomes, and deviations to build a cumulative knowledge base for your team.",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 149,
+              "prompt_tokens": 81,
+              "total_tokens": 230,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 1594.547,
+              "prompt_per_token_ms": 19.685765432098766,
+              "prompt_per_second": 50.79812636441572,
+              "predicted_n": 149,
+              "predicted_ms": 4819.564,
+              "predicted_per_token_ms": 32.34606711409396,
+              "predicted_per_second": 30.91565959078456
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "qwen-3.6-35b-q8",
+      "tag": "final",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.001324,
+        "ttft_seconds": null,
+        "elapsed_seconds": 34.676043,
+        "client_generation_seconds": 34.674691,
+        "client_tokens_per_second": 1.384294953117148,
+        "content": "1. Measurements must be reproducible to establish trust in the data; if results cannot be consistently replicated under the same conditions, the findings are likely due to random error or bias rather than genuine engineering principles, rendering them useless for decision-making.",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: qwen-3.6-35b-q8\n\nAdjusting temperatures: model is 0.7, server room is 104\u00b0F ..........\nPlease enjoy this elevator music in your head ..........\nDid you know loading screens were invented to prevent users from smashing their monitors? Now you do. .............\nSimulating deep thought by pausing dramatically ...\nDone! (30.66s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 2241.054,
+          "prompt_per_token_ms": 27.329926829268295,
+          "prompt_per_second": 36.5899259901814,
+          "predicted_n": 48,
+          "predicted_ms": 1609.511,
+          "predicted_per_token_ms": 33.531479166666664,
+          "predicted_per_second": 29.822722553620324
+        },
+        "error": null,
+        "ttft_seconds_raw_loading_state": 0.001352,
+        "ttft_valid": false,
+        "ttft_note": "Invalid for model TTFT: first delta was llama-swap loading-state text."
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.030736,
+          "ttft_seconds": 1.678613,
+          "elapsed_seconds": 6.012075,
+          "client_generation_seconds": 4.333462,
+          "client_tokens_per_second": 29.768350230613972,
+          "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or experimental error, thereby establishing the reliability and validity of the engineering data.\n2. Recording failures is critical because they provide essential insights into system limitations and edge cases, allowing engineers to learn from mistakes and prevent recurrence in future designs.\n3. Changing only one variable at a time isolates the cause-and-effect relationship, ensuring that any observed changes in the outcome can be definitively attributed to that specific modification rather than external factors.\n\nRecommendation: Implement a standardized logging protocol for all experimental trials to capture both successful metrics and failure modes systematically.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 129,
+            "prompt_tokens": 81,
+            "total_tokens": 210,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1652.03,
+            "prompt_per_token_ms": 20.395432098765433,
+            "prompt_per_second": 49.03058661162328,
+            "predicted_n": 129,
+            "predicted_ms": 4333.341,
+            "predicted_per_token_ms": 33.59179069767442,
+            "predicted_per_second": 29.769178100684893
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-2",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.077606,
+          "ttft_seconds": 1.722499,
+          "elapsed_seconds": 6.357209,
+          "client_generation_seconds": 4.63471,
+          "client_tokens_per_second": 29.775324829843715,
+          "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or experimental error, thereby establishing the reliability and validity of the engineering data.\n2. Recording failures is critical because they provide essential insights into system limitations and edge cases, allowing engineers to learn from mistakes and prevent recurrence in future designs.\n3. Changing only one variable at a time isolates the cause-and-effect relationship, ensuring that any observed changes in the outcome can be definitively attributed to that specific modification rather than external factors.\n\nRecommendation: Implement a standardized documentation protocol that mandates the logging of all experimental conditions, including failed attempts, to build a robust knowledge base for continuous improvement.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 138,
+            "prompt_tokens": 81,
+            "total_tokens": 219,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1648.628,
+            "prompt_per_token_ms": 20.35343209876543,
+            "prompt_per_second": 49.13176289617791,
+            "predicted_n": 138,
+            "predicted_ms": 4634.636,
+            "predicted_per_token_ms": 33.58431884057971,
+            "predicted_per_second": 29.775801163241297
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-3",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.07929,
+          "ttft_seconds": 1.725696,
+          "elapsed_seconds": 6.053027,
+          "client_generation_seconds": 4.327331,
+          "client_tokens_per_second": 29.810523157029046,
+          "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or equipment error, thereby establishing the reliability and validity of the engineering data.\n2. Recording failures is critical because they provide essential insights into system limitations and edge cases, allowing engineers to learn from mistakes and prevent recurrence in future designs.\n3. Changing only one variable at a time isolates the cause-and-effect relationship, ensuring that any observed changes in the outcome can be definitively attributed to that specific adjustment rather than external factors.\n\nRecommendation: Implement a standardized logging protocol for all experimental trials to capture both successful metrics and failure modes systematically.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 129,
+            "prompt_tokens": 81,
+            "total_tokens": 210,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1650.18,
+            "prompt_per_token_ms": 20.372592592592593,
+            "prompt_per_second": 49.08555430316692,
+            "predicted_n": 129,
+            "predicted_ms": 4327.026,
+            "predicted_per_token_ms": 33.54283720930233,
+            "predicted_per_second": 29.81262419037926
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-4",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.068745,
+          "ttft_seconds": 1.732274,
+          "elapsed_seconds": 6.011638,
+          "client_generation_seconds": 4.279364,
+          "client_tokens_per_second": 29.67730729953385,
+          "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or experimental error, thereby establishing the reliability and validity of the engineering data.\n2. Recording failures is critical because they provide valuable insights into system limitations and edge cases, allowing engineers to learn from mistakes and prevent recurrence in future designs.\n3. Changing only one variable at a time isolates the specific impact of that variable, making it possible to draw clear, causal conclusions about how changes affect the overall system performance.\n\nRecommendation: Implement a standardized logging protocol for all experimental variables and outcomes to ensure data integrity and facilitate continuous improvement.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 127,
+            "prompt_tokens": 81,
+            "total_tokens": 208,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1667.298,
+            "prompt_per_token_ms": 20.583925925925925,
+            "prompt_per_second": 48.58159729094619,
+            "predicted_n": 127,
+            "predicted_ms": 4279.123,
+            "predicted_per_token_ms": 33.69388188976377,
+            "predicted_per_second": 29.678978613141062
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-5",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.06992,
+          "ttft_seconds": 1.711904,
+          "elapsed_seconds": 6.272234,
+          "client_generation_seconds": 4.56033,
+          "client_tokens_per_second": 29.603118730034517,
+          "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or experimental error, thereby establishing the reliability and validity of the engineering data.\n2. Recording failures is critical because they provide valuable insights into system limitations and edge cases, allowing engineers to learn from mistakes and prevent recurrence in future designs.\n3. Changing one variable at a time isolates the specific impact of each factor, ensuring that observed outcomes can be directly attributed to the intended modification rather than confounding influences.\n\nRecommendation: Implement a standardized documentation protocol that mandates the logging of all experimental variables, outcomes, and anomalies to foster a culture of continuous improvement and data integrity.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 135,
+            "prompt_tokens": 81,
+            "total_tokens": 216,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1645.811,
+            "prompt_per_token_ms": 20.318654320987655,
+            "prompt_per_second": 49.21585771391733,
+            "predicted_n": 135,
+            "predicted_ms": 4560.058,
+            "predicted_per_token_ms": 33.77820740740741,
+            "predicted_per_second": 29.604886604512483
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 1,
+        "wall_seconds": 6.414779,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.072786,
+            "ttft_seconds": 1.741023,
+            "elapsed_seconds": 6.414097,
+            "client_generation_seconds": 4.673073,
+            "client_tokens_per_second": 29.744878112009815,
+            "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or experimental error, thereby establishing the reliability and validity of the engineering data.\n2. Recording failures is critical because they provide essential insights into system limitations and root causes, allowing engineers to learn from mistakes and prevent recurrence in future designs.\n3. Changing only one variable at a time isolates the specific impact of that variable, ensuring that any observed changes in the outcome can be accurately attributed to the intended modification rather than external factors.\n\nRecommendation: Implement a standardized documentation protocol that mandates the logging of all experimental conditions, including failed attempts, to build a comprehensive knowledge base for future engineering decisions.",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 139,
+              "prompt_tokens": 81,
+              "total_tokens": 220,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 1671.218,
+              "prompt_per_token_ms": 20.63232098765432,
+              "prompt_per_second": 48.4676445562458,
+              "predicted_n": 139,
+              "predicted_ms": 4672.974,
+              "predicted_per_token_ms": 33.61851798561151,
+              "predicted_per_second": 29.745511102779513
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "tag": "final",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.001357,
+        "ttft_seconds": null,
+        "elapsed_seconds": 26.574101,
+        "client_generation_seconds": 26.572698,
+        "client_tokens_per_second": 1.806365288133544,
+        "content": "Reliable engineering is built upon the foundation of predictable, verifiable data. To ensure that systems perform as intended under varying conditions, engineers must adhere to rigorous methodological standards.\n\n1. **Reproducibility of Measurements**: For a measurement to be",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: gemma-4-26b-q8\n\nStill faster than your last standup meeting ...........\nIf you stare at the spinner, it spins slower. It's science. .......\nRemembering everything it forgot during quantization ........\nDone! (22.33s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 1998.326,
+          "prompt_per_token_ms": 24.369829268292683,
+          "prompt_per_second": 41.03434574739056,
+          "predicted_n": 48,
+          "predicted_ms": 2100.288,
+          "predicted_per_token_ms": 43.756,
+          "predicted_per_second": 22.85400859310723,
+          "draft_n": 67,
+          "draft_n_accepted": 30
+        },
+        "error": null,
+        "ttft_seconds_raw_loading_state": 0.001403,
+        "ttft_valid": false,
+        "ttft_note": "Invalid for model TTFT: first delta was llama-swap loading-state text."
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.00596,
+          "ttft_seconds": 1.400779,
+          "elapsed_seconds": 8.901568,
+          "client_generation_seconds": 7.500789,
+          "client_tokens_per_second": 25.597306630887815,
+          "content": "Reliable engineering depends on the ability to predict outcomes and understand the underlying mechanics of a system. To achieve this, engineers must adhere to rigorous methodological standards.\n\n1. **Reproducibility of Measurements**: For a measurement to be meaningful, it must be consistent. If a result cannot be replicated under the same conditions, it is impossible to distinguish between a true signal and random noise. Reproducibility ensures that data is a reliable foundation for decision-making rather than a statistical anomaly.\n\n2. **Recording of Failures**: Failure is often the most informative data point in an engineering lifecycle. Documenting exactly how, when, and why a component fails provides the necessary evidence to identify edge cases and structural weaknesses. Without a formal record of failure, the same errors are destined to be repeated.\n\n3. **Single-Variable Testing**: Changing only one variable at a time allows an engineer to establish a direct causal link between an input and an output. When",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 1395.553,
+            "prompt_per_token_ms": 17.444412500000002,
+            "prompt_per_second": 57.32494573835605,
+            "predicted_n": 192,
+            "predicted_ms": 7500.178,
+            "predicted_per_token_ms": 39.06342708333333,
+            "predicted_per_second": 25.599392441086064,
+            "draft_n": 253,
+            "draft_n_accepted": 127
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-2",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.016501,
+          "ttft_seconds": 1.332142,
+          "elapsed_seconds": 9.916362,
+          "client_generation_seconds": 8.584221,
+          "client_tokens_per_second": 22.366620122503996,
+          "content": "Reliable engineering is built upon the foundation of rigorous data and disciplined methodology. To ensure systems are safe, predictable, and efficient, engineers must adhere to the following principles:\n\n1. **Reproducibility ensures validity.** A measurement is only useful if it can be repeated with consistent results under the same conditions. If a value cannot be reproduced, it is likely an outlier or the result of measurement error rather than a true property of the system. Reproducibility provides the confidence necessary to make design decisions based on empirical data.\n\n2. **Failure recording enables learning.** Every failure contains critical information about the limits of a system or the flaws in a process. By documenting exactly how, when, and why a component failed, engineers can identify root causes and implement preventative measures. Ignoring failures allows the same mistakes to be repeated, leading to systemic instability.\n\n3. **Single-variable testing isolates causality.** When conducting experiments, changing only one variable at a time",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 1316.494,
+            "prompt_per_token_ms": 16.456174999999998,
+            "prompt_per_second": 60.76746266978809,
+            "predicted_n": 192,
+            "predicted_ms": 8583.46,
+            "predicted_per_token_ms": 44.70552083333333,
+            "predicted_per_second": 22.368601939078182,
+            "draft_n": 288,
+            "draft_n_accepted": 119
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-3",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.019791,
+          "ttft_seconds": 1.304235,
+          "elapsed_seconds": 9.212463,
+          "client_generation_seconds": 7.908228,
+          "client_tokens_per_second": 24.278511665846324,
+          "content": "Reliable engineering is built upon the foundation of predictable, verifiable data. To ensure systems perform as intended, engineers must adhere to rigorous methodological standards.\n\n1. **Reproducibility ensures consistency.** A measurement is only useful if it can be repeated with the same result under identical conditions. If a value cannot be reproduced, it is likely an outlier or the result of measurement error rather than a true property of the system. Reproducibility transforms a single observation into a reliable data point.\n\n2. **Failure recording enables continuous improvement.** Documenting failures is not an admission of error, but a critical diagnostic tool. Recording the specific circumstances of a failure allows engineers to identify patterns, perform root-cause analyses, and implement preventative measures that strengthen the overall design.\n\n3. **Isolating variables clarifies causality.** Changing only one variable at a time ensures that any observed change in the outcome can be directly attributed to that specific factor. When multiple variables are altered",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 1285.182,
+            "prompt_per_token_ms": 16.064775,
+            "prompt_per_second": 62.24799289127921,
+            "predicted_n": 192,
+            "predicted_ms": 7907.624,
+            "predicted_per_token_ms": 41.185541666666666,
+            "predicted_per_second": 24.28036537903168,
+            "draft_n": 267,
+            "draft_n_accepted": 124
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-4",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.015977,
+          "ttft_seconds": 1.293959,
+          "elapsed_seconds": 9.503381,
+          "client_generation_seconds": 8.209421,
+          "client_tokens_per_second": 23.387762480012753,
+          "content": "Reliable engineering is built upon the foundation of predictable, verifiable data. To ensure systems perform as intended, engineers must adhere to rigorous methodological standards.\n\n1. **Reproducibility of Measurements**: A measurement is only useful if it can be repeated with consistent results. If a value changes every time it is measured under the same conditions, the data is noise rather than signal. Reproducibility confirms that a measurement reflects a physical reality rather than an error in the instrument or the observer, providing the baseline certainty required for design decisions.\n\n2. **Recording of Failures**: Documenting failures is as critical as documenting successes. A failure provides a boundary condition that defines the limits of a system's operational envelope. By recording exactly how, when, and why a component failed, engineers can identify patterns, prevent recurrence in future designs, and build a library of institutional knowledge that prevents the repetition of costly mistakes.\n\n3. **Single-Variable Testing**: Changing",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 1278.908,
+            "prompt_per_token_ms": 15.986349999999998,
+            "prompt_per_second": 62.55336584023246,
+            "predicted_n": 192,
+            "predicted_ms": 8208.977,
+            "predicted_per_token_ms": 42.75508854166667,
+            "predicted_per_second": 23.389028864376154,
+            "draft_n": 269,
+            "draft_n_accepted": 123
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-5",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.016337,
+          "ttft_seconds": 1.291992,
+          "elapsed_seconds": 8.735981,
+          "client_generation_seconds": 7.443989,
+          "client_tokens_per_second": 25.792623934127214,
+          "content": "Reliable engineering depends on the ability to predict outcomes and understand the underlying mechanics of a system. To achieve this, practitioners must adhere to rigorous methodological standards.\n\n1. **Reproducibility of Measurements**: For a measurement to be meaningful, it must be consistent across different observers and repeated trials. If a value cannot be reproduced, it is impossible to establish a baseline of truth or to verify that a system is operating within its design specifications.\n2. **Recording of Failures**: Documenting failures is essential for preventing recurrence and identifying systemic weaknesses. A failure is a data point that reveals the limits of a design; without a formal record, the organization loses the opportunity to perform root-cause analysis and improve future iterations.\n3. **Single-Variable Testing**: Changing only one variable at a time ensures that any observed change in the outcome can be directly attributed to that specific factor. When multiple variables are altered simultaneously, the cause of a result becomes obscured",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 1276.394,
+            "prompt_per_token_ms": 15.954925,
+            "prompt_per_second": 62.67657165420709,
+            "predicted_n": 192,
+            "predicted_ms": 7443.712,
+            "predicted_per_token_ms": 38.769333333333336,
+            "predicted_per_second": 25.7935825566599,
+            "draft_n": 250,
+            "draft_n_accepted": 127
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 1,
+        "wall_seconds": 9.396416,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.016212,
+            "ttft_seconds": 1.299093,
+            "elapsed_seconds": 9.395672,
+            "client_generation_seconds": 8.096579,
+            "client_tokens_per_second": 23.713718876654596,
+            "content": "Reliable engineering is built upon the foundation of predictable, verifiable data. To ensure systems perform as intended under real-world conditions, engineers must adhere to rigorous methodological standards.\n\n1. **The Necessity of Reproducibility**: Measurements must be reproducible to ensure that data reflects an inherent property of the system rather than a transient error or environmental fluke. If a result cannot be replicated under the same conditions, it cannot be used to validate a design or certify safety. Reproducibility transforms a single observation into reliable evidence.\n\n2. **The Importance of Recording Failures**: Documenting failures is as critical as documenting successes. A failure provides a direct window into the limits of a system and the specific mechanisms of its breakdown. By recording these events, engineers can perform root-cause analyses that prevent the same error from recurring, turning potential catastrophes into institutional knowledge.\n\n3. **The Value of Single-Variable Testing**: Changing only one variable at a time during an",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 192,
+              "prompt_tokens": 81,
+              "total_tokens": 273,
+              "prompt_tokens_details": {
+                "cached_tokens": 1
+              }
+            },
+            "timings": {
+              "cache_n": 1,
+              "prompt_n": 80,
+              "prompt_ms": 1283.58,
+              "prompt_per_token_ms": 16.04475,
+              "prompt_per_second": 62.32568285576279,
+              "predicted_n": 192,
+              "predicted_ms": 8096.305,
+              "predicted_per_token_ms": 42.168255208333335,
+              "predicted_per_second": 23.714521624370622,
+              "draft_n": 269,
+              "draft_n_accepted": 122
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "tag": "final",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.00146,
+        "ttft_seconds": null,
+        "elapsed_seconds": 9.400809,
+        "client_generation_seconds": 9.399319,
+        "client_tokens_per_second": 5.106752843988293,
+        "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, functional, and scalable, engineers must adhere to rigorous testing protocols.\n\n1. **Reproducibility of Measurements**\nA measurement",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: gemma-4-12b-q5\n\nLoading... and by loading we mean making you wait .........\nDone! (8.65s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 136.837,
+          "prompt_per_token_ms": 1.6687439024390243,
+          "prompt_per_second": 599.2531259820079,
+          "predicted_n": 48,
+          "predicted_ms": 470.486,
+          "predicted_per_token_ms": 9.801791666666666,
+          "predicted_per_second": 102.02216431519749,
+          "draft_n": 55,
+          "draft_n_accepted": 32
+        },
+        "error": null,
+        "ttft_seconds_raw_loading_state": 0.00149,
+        "ttft_valid": false,
+        "ttft_note": "Invalid for model TTFT: first delta was llama-swap loading-state text."
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.005904,
+          "ttft_seconds": 0.07966,
+          "elapsed_seconds": 2.060307,
+          "client_generation_seconds": 1.980646,
+          "client_tokens_per_second": 96.93805824763376,
+          "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, functional, and scalable, engineers must adhere to the following principles:\n\n1. **Reproducibility of Measurements:** A measurement is only useful if it can be verified. If a result cannot be replicated under the same conditions, it is indistinguishable from noise or error. Reproducibility ensures that data is objective rather than anecdotal, allowing for the establishment of baseline standards and the validation of new designs.\n\n2. **Documentation of Failures:** Recording failures is as critical as recording successes. Every malfunction provides a data point that defines the boundaries of a system's operational limits. By documenting why and how a component failed, engineers can perform root-cause analysis, prevent recurrence, and develop more robust safety margins in future iterations.\n\n3. **Isolation of Variables:** Changing multiple factors simultaneously makes it impossible to determine which specific change caused the observed effect",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 74.792,
+            "prompt_per_token_ms": 0.9349000000000001,
+            "prompt_per_second": 1069.6331158412663,
+            "predicted_n": 192,
+            "predicted_ms": 1980.56,
+            "predicted_per_token_ms": 10.315416666666666,
+            "predicted_per_second": 96.94227895140767,
+            "draft_n": 260,
+            "draft_n_accepted": 125
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-2",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.018058,
+          "ttft_seconds": 0.091644,
+          "elapsed_seconds": 2.166933,
+          "client_generation_seconds": 2.075289,
+          "client_tokens_per_second": 92.51722616643798,
+          "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, functional, and scalable, engineers must adhere to rigorous testing protocols.\n\n1. **Reproducibility of Measurements**\nA measurement is only useful if it can be verified. If a result cannot be replicated under the same conditions, it is indistinguishable from noise or an anomaly. Reproducibility ensures that data points are objective truths rather than one-time flukes, allowing for the establishment of reliable baselines and the validation of engineering models.\n\n2. **Documentation of Failures**\nFailures are the most valuable data points in the engineering lifecycle. Recording exactly how, when, and why a component or system failed allows teams to identify patterns, predict future risks, and implement preventative measures. Without a formal record of failure, engineers are forced to repeat the same mistakes, wasting resources and compromising safety.\n\n3. **Isolation of Variables**",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 74.694,
+            "prompt_per_token_ms": 0.933675,
+            "prompt_per_second": 1071.0364955685864,
+            "predicted_n": 192,
+            "predicted_ms": 2074.625,
+            "predicted_per_token_ms": 10.805338541666666,
+            "predicted_per_second": 92.54684581550883,
+            "draft_n": 274,
+            "draft_n_accepted": 122
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-3",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.021295,
+          "ttft_seconds": 0.094498,
+          "elapsed_seconds": 2.308686,
+          "client_generation_seconds": 2.214188,
+          "client_tokens_per_second": 86.7135164562915,
+          "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, functional, and scalable, engineers must adhere to rigorous testing protocols.\n\n1. **Reproducibility of Measurements**\nA measurement is only useful if it can be verified. If a result cannot be replicated under the same conditions, it is indistinguishable from noise or error. Reproducibility ensures that data is objective rather than anecdotal, allowing teams to establish a baseline of truth that can be used to validate designs across different environments and scales.\n\n2. **Documentation of Failures**\nFailures are the most valuable data points in the engineering lifecycle. Recording exactly how, when, and why a component or system failed prevents the recurrence of known issues and identifies hidden vulnerabilities. By treating failures as information rather than setbacks, engineers can perform root-cause analysis to harden systems against future stresses.\n\n3. **Isolation of Variables**\nChanging multiple variables",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 74.483,
+            "prompt_per_token_ms": 0.9310375000000001,
+            "prompt_per_second": 1074.0705932897438,
+            "predicted_n": 192,
+            "predicted_ms": 2213.97,
+            "predicted_per_token_ms": 11.531093749999998,
+            "predicted_per_second": 86.72204230409628,
+            "draft_n": 287,
+            "draft_n_accepted": 117
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-4",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.017615,
+          "ttft_seconds": 0.091259,
+          "elapsed_seconds": 2.288684,
+          "client_generation_seconds": 2.197425,
+          "client_tokens_per_second": 87.37500746377412,
+          "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that a design is safe, functional, and scalable, engineers must adhere to rigorous testing protocols that prioritize data integrity over anecdotal observation.\n\n1. **Reproducibility of Measurements**\nA measurement is only useful if it can be verified by others. Reproducibility ensures that data is not a result of environmental noise, equipment error, or operator bias. When results can be consistently replicated under the same conditions, they provide a stable baseline for analysis, allowing engineers to trust that the data reflects the actual behavior of the system.\n\n2. **Documentation of Failures**\nFailures are the most valuable data points in the engineering lifecycle. Recording exactly how, when, and why a component or process failed allows for root-cause analysis and the identification of systemic weaknesses. By documenting these \"negative\" results, teams can prevent the recurrence of known issues and develop more robust safety",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 74.943,
+            "prompt_per_token_ms": 0.9367875,
+            "prompt_per_second": 1067.477949908597,
+            "predicted_n": 192,
+            "predicted_ms": 2196.888,
+            "predicted_per_token_ms": 11.442124999999999,
+            "predicted_per_second": 87.39635338715493,
+            "draft_n": 286,
+            "draft_n_accepted": 118
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-5",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.01667,
+          "ttft_seconds": 0.090036,
+          "elapsed_seconds": 2.343414,
+          "client_generation_seconds": 2.253378,
+          "client_tokens_per_second": 85.20541217568139,
+          "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, functional, and scalable, engineers must adhere to rigorous testing protocols.\n\n1. **Reproducibility of Measurements**\nA measurement is only useful if it can be verified. If a result cannot be replicated under the same conditions, it is indistinguishable from noise or error. Reproducibility ensures that data points are objective facts rather than anomalies, allowing engineers to establish a baseline of truth upon which they can build complex systems.\n\n2. **Documentation of Failures**\nFailures are the most valuable data points in the engineering lifecycle. Recording exactly how, when, and why a component or process failed prevents the recurrence of known issues and identifies hidden vulnerabilities. By treating failures as information rather than setbacks, teams can develop robust redundancies and improve overall system resilience.\n\n3. **Isolation of Variables**\nChanging multiple variables simultaneously makes it impossible to determine",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 74.443,
+            "prompt_per_token_ms": 0.9305375,
+            "prompt_per_second": 1074.6477170452563,
+            "predicted_n": 192,
+            "predicted_ms": 2252.737,
+            "predicted_per_token_ms": 11.733005208333333,
+            "predicted_per_second": 85.2296561915572,
+            "draft_n": 299,
+            "draft_n_accepted": 116
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 1,
+        "wall_seconds": 2.259073,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.021375,
+            "ttft_seconds": 0.094781,
+            "elapsed_seconds": 2.258479,
+            "client_generation_seconds": 2.163699,
+            "client_tokens_per_second": 88.7369410917725,
+            "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, efficient, and scalable, engineers must adhere to the following principles:\n\n1. **Reproducibility of Measurements:** A measurement is only useful if it can be verified. If a result cannot be replicated under the same conditions, it is indistinguishable from noise or error. Reproducibility ensures that data is objective, allowing for the establishment of a reliable baseline and the validation of subsequent engineering decisions.\n\n2. **Documentation of Failures:** Failures are the most valuable data points in the engineering lifecycle. Recording exactly how, when, and why a component or system failed allows teams to identify patterns, prevent recurrence, and develop robust redundancies. Without a formal record of failure, an organization is doomed to repeat the same mistakes.\n\n3. **Isolation of Variables:** Changing multiple variables simultaneously makes it impossible to determine the specific cause of a change in the",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 192,
+              "prompt_tokens": 81,
+              "total_tokens": 273,
+              "prompt_tokens_details": {
+                "cached_tokens": 1
+              }
+            },
+            "timings": {
+              "cache_n": 1,
+              "prompt_n": 80,
+              "prompt_ms": 74.779,
+              "prompt_per_token_ms": 0.9347375,
+              "prompt_per_second": 1069.819066850319,
+              "predicted_n": 192,
+              "predicted_ms": 2163.157,
+              "predicted_per_token_ms": 11.266442708333335,
+              "predicted_per_second": 88.75916080062612,
+              "draft_n": 286,
+              "draft_n_accepted": 119
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "tag": "final",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.001646,
+        "ttft_seconds": null,
+        "elapsed_seconds": 8.375632,
+        "client_generation_seconds": 8.373957,
+        "client_tokens_per_second": 5.732057372688,
+        "content": "In the pursuit of reliable engineering, rigorous methodology transforms raw data into actionable truth. First, measurements must be reproducible because consistency across repeated trials is the only way to distinguish genuine physical phenomena from random noise or observer bias; without this repeatab",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: ornith-1.0-9b-q6\n\nSlow is smooth, smooth is fast, but this is just slow ........\nDone! (7.35s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 186.017,
+          "prompt_per_token_ms": 2.2685,
+          "prompt_per_second": 440.8199250606127,
+          "predicted_n": 48,
+          "predicted_ms": 679.975,
+          "predicted_per_token_ms": 14.166145833333333,
+          "predicted_per_second": 70.59083054524064
+        },
+        "error": null,
+        "ttft_seconds_raw_loading_state": 0.001676,
+        "ttft_valid": false,
+        "ttft_note": "Invalid for model TTFT: first delta was llama-swap loading-state text."
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.037308,
+          "ttft_seconds": 0.097571,
+          "elapsed_seconds": 2.366341,
+          "client_generation_seconds": 2.268771,
+          "client_tokens_per_second": 71.404309043816,
+          "content": "In the pursuit of reliable engineering, rigorous methodology serves as the foundation for trust and safety. First, measurements must be reproducible because they provide the empirical evidence needed to validate designs; if results cannot be consistently replicated under similar conditions, any conclusions drawn are merely speculation rather than fact. Second, failures should be meticulously recorded because every breakdown contains critical data about material limits, design flaws, or environmental stressors that, when analyzed, prevent recurrence and drive continuous improvement. Third, changing one variable at a time isolates cause-and-effect relationships, ensuring that observed outcomes can be definitively attributed to a specific change rather than an ambiguous combination of factors.\n\n**Recommendation:** Establish a mandatory documentation protocol where every experiment logs all inputs, outputs, and anomalies to ensure full traceability from design intent to final performance.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 162,
+            "prompt_tokens": 81,
+            "total_tokens": 243,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 62.217,
+            "prompt_per_token_ms": 0.7681111111111111,
+            "prompt_per_second": 1301.8949804715753,
+            "predicted_n": 162,
+            "predicted_ms": 2268.58,
+            "predicted_per_token_ms": 14.00358024691358,
+            "predicted_per_second": 71.41030953283551
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-2",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.049733,
+          "ttft_seconds": 0.107568,
+          "elapsed_seconds": 2.540733,
+          "client_generation_seconds": 2.433165,
+          "client_tokens_per_second": 72.74475334764224,
+          "content": "In the pursuit of reliable engineering, rigorous methodology serves as the foundation for trust and safety. First, measurements must be reproducible because they provide the empirical evidence needed to validate designs; if results cannot be consistently replicated under similar conditions, the data is merely anecdotal rather than scientific, leaving critical decisions on shaky ground. Second, failures should be meticulously recorded because every breakdown contains valuable diagnostic information that, when analyzed systematically, reveals latent weaknesses in materials or processes before they lead to catastrophic outcomes. Third, changing one variable at a time improves an experiment by isolating cause and effect, ensuring that any observed change in performance can be definitively attributed to the specific adjustment made rather than a confounding interaction between multiple factors.\n\n**Recommendation:** Establish a mandatory protocol where no design modification is implemented until its impact has been verified through controlled, repeatable testing with full documentation of all outcomes.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 177,
+            "prompt_tokens": 81,
+            "total_tokens": 258,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 59.59,
+            "prompt_per_token_ms": 0.735679012345679,
+            "prompt_per_second": 1359.2884712200032,
+            "predicted_n": 177,
+            "predicted_ms": 2433.134,
+            "predicted_per_token_ms": 13.746519774011299,
+            "predicted_per_second": 72.74568519448579
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-3",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.050327,
+          "ttft_seconds": 0.107955,
+          "elapsed_seconds": 2.365647,
+          "client_generation_seconds": 2.257693,
+          "client_tokens_per_second": 73.08345890883997,
+          "content": "In the pursuit of reliable engineering, rigorous methodology serves as the foundation for trust and safety. First, measurements must be reproducible because they provide the empirical evidence needed to validate designs; if results cannot be consistently replicated under similar conditions, any conclusions drawn are merely speculation rather than fact. Second, failures should be meticulously recorded because every breakdown contains critical data about material limits, design flaws, or environmental stressors that, when analyzed, prevent recurrence and drive continuous improvement. Third, changing one variable at a time isolates cause-and-effect relationships, ensuring that observed outcomes can be definitively attributed to a specific factor rather than a confusing interplay of multiple simultaneous changes.\n\n**Recommendation:** Establish a mandatory documentation protocol where every experiment logs all inputs, outputs, and anomalies to ensure full traceability from design intent to final performance.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 165,
+            "prompt_tokens": 81,
+            "total_tokens": 246,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 59.141,
+            "prompt_per_token_ms": 0.7301358024691358,
+            "prompt_per_second": 1369.6082244128438,
+            "predicted_n": 165,
+            "predicted_ms": 2257.658,
+            "predicted_per_token_ms": 13.682775757575756,
+            "predicted_per_second": 73.08458588501891
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-4",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.047573,
+          "ttft_seconds": 0.105157,
+          "elapsed_seconds": 2.352631,
+          "client_generation_seconds": 2.247474,
+          "client_tokens_per_second": 72.97080818851667,
+          "content": "In the pursuit of reliable engineering, rigorous methodology serves as the foundation for trust and safety. First, measurements must be reproducible because consistency across repeated trials confirms that observed results stem from the system itself rather than random noise or operator error; without this repeatability, data becomes anecdotal rather than evidentiary. Second, every failure must be meticulously recorded, as these events contain critical diagnostic information about design weaknesses, material limits, or procedural gaps that successful runs inherently cannot reveal. Third, changing only one variable at a time isolates cause and effect, ensuring that any observed outcome can be definitively attributed to that specific change rather than an uncontrolled interaction between multiple factors.\n\n**Recommendation:** Establish a mandatory documentation protocol where every experiment logs all inputs, outputs, and anomalies before any subsequent modification is attempted.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 164,
+            "prompt_tokens": 81,
+            "total_tokens": 245,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 59.238,
+            "prompt_per_token_ms": 0.7313333333333333,
+            "prompt_per_second": 1367.3655423883317,
+            "predicted_n": 164,
+            "predicted_ms": 2247.233,
+            "predicted_per_token_ms": 13.70264024390244,
+            "predicted_per_second": 72.97863639417896
+          },
+          "error": null
+        },
+        {
+          "nonce": "sequential-5",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.050496,
+          "ttft_seconds": 0.108433,
+          "elapsed_seconds": 2.665429,
+          "client_generation_seconds": 2.556995,
+          "client_tokens_per_second": 72.74162946480601,
+          "content": "In the pursuit of reliable engineering, rigorous methodology serves as the foundation for trust and safety. First, measurements must be reproducible because they provide the empirical evidence needed to validate designs; if results cannot be consistently replicated under similar conditions, the data is merely anecdotal rather than scientific, leaving critical decisions on shaky ground. Second, failures should be meticulously recorded because every breakdown contains valuable diagnostic information that reveals hidden weaknesses in materials, processes, or assumptions, turning negative outcomes into actionable lessons for future iterations. Third, changing one variable at a time improves an experiment by isolating cause and effect, ensuring that any observed change in performance can be definitively attributed to the specific adjustment made rather than a confounding interaction between multiple factors.\n\n**Recommendation:** Adopt a disciplined testing protocol where every measurement is logged with full context, every failure triggers a root-cause analysis, and no more than one design variable is altered per test cycle.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 186,
+            "prompt_tokens": 81,
+            "total_tokens": 267,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 59.596,
+            "prompt_per_token_ms": 0.735753086419753,
+            "prompt_per_second": 1359.1516209141553,
+            "predicted_n": 186,
+            "predicted_ms": 2556.931,
+            "predicted_per_token_ms": 13.746940860215053,
+            "predicted_per_second": 72.74345690204389
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 1,
+        "wall_seconds": 2.430823,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.048886,
+            "ttft_seconds": 0.106459,
+            "elapsed_seconds": 2.430169,
+            "client_generation_seconds": 2.32371,
+            "client_tokens_per_second": 72.29816281870723,
+            "content": "In the pursuit of reliable engineering, rigorous methodology serves as the foundation for trust and safety. First, measurements must be reproducible because only consistent results across repeated trials can distinguish genuine physical phenomena from random noise or observer bias; without this repeatability, data becomes anecdotal rather than evidentiary. Second, every failure must be meticulously recorded, as anomalies often contain the most critical insights into design weaknesses, material limits, and unforeseen operational stresses that successful tests simply cannot reveal. Third, changing one variable at a time isolates cause-and-effect relationships, ensuring that observed outcomes can be definitively attributed to a specific input rather than a confusing interplay of multiple simultaneous changes.\n\n**Recommendation:** Adopt a standardized protocol that mandates pre-defined measurement criteria, mandatory failure logging, and single-variable testing before any engineering change is considered validated.",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 168,
+              "prompt_tokens": 81,
+              "total_tokens": 249,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 59.366,
+              "prompt_per_token_ms": 0.7329135802469136,
+              "prompt_per_second": 1364.417343260452,
+              "predicted_n": 168,
+              "predicted_ms": 2323.456,
+              "predicted_per_token_ms": 13.83009523809524,
+              "predicted_per_second": 72.30608197443807
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "tag": "cold-fixed",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.003161,
+        "ttft_seconds": 31.601001,
+        "elapsed_seconds": 33.141949,
+        "client_generation_seconds": 1.540948,
+        "client_tokens_per_second": 31.149655825014253,
+        "content": "Reliable engineering rests on the integrity of data and the rigor of the scientific method. To ensure that systems perform as expected, we must adhere to three core principles:\n\n1. Measurements must be reproducible to establish trust. If an experiment",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: ornith-1.0-35b-q8\n\nDeciding which facts to hallucinate today ..........\nMemory-mapping like it's a AAA title from 2012 .......\nReacquainting the model with the concept of 'facts' it forgot during fine-tuning ........\nConvincing the embedding layer that context is overrated .......\nConvincing the GPU to participate .\nDone! (29.23s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 2207.235,
+          "prompt_per_token_ms": 26.9175,
+          "prompt_per_second": 37.150552614470136,
+          "predicted_n": 48,
+          "predicted_ms": 1540.888,
+          "predicted_per_token_ms": 32.10183333333333,
+          "predicted_per_second": 31.15086884965033
+        },
+        "error": null,
+        "ttft_valid": true
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.030006,
+          "ttft_seconds": 1.625039,
+          "elapsed_seconds": 6.966168,
+          "client_generation_seconds": 5.341129,
+          "client_tokens_per_second": 31.079570570221723,
+          "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or equipment error; when an experiment can be repeated with consistent outcomes, it establishes a reliable baseline of truth that others can verify and build upon.\n\n2. Recording failures is essential because they provide critical data on what does not work, preventing the repetition of mistakes and offering insights into system limits and edge cases that successful trials often obscure.\n\n3. Changing one variable at a time allows engineers to isolate cause and effect, ensuring that any observed change in the outcome can be definitively attributed to the specific factor being modified rather than a complex interaction of multiple variables.\n\nRecommendation: Adopt a rigorous documentation protocol where every test, including failed attempts and single-variable adjustments, is logged immediately to build a cumulative knowledge base for future engineering decisions.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 166,
+            "prompt_tokens": 81,
+            "total_tokens": 247,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1599.096,
+            "prompt_per_token_ms": 19.741925925925926,
+            "prompt_per_second": 50.653619294901624,
+            "predicted_n": 166,
+            "predicted_ms": 5340.857,
+            "predicted_per_token_ms": 32.17383734939759,
+            "predicted_per_second": 31.08115420427845
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 1,
+        "wall_seconds": 6.484541,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.070494,
+            "ttft_seconds": 1.658126,
+            "elapsed_seconds": 6.48237,
+            "client_generation_seconds": 4.824244,
+            "client_tokens_per_second": 30.88566628060135,
+            "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or specific environmental anomalies, thereby establishing a baseline of trust in the data that supports sound engineering decisions.\n2. Recording failures is essential because they provide critical insights into system limits and edge cases, allowing teams to learn from mistakes and prevent similar issues from recurring in future projects.\n3. Changing one variable at a time isolates the cause-and-effect relationship, ensuring that any observed change in the outcome can be definitively attributed to the specific factor being tested rather than a confounding interaction.\n\nRecommendation: Implement a standardized documentation protocol that mandates the recording of all experimental conditions, outcomes, and deviations to build a cumulative knowledge base for your team.",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 149,
+              "prompt_tokens": 81,
+              "total_tokens": 230,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 1590.833,
+              "prompt_per_token_ms": 19.639913580246915,
+              "prompt_per_second": 50.916720988312406,
+              "predicted_n": 149,
+              "predicted_ms": 4823.937,
+              "predicted_per_token_ms": 32.37541610738255,
+              "predicted_per_second": 30.887633897374698
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "qwen-3.6-35b-q8",
+      "tag": "cold-fixed",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.001377,
+        "ttft_seconds": 33.062339,
+        "elapsed_seconds": 34.686932,
+        "client_generation_seconds": 1.624593,
+        "client_tokens_per_second": 29.545857039207036,
+        "content": "1. Measurements must be reproducible to establish trust in the data; if results cannot be consistently replicated under the same conditions, the findings are likely due to random error or bias rather than genuine engineering principles, rendering them useless for decision-making.",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: qwen-3.6-35b-q8\n\nLoading the model that knows more than you but still can't count r's in 'strawberry' ........\nThe model is loading slower than your last `npm install` ............\nFilling the key-value cache with the ghost of prompts past ............\nThis model was distilled. Unlike your patience, which is evaporating. ....\nDone! (30.59s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 2304.839,
+          "prompt_per_token_ms": 28.107792682926828,
+          "prompt_per_second": 35.57732232056122,
+          "predicted_n": 48,
+          "predicted_ms": 1624.797,
+          "predicted_per_token_ms": 33.8499375,
+          "predicted_per_second": 29.542152034992682
+        },
+        "error": null,
+        "ttft_valid": true
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.031564,
+          "ttft_seconds": 1.691242,
+          "elapsed_seconds": 6.042777,
+          "client_generation_seconds": 4.351535,
+          "client_tokens_per_second": 29.644713540797753,
+          "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or experimental error, thereby establishing the reliability and validity of the engineering data.\n2. Recording failures is critical because they provide essential insights into system limitations and edge cases, allowing engineers to learn from mistakes and prevent recurrence in future designs.\n3. Changing only one variable at a time isolates the cause-and-effect relationship, ensuring that any observed changes in the outcome can be definitively attributed to that specific modification rather than external factors.\n\nRecommendation: Implement a standardized logging protocol for all experimental trials to capture both successful metrics and failure modes systematically.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 129,
+            "prompt_tokens": 81,
+            "total_tokens": 210,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 1663.931,
+            "prompt_per_token_ms": 20.54235802469136,
+            "prompt_per_second": 48.679903193101154,
+            "predicted_n": 129,
+            "predicted_ms": 4351.408,
+            "predicted_per_token_ms": 33.73184496124031,
+            "predicted_per_second": 29.645576788018957
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 1,
+        "wall_seconds": 6.424493,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.070255,
+            "ttft_seconds": 1.733786,
+            "elapsed_seconds": 6.423936,
+            "client_generation_seconds": 4.69015,
+            "client_tokens_per_second": 29.636578484233134,
+            "content": "1. Measurements must be reproducible to ensure that results are not the product of random chance or experimental error, thereby establishing the reliability and validity of the engineering data.\n2. Recording failures is critical because they provide essential insights into system limitations and root causes, allowing engineers to learn from mistakes and prevent recurrence in future designs.\n3. Changing only one variable at a time isolates the specific impact of that variable, ensuring that any observed changes in the outcome can be accurately attributed to the intended modification rather than external factors.\n\nRecommendation: Implement a standardized documentation protocol that mandates the logging of all experimental conditions, including failed attempts, to build a comprehensive knowledge base for future engineering decisions.",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 139,
+              "prompt_tokens": 81,
+              "total_tokens": 220,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 1667.266,
+              "prompt_per_token_ms": 20.58353086419753,
+              "prompt_per_second": 48.582529722311854,
+              "predicted_n": 139,
+              "predicted_ms": 4689.996,
+              "predicted_per_token_ms": 33.740978417266184,
+              "predicted_per_second": 29.637551929681816
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "tag": "cold-fixed",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.003772,
+        "ttft_seconds": 24.30534,
+        "elapsed_seconds": 26.375034,
+        "client_generation_seconds": 2.069694,
+        "client_tokens_per_second": 23.191838558914288,
+        "content": "Reliable engineering is built upon the foundation of predictable, verifiable data. To ensure that systems perform as intended under varying conditions, engineers must adhere to rigorous methodological standards.\n\n1. **Reproducibility of Measurements**: For a measurement to be",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: gemma-4-26b-q8\n\nAllocating memory like a billionaire allocates tax avoidance strategies .........\nLoading a model larger than your attention span ........\nSpinning up the cloud GPU, please be patient while we burn your credits ........\nDone! (22.22s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 1941.686,
+          "prompt_per_token_ms": 23.67909756097561,
+          "prompt_per_second": 42.23133915576464,
+          "predicted_n": 48,
+          "predicted_ms": 2069.989,
+          "predicted_per_token_ms": 43.124770833333336,
+          "predicted_per_second": 23.188529021168712,
+          "draft_n": 67,
+          "draft_n_accepted": 30
+        },
+        "error": null,
+        "ttft_valid": true
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.006455,
+          "ttft_seconds": 1.362034,
+          "elapsed_seconds": 8.83004,
+          "client_generation_seconds": 7.468006,
+          "client_tokens_per_second": 25.709673969179843,
+          "content": "Reliable engineering depends on the ability to predict outcomes and understand the underlying mechanics of a system. To achieve this, engineers must adhere to rigorous methodological standards.\n\n1. **Reproducibility of Measurements**: For a measurement to be meaningful, it must be consistent. If a result cannot be replicated under the same conditions, it is impossible to distinguish between a true signal and random noise. Reproducibility ensures that data is a reliable foundation for decision-making rather than a statistical anomaly.\n\n2. **Recording of Failures**: Failure is often the most informative data point in an engineering lifecycle. Documenting exactly how, when, and why a component fails provides the necessary evidence to identify edge cases and structural weaknesses. Without a formal record of failure, the same errors are destined to be repeated.\n\n3. **Single-Variable Testing**: Changing only one variable at a time allows an engineer to establish a direct causal link between an input and an output. When",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 1356.449,
+            "prompt_per_token_ms": 16.9556125,
+            "prompt_per_second": 58.97752145491648,
+            "predicted_n": 192,
+            "predicted_ms": 7467.464,
+            "predicted_per_token_ms": 38.89304166666667,
+            "predicted_per_second": 25.711540089111914,
+            "draft_n": 253,
+            "draft_n_accepted": 127
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 1,
+        "wall_seconds": 9.4393,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.017086,
+            "ttft_seconds": 1.31491,
+            "elapsed_seconds": 9.438603,
+            "client_generation_seconds": 8.123693,
+            "client_tokens_per_second": 23.63456973356974,
+            "content": "Reliable engineering is built upon the foundation of predictable, verifiable data. To ensure systems perform as intended under real-world conditions, engineers must adhere to rigorous methodological standards.\n\n1. **The Necessity of Reproducibility**: Measurements must be reproducible to ensure that data reflects an inherent property of the system rather than a transient error or environmental fluke. If a result cannot be replicated under the same conditions, it cannot be used to validate a design or certify safety. Reproducibility transforms a single observation into reliable evidence.\n\n2. **The Importance of Recording Failures**: Documenting failures is as critical as documenting successes. A failure provides a direct window into the limits of a system and the specific mechanisms of its breakdown. By recording these events, engineers can perform root-cause analyses that prevent the same error from recurring, turning potential catastrophes into institutional knowledge.\n\n3. **The Value of Single-Variable Testing**: Changing only one variable at a time during an",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 192,
+              "prompt_tokens": 81,
+              "total_tokens": 273,
+              "prompt_tokens_details": {
+                "cached_tokens": 1
+              }
+            },
+            "timings": {
+              "cache_n": 1,
+              "prompt_n": 80,
+              "prompt_ms": 1298.384,
+              "prompt_per_token_ms": 16.2298,
+              "prompt_per_second": 61.61505378994196,
+              "predicted_n": 192,
+              "predicted_ms": 8123.567,
+              "predicted_per_token_ms": 42.31024479166667,
+              "predicted_per_second": 23.634937706551817,
+              "draft_n": 269,
+              "draft_n_accepted": 122
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "tag": "cold-fixed",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.00148,
+        "ttft_seconds": 8.836085,
+        "elapsed_seconds": 9.308478,
+        "client_generation_seconds": 0.472392,
+        "client_tokens_per_second": 101.61043866132702,
+        "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, functional, and scalable, engineers must adhere to rigorous testing protocols.\n\n1. **Reproducibility of Measurements**\nA measurement",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: gemma-4-12b-q5\n\nSorry, the inference you have reached is not in service .........\nDone! (8.56s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 137.762,
+          "prompt_per_token_ms": 1.6800243902439025,
+          "prompt_per_second": 595.2294536955038,
+          "predicted_n": 48,
+          "predicted_ms": 472.144,
+          "predicted_per_token_ms": 9.836333333333334,
+          "predicted_per_second": 101.66389914941203,
+          "draft_n": 55,
+          "draft_n_accepted": 32
+        },
+        "error": null,
+        "ttft_valid": true
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.006587,
+          "ttft_seconds": 0.082116,
+          "elapsed_seconds": 2.078464,
+          "client_generation_seconds": 1.996348,
+          "client_tokens_per_second": 96.17561012401127,
+          "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, functional, and scalable, engineers must adhere to the following principles:\n\n1. **Reproducibility of Measurements:** A measurement is only useful if it can be verified. If a result cannot be replicated under the same conditions, it is indistinguishable from noise or error. Reproducibility ensures that data is objective rather than anecdotal, allowing for the establishment of baseline standards and the validation of new designs.\n\n2. **Documentation of Failures:** Recording failures is as critical as recording successes. Every malfunction provides a data point that defines the boundaries of a system's operational limits. By documenting why and how a component failed, engineers can perform root-cause analysis, prevent recurrence, and develop more robust safety margins in future iterations.\n\n3. **Isolation of Variables:** Changing multiple factors simultaneously makes it impossible to determine which specific change caused the observed effect",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 192,
+            "prompt_tokens": 81,
+            "total_tokens": 273,
+            "prompt_tokens_details": {
+              "cached_tokens": 1
+            }
+          },
+          "timings": {
+            "cache_n": 1,
+            "prompt_n": 80,
+            "prompt_ms": 76.762,
+            "prompt_per_token_ms": 0.959525,
+            "prompt_per_second": 1042.1823297985982,
+            "predicted_n": 192,
+            "predicted_ms": 1996.183,
+            "predicted_per_token_ms": 10.396786458333333,
+            "predicted_per_second": 96.18356633635294,
+            "draft_n": 260,
+            "draft_n_accepted": 125
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 1,
+        "wall_seconds": 2.298896,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.017513,
+            "ttft_seconds": 0.092194,
+            "elapsed_seconds": 2.298349,
+            "client_generation_seconds": 2.206156,
+            "client_tokens_per_second": 87.02922263257172,
+            "content": "Reliable engineering is built upon the foundation of empirical evidence and systematic methodology. To ensure that designs are safe, efficient, and scalable, engineers must adhere to the following principles:\n\n1. **Reproducibility of Measurements:** A measurement is only useful if it can be verified. If a result cannot be replicated under the same conditions, it is indistinguishable from noise or error. Reproducibility ensures that data is objective, allowing for the establishment of a reliable baseline and the validation of subsequent engineering decisions.\n\n2. **Documentation of Failures:** Failures are the most valuable data points in the engineering lifecycle. Recording exactly how, when, and why a component or system failed allows teams to identify patterns, prevent recurrence, and develop robust redundancies. Without a formal record of failure, an organization is doomed to repeat the same mistakes.\n\n3. **Isolation of Variables:** Changing multiple variables simultaneously makes it impossible to determine the specific cause of a change in the",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 192,
+              "prompt_tokens": 81,
+              "total_tokens": 273,
+              "prompt_tokens_details": {
+                "cached_tokens": 1
+              }
+            },
+            "timings": {
+              "cache_n": 1,
+              "prompt_n": 80,
+              "prompt_ms": 76.045,
+              "prompt_per_token_ms": 0.9505625,
+              "prompt_per_second": 1052.0086790716023,
+              "predicted_n": 192,
+              "predicted_ms": 2205.504,
+              "predicted_per_token_ms": 11.487,
+              "predicted_per_second": 87.05493166187864,
+              "draft_n": 286,
+              "draft_n_accepted": 119
+            },
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "tag": "cold-fixed",
+      "status": "completed",
+      "cold_request": {
+        "nonce": "cold-warmup",
+        "http_status": 200,
+        "fallback_header": null,
+        "response_server": null,
+        "headers_seconds": 0.001513,
+        "ttft_seconds": 7.68996,
+        "elapsed_seconds": 8.347206,
+        "client_generation_seconds": 0.657246,
+        "client_tokens_per_second": 73.03197540695498,
+        "content": "In the pursuit of reliable engineering, rigorous methodology transforms raw data into actionable truth. First, measurements must be reproducible because consistency across repeated trials is the only way to distinguish genuine physical phenomena from random noise or observer bias; without this repeatab",
+        "reasoning": "\u2501\u2501\u2501\u2501\u2501\nllama-swap loading model: ornith-1.0-9b-q6\n\nVRAM: 23.9GB used of 24GB. Living on the edge. ........\nDone! (7.37s)\n\u2501\u2501\u2501\u2501\u2501\n \n",
+        "usage": {
+          "completion_tokens": 48,
+          "prompt_tokens": 82,
+          "total_tokens": 130,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 82,
+          "prompt_ms": 158.695,
+          "prompt_per_token_ms": 1.9353048780487805,
+          "prompt_per_second": 516.7144522511737,
+          "predicted_n": 48,
+          "predicted_ms": 657.235,
+          "predicted_per_token_ms": 13.692395833333334,
+          "predicted_per_second": 73.03323773079644
+        },
+        "error": null,
+        "ttft_valid": true
+      },
+      "sequential": [
+        {
+          "nonce": "sequential-1",
+          "http_status": 200,
+          "fallback_header": null,
+          "response_server": "llama.cpp",
+          "headers_seconds": 0.028611,
+          "ttft_seconds": 0.086582,
+          "elapsed_seconds": 2.308889,
+          "client_generation_seconds": 2.222307,
+          "client_tokens_per_second": 72.8972253348631,
+          "content": "In the pursuit of reliable engineering, rigorous methodology serves as the foundation for trust and safety. First, measurements must be reproducible because they provide the empirical evidence needed to validate designs; if results cannot be consistently replicated under similar conditions, any conclusions drawn are merely speculation rather than fact. Second, failures should be meticulously recorded because every breakdown contains critical data about material limits, design flaws, or environmental stressors that, when analyzed, prevent recurrence and drive continuous improvement. Third, changing one variable at a time isolates cause-and-effect relationships, ensuring that observed outcomes can be definitively attributed to a specific change rather than an ambiguous combination of factors.\n\n**Recommendation:** Establish a mandatory documentation protocol where every experiment logs all inputs, outputs, and anomalies to ensure full traceability from design intent to final performance.",
+          "reasoning": "",
+          "usage": {
+            "completion_tokens": 162,
+            "prompt_tokens": 81,
+            "total_tokens": 243,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 81,
+            "prompt_ms": 59.959,
+            "prompt_per_token_ms": 0.7402345679012347,
+            "prompt_per_second": 1350.9231308060507,
+            "predicted_n": 162,
+            "predicted_ms": 2222.177,
+            "predicted_per_token_ms": 13.717141975308643,
+            "predicted_per_second": 72.90148354519015
+          },
+          "error": null
+        }
+      ],
+      "concurrency": {
+        "requests": 1,
+        "wall_seconds": 2.41053,
+        "results": [
+          {
+            "nonce": "concurrent-1",
+            "http_status": 200,
+            "fallback_header": null,
+            "response_server": "llama.cpp",
+            "headers_seconds": 0.048875,
+            "ttft_seconds": 0.106373,
+            "elapsed_seconds": 2.409847,
+            "client_generation_seconds": 2.303474,
+            "client_tokens_per_second": 72.93331866631857,
+            "content": "In the pursuit of reliable engineering, rigorous methodology serves as the foundation for trust and safety. First, measurements must be reproducible because only consistent results across repeated trials can distinguish genuine physical phenomena from random noise or observer bias; without this repeatability, data becomes anecdotal rather than evidentiary. Second, every failure must be meticulously recorded, as anomalies often contain the most critical insights into design weaknesses, material limits, and unforeseen operational stresses that successful tests simply cannot reveal. Third, changing one variable at a time isolates cause-and-effect relationships, ensuring that observed outcomes can be definitively attributed to a specific input rather than a confusing interplay of multiple simultaneous changes.\n\n**Recommendation:** Adopt a standardized protocol that mandates pre-defined measurement criteria, mandatory failure logging, and single-variable testing before any engineering change is considered validated.",
+            "reasoning": "",
+            "usage": {
+              "completion_tokens": 168,
+              "prompt_tokens": 81,
+              "total_tokens": 249,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 81,
+              "prompt_ms": 59.295,
+              "prompt_per_token_ms": 0.732037037037037,
+              "prompt_per_second": 1366.0511004300529,
+              "predicted_n": 168,
+              "predicted_ms": 2303.322,
+              "predicted_per_token_ms": 13.71025,
+              "predicted_per_second": 72.93813023103152
+            },
+            "error": null
+          }
+        ]
+      }
+    }
+  ],
+  "updated_at": "2026-08-05T19:23:16.575662+00:00"
+}

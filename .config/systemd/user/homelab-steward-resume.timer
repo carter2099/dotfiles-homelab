@@ -1,0 +1,8 @@
+[Unit]
+Description=Post-boot resume trigger for homelab-steward
+
+[Timer]
+OnBootSec=2min
+
+[Install]
+WantedBy=timers.target

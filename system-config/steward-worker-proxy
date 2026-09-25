@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Fixed-destination Unix-socket relay for steward-worker.
+
+The worker service runs in a private network namespace and can only mount the
+Unix socket created here.  Every connection is opened to the one designated
+OpenCode proxy endpoint; the client cannot provide a host or port, perform DNS,
+or reach another localhost service.
+"""
+from __future__ import annotations
+
+import selectors
+import socket
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
+
+SOCKET_PATH = Path("/run/steward-worker/proxy.sock")
+TARGET_HOST = "127.0.0.1"
+TARGET_PORT = 8082
+BACKLOG = 16
+IDLE_SECONDS = 300
+MAX_CONNECTIONS = 8
+MAX_BUFFER_BYTES = 1024 * 1024
+_stop = threading.Event()
+_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+
+def _close(sock: socket.socket | None) -> None:
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+def _relay(client: socket.socket) -> None:
+    if not _slots.acquire(blocking=False):
+        _close(client)
+        return
+    upstream = None
+    selector = None
+    try:
+        # Fixed literal destination: do not resolve or read a target from the
+        # Unix-socket request.  The relay is deliberately not an HTTP CONNECT
+        # or general-purpose proxy.
+        upstream = socket.create_connection((TARGET_HOST, TARGET_PORT), timeout=15)
+        client.setblocking(False)
+        upstream.setblocking(False)
+        selector = selectors.DefaultSelector()
+        states = {
+            client: {
+                "peer": upstream,
+                "buffer": bytearray(),
+                "reading": True,
+                "eof": False,
+                "write_closed": False,
+            },
+            upstream: {
+                "peer": client,
+                "buffer": bytearray(),
+                "reading": True,
+                "eof": False,
+                "write_closed": False,
+            },
+        }
+
+        def refresh(sock: socket.socket) -> None:
+            state = states[sock]
+            peer_state = states[state["peer"]]
+            events = 0
+            if state["reading"] and len(peer_state["buffer"]) < MAX_BUFFER_BYTES:
+                events |= selectors.EVENT_READ
+            if state["buffer"]:
+                events |= selectors.EVENT_WRITE
+            try:
+                if events:
+                    selector.modify(sock, events, state["peer"])
+                else:
+                    selector.unregister(sock)
+            except KeyError:
+                if events:
+                    selector.register(sock, events, state["peer"])
+
+        selector.register(client, selectors.EVENT_READ, upstream)
+        selector.register(upstream, selectors.EVENT_READ, client)
+        last_activity = time.monotonic()
+        while not _stop.is_set():
+            remaining = IDLE_SECONDS - (time.monotonic() - last_activity)
+            if remaining <= 0:
+                return
+            events = selector.select(timeout=min(1.0, remaining))
+            if not events:
+                continue
+            for key, mask in events:
+                source = key.fileobj
+                destination = key.data
+                source_state = states[source]
+                destination_state = states[destination]
+                if mask & selectors.EVENT_READ and source_state["reading"]:
+                    room = MAX_BUFFER_BYTES - len(destination_state["buffer"])
+                    if room > 0:
+                        try:
+                            payload = source.recv(min(65536, room))
+                        except (BlockingIOError, InterruptedError):
+                            payload = None
+                        except OSError:
+                            return
+                        if payload:
+                            destination_state["buffer"].extend(payload)
+                            last_activity = time.monotonic()
+                        elif payload == b"":
+                            source_state["reading"] = False
+                            source_state["eof"] = True
+                            if not destination_state["buffer"] and not destination_state["write_closed"]:
+                                try:
+                                    destination.shutdown(socket.SHUT_WR)
+                                except OSError:
+                                    pass
+                                destination_state["write_closed"] = True
+                if mask & selectors.EVENT_WRITE:
+                    pending = source_state["buffer"]
+                    if pending:
+                        try:
+                            sent = source.send(pending)
+                        except (BlockingIOError, InterruptedError):
+                            sent = 0
+                        except OSError:
+                            return
+                        if sent:
+                            del pending[:sent]
+                            last_activity = time.monotonic()
+                    if (
+                        not pending
+                        and destination_state["eof"]
+                        and not source_state["write_closed"]
+                    ):
+                        try:
+                            source.shutdown(socket.SHUT_WR)
+                        except OSError:
+                            pass
+                        source_state["write_closed"] = True
+                if all(
+                    state["eof"] and not state["buffer"]
+                    for state in states.values()
+                ):
+                    return
+                for sock in states:
+                    refresh(sock)
+    except OSError:
+        # The worker sees a failed model call, not an alternate network path.
+        return
+    finally:
+        if selector is not None:
+            selector.close()
+        _close(upstream)
+        _close(client)
+        _slots.release()
+
+def _signal(_signum: int, _frame) -> None:
+    _stop.set()
+
+
+def main() -> int:
+    signal.signal(signal.SIGTERM, _signal)
+    signal.signal(signal.SIGINT, _signal)
+    SOCKET_PATH.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    try:
+        SOCKET_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"steward-worker-proxy: cannot replace socket: {exc}", file=sys.stderr)
+        return 1
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(SOCKET_PATH))
+        listener.listen(BACKLOG)
+        listener.settimeout(1)
+        # The service's primary group is steward-worker.  No other users may
+        # enter the relay; the worker unit mounts this one socket explicitly.
+        SOCKET_PATH.chmod(0o660)
+        while not _stop.is_set():
+            try:
+                client, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                if _stop.is_set():
+                    break
+                continue
+            threading.Thread(target=_relay, args=(client,), daemon=True).start()
+    finally:
+        _close(listener)
+        try:
+            SOCKET_PATH.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

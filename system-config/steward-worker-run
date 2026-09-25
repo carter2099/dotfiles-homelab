@@ -1,0 +1,554 @@
+#!/usr/bin/env python3
+"""Root-owned launcher for the bounded P7b steward-worker service.
+
+This file is installed as ``/usr/local/libexec/steward-worker-run`` by
+steward-worker-provision.sh and is callable by Carter only through the exact
+sudoers entry.  It stages tracked source snapshots with ``git archive`` (never
+runs repository code), starts the locked-down systemd template, and copies the
+untrusted result back to the caller.  It does not apply patches, run tests,
+invoke hooks, push, or deploy.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Mapping
+
+# The installed module is root-owned; share the exact path/configuration
+# policy with the parent publisher rather than maintaining a second policy.
+sys.path.insert(0, "/usr/local/libexec/steward-worker")
+from worker import _check_repo_config, _safe_relpath, _INFRA_REPOSITORIES
+
+PROTOCOL_VERSION = "steward-worker-v1"
+WORKER_USER = "steward-worker"
+WORKER_UID = None
+WORKER_GROUP = "steward-worker"
+DEV_ROOT = Path("/home/carter/dev").resolve()
+RESULT_ROOT = Path("/home/carter/digests/steward").resolve()
+WORKER_ROOT = Path("/var/lib/steward-worker")
+REQUESTS = WORKER_ROOT / "requests"
+RUNS = WORKER_ROOT / "runs"
+MAX_PACKET_BYTES = 2 * 1024 * 1024
+MAX_SOURCE_BYTES = 256 * 1024 * 1024
+LEASE_PATH = Path("/run/lock/steward-worker.lock")
+
+
+def fail(message: str) -> "NoReturn":
+    raise RuntimeError(message)
+
+
+def _command_env() -> dict[str, str]:
+    return {
+        "HOME": "/var/empty",
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_LITERAL_PATHSPECS": "1",
+    }
+
+
+def run(
+    argv: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int = 60,
+    stdout=None,
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        argv,
+        cwd=str(cwd) if cwd else None,
+        env=_command_env(),
+        capture_output=stdout is None,
+        stdout=stdout,
+        stderr=subprocess.PIPE if stdout is not None else None,
+        text=stdout is None,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def run_as_owner(
+    argv: list[str],
+    owner: int,
+    *,
+    cwd: Path | None = None,
+    timeout: int = 60,
+    stdout=None,
+) -> subprocess.CompletedProcess:
+    """Run repository Git as Carter, never as this root launcher."""
+    account = pwd.getpwuid(owner)
+    return subprocess.run(
+        argv,
+        cwd=str(cwd) if cwd else None,
+        env=_command_env(),
+        user=owner,
+        group=account.pw_gid,
+        extra_groups=(),
+        capture_output=stdout is None,
+        stdout=stdout,
+        stderr=subprocess.PIPE if stdout is not None else None,
+        text=stdout is None,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def git_argv(source: Path, *args: str) -> list[str]:
+    return [
+        "/usr/bin/git",
+        "-C",
+        str(source),
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        "diff.external=",
+        "-c",
+        "core.quotePath=false",
+        *args,
+    ]
+
+
+def under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def check_private_file(path: Path, *, required_owner: int | None = None) -> None:
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        fail(f"request/result must be a regular file: {path}")
+    st = path.stat()
+    if st.st_mode & 0o077:
+        fail(f"request/result must not be group/world accessible: {path}")
+    if required_owner is not None and st.st_uid != required_owner:
+        fail(f"request owner is not the invoking user: {path}")
+    if st.st_size > MAX_PACKET_BYTES:
+        fail(f"request/result is too large: {path}")
+
+
+def request_user() -> int:
+    request_path = Path(sys.argv[sys.argv.index("--request") + 1])
+    owner = request_path.stat().st_uid
+    raw = os.environ.get("SUDO_UID", "")
+    if raw.isdigit() and int(raw) != owner:
+        fail("sudo invoking UID does not own the worker request")
+    carter_uid = pwd.getpwnam("carter").pw_uid
+    if owner != carter_uid:
+        fail("worker request is not owned by Carter")
+    return owner
+
+
+def read_packet(path: Path, owner: int) -> dict[str, Any]:
+    check_private_file(path, required_owner=owner)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"invalid worker request: {exc}")
+    if not isinstance(data, dict):
+        fail("worker request must be an object")
+    if data.get("protocol_version") != PROTOCOL_VERSION:
+        fail("worker protocol mismatch")
+    request_id = str(data.get("request_id") or "")
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        fail("worker request id is invalid")
+    return data
+
+
+def source_files(source: Path, owner: int, base: str) -> list[str]:
+    cp = run_as_owner(git_argv(source, "ls-tree", "-r", "-z", "--full-tree", base), owner, timeout=45)
+    if cp.returncode != 0:
+        fail(f"cannot enumerate immutable source files: {source}")
+    paths = []
+    for row in cp.stdout.split("\0"):
+        if not row:
+            continue
+        metadata, separator, path = row.partition("\t")
+        if not separator or metadata.split(" ", 1)[0] not in {"100644", "100755"}:
+            fail(f"symlinked or submodule source tree is not repairable: {source}")
+        try:
+            _safe_relpath(path, source_listing=True)
+        except ValueError:
+            # Credential-looking tracked files are not handed to a model.
+            continue
+        paths.append(path)
+    if not paths:
+        fail("source snapshot has no permitted files")
+    return paths
+
+
+def validate_source(repository: Mapping[str, Any], owner: int) -> tuple[Path, str, list[str]]:
+    raw = str(repository.get("source") or "")
+    source = Path(raw)
+    if not source.is_absolute() or not under(source, DEV_ROOT):
+        fail(f"source is outside ~/dev: {source}")
+    relative = source.resolve().relative_to(DEV_ROOT).parts
+    if not relative or relative[0].lower() in _INFRA_REPOSITORIES:
+        fail(f"infrastructure repository is not repairable: {source}")
+    _check_repo_config(source, lambda argv: run_as_owner(argv, owner, timeout=20))
+    cp = run_as_owner(
+        git_argv(source, "rev-parse", "--show-toplevel"),
+        owner,
+        timeout=20,
+    )
+    if cp.returncode != 0:
+        fail(f"source is not a Git worktree: {source}")
+    root = Path(cp.stdout.strip()).resolve()
+    if root != source.resolve() or not under(root, DEV_ROOT):
+        fail(f"source root changed or escaped ~/dev: {source}")
+    status = run_as_owner(
+        git_argv(root, "status", "--porcelain=v1"),
+        owner,
+        timeout=30,
+    )
+    if status.returncode != 0 or status.stdout:
+        fail(f"source repository is not clean: {root}")
+    base = str(repository.get("base_sha") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", base):
+        fail(f"invalid source base SHA: {root}")
+    current = run_as_owner(
+        git_argv(root, "rev-parse", "--verify", "HEAD^{commit}"),
+        owner,
+        timeout=20,
+    )
+    if current.returncode != 0 or current.stdout.strip() != base:
+        fail(f"source base changed before staging: {root}")
+    verified = run_as_owner(
+        git_argv(root, "rev-parse", "--verify", f"{base}^{{commit}}"),
+        owner,
+        timeout=20,
+    )
+    if verified.returncode != 0 or verified.stdout.strip() != base:
+        fail(f"source base is not a verified commit: {root}")
+    files = source_files(root, owner, base)
+    allowed = repository.get("allowed_paths")
+    if not isinstance(allowed, list) or not allowed:
+        fail(f"repository has no allowed paths: {root}")
+    for path in allowed:
+        rel = Path(_safe_relpath(path))
+        candidate = root / rel
+        if candidate.is_symlink():
+            fail(f"symlink allowed path: {path}")
+    return root, base, files
+
+
+def safe_tree_permissions(root: Path) -> None:
+    total = 0
+    for path in [root, *root.rglob("*")]:
+        try:
+            st = path.lstat()
+        except OSError as exc:
+            fail(f"cannot inspect staged path: {path}: {exc}")
+        if stat.S_ISLNK(st.st_mode):
+            fail(f"staged source unexpectedly contains symlink: {path}")
+        total += st.st_size if stat.S_ISREG(st.st_mode) else 0
+        if total > MAX_SOURCE_BYTES:
+            fail("source snapshot exceeds bounded size")
+        mode = stat.S_IMODE(st.st_mode) & 0o777
+        if path.is_dir():
+            mode = mode | 0o700
+        else:
+            mode = mode | 0o600
+        mode &= ~0o7000
+        os.chmod(path, mode)
+        os.chown(path, WORKER_UID, -1)
+
+
+def stage_repository(source: Path, base: str, files: list[str], root: Path, index: int, owner: int) -> Path:
+    workspace = root / f"repo-{index}"
+    workspace.mkdir(mode=0o700)
+    # Git reads the Carter checkout only as the invoking UID.  Archive the
+    # verified immutable commit, never HEAD/index, and disable hook/fsmonitor
+    # integration even for that user-owned repository.
+    account = pwd.getpwuid(owner)
+    archive = subprocess.Popen(
+        git_argv(source, "archive", "--format=tar", base, "--", *files),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_command_env(),
+        user=owner,
+        group=account.pw_gid,
+        extra_groups=(),
+    )
+    try:
+        tar = subprocess.run(
+            ["/bin/tar", "-xf", "-", "-C", str(workspace), "--no-same-owner", "--no-same-permissions"],
+            stdin=archive.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+            check=False,
+        )
+    finally:
+        if archive.stdout is not None:
+            archive.stdout.close()
+    archive_rc = archive.wait(timeout=30)
+    if archive_rc != 0 or tar.returncode != 0:
+        detail = (tar.stderr or b"").decode(errors="replace")[:500]
+        fail(f"source archive failed for {source}: {detail}")
+    # Extraction and all root-side inspection are complete before this
+    # workspace becomes visible to the unprivileged worker.
+    safe_tree_permissions(workspace)
+    return workspace
+
+
+def write_internal_request(request: Mapping[str, Any], path: Path) -> None:
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    payload = json.dumps(request, sort_keys=True, separators=(",", ":"), default=str).encode()
+    if len(payload) > MAX_PACKET_BYTES:
+        fail("expanded worker request is too large")
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chown(temporary, WORKER_UID, -1)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def copy_result(source: Path, target: Path, owner: int, *, service_failed: bool = False) -> None:
+    if source.is_symlink() or not source.is_file():
+        fail("worker returned no regular result packet")
+    st = source.stat()
+    if st.st_size > MAX_PACKET_BYTES:
+        fail("worker result is too large")
+    payload = source.read_bytes()
+    # Validate JSON before copying it to Carter's run artifact.  The content is
+    # still untrusted; this only protects the result path and protocol framing.
+    try:
+        packet = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        fail(f"worker returned invalid result JSON: {exc}")
+    if not isinstance(packet, dict) or packet.get("protocol_version") != PROTOCOL_VERSION:
+        fail("worker returned invalid protocol packet")
+    if service_failed and packet.get("status") != "worker-failed":
+        fail("failed worker service returned a non-failure packet")
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if target.exists() or target.is_symlink():
+        if target.is_symlink() or target.stat().st_uid != owner:
+            fail(f"result destination is not owned by invoking user: {target}")
+    fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        os.fchown(fd, owner, -1)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+def acquire_lease() -> int:
+    LEASE_PATH.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(LEASE_PATH, flags, 0o600)
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != 0 or st.st_mode & 0o077:
+            fail(f"worker lease is not root-private: {LEASE_PATH}")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def live_worker_units() -> list[str]:
+    listed = run(
+        [
+            "/usr/bin/systemctl",
+            "list-units",
+            "--all",
+            "--no-legend",
+            "--plain",
+            "steward-worker@*.service",
+        ],
+        timeout=30,
+    )
+    if listed.returncode != 0:
+        fail(f"cannot inspect existing worker units: {listed.stderr or listed.stdout}")
+    live_states = {"active", "activating", "deactivating", "reloading"}
+    live: list[str] = []
+    for line in listed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[2] in live_states:
+            live.append(fields[0])
+    return live
+
+
+def ensure_no_live_worker() -> None:
+    live = live_worker_units()
+    if live:
+        fail(f"older worker unit is still live: {', '.join(live[:8])}")
+
+
+def stop_worker_unit(unit: str) -> None:
+    # ``start --wait`` normally leaves a oneshot inactive.  These best-effort
+    # stop/kill calls also cover helper timeouts and a worker killed mid-model.
+    try:
+        run(["/usr/bin/systemctl", "stop", "--wait", unit], timeout=120)
+    except Exception:
+        pass
+    try:
+        run(
+            [
+                "/usr/bin/systemctl",
+                "kill",
+                "--kill-who=all",
+                "--signal=SIGKILL",
+                unit,
+            ],
+            timeout=30,
+        )
+    except Exception:
+        pass
+    active = run(["/usr/bin/systemctl", "is-active", unit], timeout=15)
+    if active.stdout.strip() in {"active", "activating", "deactivating", "reloading"}:
+        fail(f"worker unit did not stop before lease release: {unit}")
+
+
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="launch one isolated steward-worker request")
+    parser.add_argument("--request", required=True, type=Path)
+    parser.add_argument("--result", required=True, type=Path)
+    parser.add_argument("--timeout", type=int, default=2700)
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        fail("steward-worker-run must execute as root via the exact sudoers rule")
+    if args.request.is_symlink() or not args.request.is_absolute() or not under(args.request.parent, RESULT_ROOT):
+        fail(f"request source is outside {RESULT_ROOT}")
+    if args.result.is_symlink() or not args.result.is_absolute() or not under(args.result.parent, RESULT_ROOT):
+        fail(f"result destination is outside {RESULT_ROOT}")
+    owner = request_user()
+    request = read_packet(args.request, owner)
+    request_id = str(request["request_id"])
+    if args.request.name != f".steward-worker-request-{request_id}.json":
+        fail("worker request filename does not match its ID")
+    if args.result.name != f".steward-worker-result-{request_id}.json":
+        fail("worker result filename does not match its ID")
+    repositories = request.get("repositories")
+    if not isinstance(repositories, list) or not repositories:
+        fail("worker request has no repositories")
+    global WORKER_UID
+    WORKER_UID = pwd.getpwnam(WORKER_USER).pw_uid
+    internal_request = REQUESTS / f"{request_id}.json"
+    run_root = RUNS / request_id
+    internal_result = run_root / "result.json"
+    session_root = run_root / "sessions"
+    expanded = dict(request)
+    expanded["timeout"] = max(60, min(2700, int(args.timeout)))
+    expanded_repositories = []
+    lease_fd = acquire_lease()
+    unit: str | None = None
+    mounted = False
+    try:
+        ensure_no_live_worker()
+        if internal_request.exists():
+            internal_request.unlink()
+        if run_root.is_mount():
+            fail(f"stale worker mount requires inspection: {run_root}")
+        if run_root.exists():
+            shutil.rmtree(run_root)
+        run_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+        mount = run([
+            "/usr/bin/mount", "-t", "tmpfs", "-o",
+            "size=1G,mode=0700,nosuid,nodev", "steward-worker", str(run_root),
+        ])
+        if mount.returncode != 0:
+            fail(f"cannot create bounded worker storage: {mount.stderr}")
+        mounted = True
+        for index, repository in enumerate(repositories):
+            if not isinstance(repository, Mapping):
+                fail("worker repository is not an object")
+            source, base, files = validate_source(repository, owner)
+            workspace = stage_repository(source, base, files, run_root, index, owner)
+            item = dict(repository)
+            item.update({"source": str(source), "base_sha": base, "workspace": str(workspace)})
+            expanded_repositories.append(item)
+        # Only now expose the completed staged parent to the worker UID.
+        os.chown(run_root, WORKER_UID, -1)
+        os.chmod(run_root, 0o700)
+        session_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+        os.chown(session_root, WORKER_UID, -1)
+        private_home = run_root / "home"
+        private_home.mkdir(mode=0o700)
+        os.chown(private_home, WORKER_UID, -1)
+        model_dir = private_home / ".omp" / "agent"
+        model_dir.mkdir(mode=0o700, parents=True)
+        shutil.copyfile("/etc/steward-worker/models.yml", model_dir / "models.yml")
+        for path in (private_home / ".omp", model_dir, model_dir / "models.yml"):
+            os.chown(path, WORKER_UID, -1)
+        write_internal_request(expanded | {"repositories": expanded_repositories}, internal_request)
+        ensure_no_live_worker()
+        unit = f"steward-worker@{request_id}.service"
+        started = run(
+            ["/usr/bin/systemctl", "start", "--wait", unit],
+            timeout=expanded["timeout"] + 60,
+        )
+        stop_worker_unit(unit)
+        unit = None
+        if started.returncode != 0 and not internal_result.exists():
+            detail = started.stderr or started.stdout or ""
+            fail(f"worker service failed: {detail[:800]}")
+        copy_result(internal_result, args.result, owner, service_failed=started.returncode != 0)
+        return 0
+    finally:
+        try:
+            if unit is not None:
+                stop_worker_unit(unit)
+            # Stop failure deliberately retains the bounded mount for manual
+            # inspection; a later request rejects any still-live unit.
+            if mounted:
+                unmount = run(["/usr/bin/umount", "--", str(run_root)], timeout=30)
+                if unmount.returncode != 0:
+                    fail(f"cannot remove worker storage: {unmount.stderr}")
+            shutil.rmtree(run_root, ignore_errors=True)
+            try:
+                internal_request.unlink()
+            except FileNotFoundError:
+                pass
+        finally:
+            fcntl.flock(lease_fd, fcntl.LOCK_UN)
+            os.close(lease_fd)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"steward-worker-run: {exc}", file=sys.stderr)
+        raise SystemExit(1)

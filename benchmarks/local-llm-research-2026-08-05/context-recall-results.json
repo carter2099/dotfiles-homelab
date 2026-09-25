@@ -1,0 +1,294 @@
+{
+  "created_at": "2026-08-05T19:23:28.387190+00:00",
+  "method": "Single non-streamed planted-fact recall request; case-insensitive expected-answer matching",
+  "results": [
+    {
+      "model": "ornith-1.0-35b-q8",
+      "target_tokens": 200000,
+      "benchmark_file": "/home/carter/benchmarks/context-window/context_200_000.md",
+      "status": "failed",
+      "error": "RemoteDisconnected: Remote end closed connection without response"
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "target_tokens": 200000,
+      "benchmark_file": "/home/carter/benchmarks/context-window/context_200_000.md",
+      "tag": "patched-proxy",
+      "endpoint": "http://localhost:18081/v1/chat/completions",
+      "status": "completed",
+      "http_status": 200,
+      "fallback_header": null,
+      "elapsed_seconds": 1001.057369,
+      "score": 10,
+      "matches": {
+        "portland": true,
+        "age 7": true,
+        "dune": true,
+        "2019": true,
+        "daily grind": true,
+        "maple": true,
+        "march 14": true,
+        "2 years": true,
+        "thai green curry": true,
+        "queenstown": true
+      },
+      "answer": "Based on the interview transcript provided, here are the answers to the questions:\n\n**1. What city did Jordan grow up in?**\n*   **Answer:** Portland, Oregon\n*   **Source:** Found in the section where Alex asks, \"Where exactly did you grow up?\" Jordan responds: \"I grew up in Portland, Oregon. Specifically, the northeast side, near the Alberta Arts District.\"\n\n**2. At what age did Jordan learn to play piano?**\n*   **Answer:** 7\n*   **Source:** Found in the section where Alex asks, \"You mentioned you play piano. How long have you been playing?\" Jordan responds: \"I learned to play piano at age 7.\"\n\n**3. What is Jordan's favorite book?**\n*   **Answer:** Dune by Frank Herbert\n*   **Source:** Found in the section where Alex asks, \"I always like asking guests \u2014 what's a book that's had a lasting impact on you?\" Jordan responds: \"My favorite book is Dune by Frank Herbert.\"\n\n**4. What year did Jordan start their current job?**\n*   **Answer:** 2019\n*   **Source:** Found in the section where Alex asks, \"Walk me through your career timeline. When did you start your current role?\" Jordan responds: \"I started my current job in 2019.\"\n\n**5. Where did Jordan meet their spouse?**\n*   **Answer:** The Daily Grind coffee shop\n*   **Source:** Found in the section where Alex asks, \"You mentioned your partner earlier. How did you two meet?\" Jordan responds: \"I met my spouse in a coffee shop called 'The Daily Grind'.\"\n\n**6. What is the name of Jordan's dog?**\n*   **Answer:** Maple\n*   **Source:** Found in the section where Alex asks, \"Do you have any pets?\" Jordan responds: \"I have a dog named Maple \u2014 she's a golden retriever.\"\n\n**7. What is Jordan's mother's birthday?**\n*   **Answer:** March 14th\n*   **Source:** Found in the section where Alex asks, \"Are you close with your family? Do you still celebrate birthdays and holidays together?\" Jordan responds: \"My mother's birthday is March 14th \u2014 it's a big deal in our family.\"\n\n**8. How long did Jordan live in Tokyo?**\n*   **Answer:** 2 years\n*   **Source:** Found in the section where Alex asks, \"You've hinted at living abroad. Where did you live, and for how long?\" Jordan responds: \"I lived in Tokyo for 2 years, from 2015 to 2017.\"\n\n**9. What is Jordan's favorite food?**\n*   **Answer:** Thai green curry\n*   **Source:** Found in the section where Alex asks, \"What's your go-to order when you're trying a new restaurant?\" Jordan responds: \"My favorite food is Thai green curry.\"\n\n**10. Where did Jordan go skydiving?**\n*   **Answer:** Queenstown, New Zealand\n*   **Source:** Found in the section where Alex asks, \"What's the most adventurous thing you've ever done?\" Jordan responds: \"I went skydiving once in Queenstown, New Zealand.\"",
+      "finish_reason": "stop",
+      "usage": {
+        "completion_tokens": 701,
+        "prompt_tokens": 201031,
+        "total_tokens": 201732,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 201031,
+        "prompt_ms": 938364.797,
+        "prompt_per_token_ms": 4.667761673572732,
+        "prompt_per_second": 214.23544515172176,
+        "predicted_n": 701,
+        "predicted_ms": 32995.417,
+        "predicted_per_token_ms": 47.06906847360913,
+        "predicted_per_second": 21.24537477432093
+      },
+      "error": null
+    },
+    {
+      "model": "qwen-3.6-35b-q8-fast",
+      "target_tokens": 200000,
+      "benchmark_file": "/home/carter/benchmarks/context-window/context_200_000.md",
+      "tag": "patched-proxy",
+      "endpoint": "http://localhost:18081/v1/chat/completions",
+      "status": "completed",
+      "http_status": 200,
+      "fallback_header": null,
+      "elapsed_seconds": 1027.209247,
+      "score": 10,
+      "matches": {
+        "portland": true,
+        "age 7": true,
+        "dune": true,
+        "2019": true,
+        "daily grind": true,
+        "maple": true,
+        "march 14": true,
+        "2 years": true,
+        "thai green curry": true,
+        "queenstown": true
+      },
+      "answer": "Based on the interview transcript provided, here are the answers to the questions:\n\n1. **What city did Jordan grow up in?**\n   *   **Answer:** Portland, Oregon\n   *   **Source:** Found in the section where Alex asks, \"Where exactly did you grow up?\" Jordan responds, \"I grew up in Portland, Oregon.\"\n\n2. **At what age did Jordan learn to play piano?**\n   *   **Answer:** 7\n   *   **Source:** Found in the section where Alex asks, \"You mentioned you play piano. How long have you been playing?\" Jordan responds, \"I learned to play piano at age 7.\"\n\n3. **What is Jordan's favorite book?**\n   *   **Answer:** Dune by Frank Herbert\n   *   **Source:** Found in the section where Alex asks, \"I always like asking guests \u2014 what's a book that's had a lasting impact on you?\" Jordan responds, \"My favorite book is Dune by Frank Herbert.\"\n\n4. **What year did Jordan start their current job?**\n   *   **Answer:** 2019\n   *   **Source:** Found in the section where Alex asks, \"Walk me through your career timeline. When did you start your current role?\" Jordan responds, \"I started my current job in 2019.\"\n\n5. **Where did Jordan meet their spouse?**\n   *   **Answer:** The Daily Grind coffee shop\n   *   **Source:** Found in the section where Alex asks, \"You mentioned your partner earlier. How did you two meet?\" Jordan responds, \"I met my spouse in a coffee shop called 'The Daily Grind'.\"\n\n6. **What is the name of Jordan's dog?**\n   *   **Answer:** Maple\n   *   **Source:** Found in the section where Alex asks, \"Do you have any pets?\" Jordan responds, \"I have a dog named Maple \u2014 she's a golden retriever.\"\n\n7. **What is Jordan's mother's birthday?**\n   *   **Answer:** March 14th\n   *   **Source:** Found in the section where Alex asks, \"Are you close with your family? Do you still celebrate birthdays and holidays together?\" Jordan responds, \"My mother's birthday is March 14th...\"\n\n8. **How long did Jordan live in Tokyo?**\n   *   **Answer:** 2 years\n   *   **Source:** Found in the section where Alex asks, \"You've hinted at living abroad. Where did you live, and for how long?\" Jordan responds, \"I lived in Tokyo for 2 years...\"\n\n9. **What is Jordan's favorite food?**\n   *   **Answer:** Thai green curry\n   *   **Source:** Found in the section where Alex asks, \"What's your go-to order when you're trying a new restaurant?\" Jordan responds, \"My favorite food is Thai green curry.\"\n\n10. **Where did Jordan go skydiving?**\n    *   **Answer:** Queenstown, New Zealand\n    *   **Source:** Found in the section where Alex asks, \"What's the most adventurous thing you've ever done?\" Jordan responds, \"I went skydiving once in Queenstown, New Zealand.\"",
+      "finish_reason": "stop",
+      "usage": {
+        "completion_tokens": 687,
+        "prompt_tokens": 201031,
+        "total_tokens": 201718,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 201031,
+        "prompt_ms": 963279.364,
+        "prompt_per_token_ms": 4.791695629032338,
+        "prompt_per_second": 208.69439075827646,
+        "predicted_n": 687,
+        "predicted_ms": 33033.722,
+        "predicted_per_token_ms": 48.08402037845706,
+        "predicted_per_second": 20.796929876687827
+      },
+      "error": null
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "target_tokens": 200000,
+      "benchmark_file": "/home/carter/benchmarks/context-window/context_200_000.md",
+      "tag": "patched-proxy",
+      "endpoint": "http://localhost:18081/v1/chat/completions",
+      "status": "completed",
+      "http_status": 200,
+      "fallback_header": null,
+      "elapsed_seconds": 713.417297,
+      "score": 10,
+      "matches": {
+        "portland": true,
+        "age 7": true,
+        "dune": true,
+        "2019": true,
+        "daily grind": true,
+        "maple": true,
+        "march 14": true,
+        "2 years": true,
+        "thai green curry": true,
+        "queenstown": true
+      },
+      "answer": "1. **Portland, Oregon** (Found in the section: \"Before we dive into your career, let's talk about your background. Where exactly did you grow up?\")\n\n2. **7** (Found in the section: \"You mentioned you play piano. How long have you been playing?\")\n\n3. **Dune by Frank Herbert** (Found in the section: \"I always like asking guests \u2014 what's a book that's had a lasting impact on you?\")\n\n4. **2019** (Found in the section: \"Walk me through your career timeline. When did you start your current role?\")\n\n5. **The Daily Grind coffee shop** (Found in the section: \"You mentioned your partner earlier. How did you two meet?\")\n\n6. **Maple** (Found in the section: \"Do you have any pets?\")\n\n7. **March 14th** (Found in the section: \"Are you close with your family? Do you still celebrate birthdays and holidays together?\")\n\n8. **2 years** (Found in the section: \"You've hinted at living abroad. Where did you live, and for how long?\")\n\n9. **Thai green curry** (Found in the section: \"What's your go-to order when you're trying a new restaurant?\")\n\n10. **Queenstown, New Zealand** (Found in the section: \"What's the most adventurous thing you've ever done?\")",
+      "finish_reason": "stop",
+      "usage": {
+        "completion_tokens": 308,
+        "prompt_tokens": 205951,
+        "total_tokens": 206259,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 205951,
+        "prompt_ms": 679664.779,
+        "prompt_per_token_ms": 3.300128569416997,
+        "prompt_per_second": 303.0184972995342,
+        "predicted_n": 308,
+        "predicted_ms": 10924.633,
+        "predicted_per_token_ms": 35.46958766233766,
+        "predicted_per_second": 28.193166763588305,
+        "draft_n": 276,
+        "draft_n_accepted": 241
+      },
+      "error": null
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "target_tokens": 200000,
+      "benchmark_file": "/home/carter/benchmarks/context-window/context_200_000.md",
+      "tag": "patched-proxy",
+      "endpoint": "http://localhost:18081/v1/chat/completions",
+      "status": "completed",
+      "http_status": 200,
+      "fallback_header": null,
+      "elapsed_seconds": 217.551784,
+      "score": 10,
+      "matches": {
+        "portland": true,
+        "age 7": true,
+        "dune": true,
+        "2019": true,
+        "daily grind": true,
+        "maple": true,
+        "march 14": true,
+        "2 years": true,
+        "thai green curry": true,
+        "queenstown": true
+      },
+      "answer": "1. **Portland, Oregon** (Found in the section: \"Before we dive into your career, let's talk about your background.\")\n2. **7** (Found in the section: \"You mentioned you play piano. How long have you been playing?\")\n3. **Dune by Frank Herbert** (Found in the section: \"I always like asking guests \u2014 what's a book that's had a lasting impact on you?\")\n4. **2019** (Found in the section: \"Walk me through your career timeline. When did you start your current role?\")\n5. **The Daily Grind coffee shop** (Found in the section: \"You mentioned your partner earlier. How did you two meet?\")\n6. **Maple** (Found in the section: \"Do you have any pets?\")\n7. **March 14th** (Found in the section: \"Are you close with your family? Do you still celebrate birthdays and holidays together?\")\n8. **2 years** (Found in the section: \"You've hinted at living abroad. Where did you live, and for how long?\")\n9. **Thai green curry** (Found in the section: \"What's your go-to order when you're trying a new restaurant?\")\n10. **Queenstown, New Zealand** (Found in the section: \"What's the most adventurous thing you've ever done?\")",
+      "finish_reason": "stop",
+      "usage": {
+        "completion_tokens": 301,
+        "prompt_tokens": 205951,
+        "total_tokens": 206252,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 205951,
+        "prompt_ms": 202801.582,
+        "prompt_per_token_ms": 0.9847079256716403,
+        "prompt_per_second": 1015.5295534134444,
+        "predicted_n": 301,
+        "predicted_ms": 5604.383,
+        "predicted_per_token_ms": 18.619212624584716,
+        "predicted_per_second": 53.707963927518875,
+        "draft_n": 344,
+        "draft_n_accepted": 216
+      },
+      "error": null
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "target_tokens": 200000,
+      "benchmark_file": "/home/carter/benchmarks/context-window/context_200_000.md",
+      "tag": "patched-proxy",
+      "endpoint": "http://localhost:18081/v1/chat/completions",
+      "status": "completed",
+      "http_status": 200,
+      "fallback_header": null,
+      "elapsed_seconds": 114.024073,
+      "score": 10,
+      "matches": {
+        "portland": true,
+        "age 7": true,
+        "dune": true,
+        "2019": true,
+        "daily grind": true,
+        "maple": true,
+        "march 14": true,
+        "2 years": true,
+        "thai green curry": true,
+        "queenstown": true
+      },
+      "answer": "Here are the answers based on the interview transcript:\n\n1. **Portland, Oregon**\n   *Found in:* The section where Alex asks about Jordan's background (\"Where exactly did you grow up?\"). Jordan states, \"I grew up in Portland, Oregon.\"\n\n2. **Age 7**\n   *Found in:* The section where Alex asks about Jordan's piano playing (\"You mentioned you play piano. How long have you been playing?\"). Jordan states, \"I learned to play piano at age 7.\"\n\n3. **Dune by Frank Herbert**\n   *Found in:* The section where Alex asks about a book that had a lasting impact (\"What's a book that's had a lasting impact on you?\"). Jordan states, \"My favorite book is Dune by Frank Herbert.\"\n\n4. **2019**\n   *Found in:* The section where Alex asks about Jordan's career timeline (\"Walk me through your career timeline. When did you start your current role?\"). Jordan states, \"I started my current job in 2019.\"\n\n5. **A coffee shop called 'The Daily Grind'**\n   *Found in:* The section where Alex asks how Jordan and their partner met (\"You mentioned you play piano... [later] You mentioned your partner earlier. How did you two meet?\"). Jordan states, \"I met my spouse in a coffee shop called 'The Daily Grind'.\"\n\n6. **Maple**\n   *Found in:* The section where Alex asks about pets (\"Do you have any pets?\"). Jordan states, \"I have a dog named Maple \u2014 she's a golden retriever.\"\n\n7. **March 14th**\n   *Found in:* The section where Alex asks about family closeness and birthdays (\"Are you close with your family? Do you still celebrate birthdays and holidays together?\"). Jordan states, \"My mother's birthday is March 14th.\"\n\n8. **2 years**\n   *Found in:* The section where Alex asks about living abroad (\"You've hinted at living abroad. Where did you live, and for how long?\"). Jordan states, \"I lived in Tokyo for 2 years, from 2015 to 2017.\"\n\n9. **Thai green curry**\n   *Found in:* The section where Alex asks about restaurant orders (\"What's your go-to order when you're trying a new restaurant?\"). Jordan states, \"My favorite food is Thai green curry.\"\n\n10. **Queenstown, New Zealand**\n    *Found in:* The section where Alex asks about adventurous experiences (\"What's the most adventurous thing you've ever done?\"). Jordan states, \"I went skydiving once in Queenstown, New Zealand.\"",
+      "finish_reason": "stop",
+      "usage": {
+        "completion_tokens": 575,
+        "prompt_tokens": 201031,
+        "total_tokens": 201606,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 201031,
+        "prompt_ms": 91977.311,
+        "prompt_per_token_ms": 0.45752799816943657,
+        "prompt_per_second": 2185.658591388913,
+        "predicted_n": 575,
+        "predicted_ms": 14317.061,
+        "predicted_per_token_ms": 24.89923652173913,
+        "predicted_per_second": 40.16187400472765
+      },
+      "error": null
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "target_tokens": 200000,
+      "benchmark_file": "/home/carter/benchmarks/context-window/context_200_000.md",
+      "tag": "deployed-proxy",
+      "endpoint": "http://localhost:8081/v1/chat/completions",
+      "status": "completed",
+      "http_status": 200,
+      "fallback_header": null,
+      "elapsed_seconds": 970.907959,
+      "score": 10,
+      "matches": {
+        "portland": true,
+        "age 7": true,
+        "dune": true,
+        "2019": true,
+        "daily grind": true,
+        "maple": true,
+        "march 14": true,
+        "2 years": true,
+        "thai green curry": true,
+        "queenstown": true
+      },
+      "answer": "Based on the interview transcript provided, here are the answers to the questions:\n\n**1. What city did Jordan grow up in?**\n*   **Answer:** Portland, Oregon\n*   **Source:** Found in the section where Alex asks, \"Where exactly did you grow up?\" Jordan responds: \"I grew up in Portland, Oregon. Specifically, the northeast side, near the Alberta Arts District.\"\n\n**2. At what age did Jordan learn to play piano?**\n*   **Answer:** 7\n*   **Source:** Found in the section where Alex asks, \"You mentioned you play piano. How long have you been playing?\" Jordan responds: \"I learned to play piano at age 7.\"\n\n**3. What is Jordan's favorite book?**\n*   **Answer:** Dune by Frank Herbert\n*   **Source:** Found in the section where Alex asks, \"I always like asking guests \u2014 what's a book that's had a lasting impact on you?\" Jordan responds: \"My favorite book is Dune by Frank Herbert.\"\n\n**4. What year did Jordan start their current job?**\n*   **Answer:** 2019\n*   **Source:** Found in the section where Alex asks, \"Walk me through your career timeline. When did you start your current role?\" Jordan responds: \"I started my current job in 2019.\"\n\n**5. Where did Jordan meet their spouse?**\n*   **Answer:** The Daily Grind coffee shop\n*   **Source:** Found in the section where Alex asks, \"You mentioned your partner earlier. How did you two meet?\" Jordan responds: \"I met my spouse in a coffee shop called 'The Daily Grind'.\"\n\n**6. What is the name of Jordan's dog?**\n*   **Answer:** Maple\n*   **Source:** Found in the section where Alex asks, \"Do you have any pets?\" Jordan responds: \"I have a dog named Maple \u2014 she's a golden retriever.\"\n\n**7. What is Jordan's mother's birthday?**\n*   **Answer:** March 14th\n*   **Source:** Found in the section where Alex asks, \"Are you close with your family? Do you still celebrate birthdays and holidays together?\" Jordan responds: \"My mother's birthday is March 14th \u2014 it's a big deal in our family.\"\n\n**8. How long did Jordan live in Tokyo?**\n*   **Answer:** 2 years\n*   **Source:** Found in the section where Alex asks, \"You've hinted at living abroad. Where did you live, and for how long?\" Jordan responds: \"I lived in Tokyo for 2 years, from 2015 to 2017.\"\n\n**9. What is Jordan's favorite food?**\n*   **Answer:** Thai green curry\n*   **Source:** Found in the section where Alex asks, \"What's your go-to order when you're trying a new restaurant?\" Jordan responds: \"My favorite food is Thai green curry.\"\n\n**10. Where did Jordan go skydiving?**\n*   **Answer:** Queenstown, New Zealand\n*   **Source:** Found in the section where Alex asks, \"What's the most adventurous thing you've ever done?\" Jordan responds: \"I went skydiving once in Queenstown, New Zealand.\"",
+      "finish_reason": "stop",
+      "usage": {
+        "completion_tokens": 701,
+        "prompt_tokens": 201031,
+        "total_tokens": 201732,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 201031,
+        "prompt_ms": 937821.875,
+        "prompt_per_token_ms": 4.665060985619133,
+        "prompt_per_second": 214.35946991532907,
+        "predicted_n": 701,
+        "predicted_ms": 32523.504,
+        "predicted_per_token_ms": 46.39586875891584,
+        "predicted_per_second": 21.55364317448698
+      },
+      "error": null
+    }
+  ],
+  "updated_at": "2026-08-05T23:12:51.546302+00:00"
+}

@@ -1,0 +1,711 @@
+{
+  "rubric": "golf-scoring-rubric.json",
+  "source_truth": "weather-source-truth.json",
+  "reviews": [
+    {
+      "model": "ornith-1.0-9b-q6",
+      "run": 1,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 3
+      },
+      "notes": "Proactively used nine current-weather calls, but resolved dates poorly and never anchored the official golf-course point. The final answer covers only Saturday and Sunday rather than Thu Aug 6 through Sat Aug 8, omits the two highest-risk days, and confidently calls Saturday dry after 10 AM. It is visually clear but incomplete and internally inconsistent (overcast all afternoon, then 'clear skies after 10am'). Advisor feedback drove the model toward the wrong weekend-only interpretation.",
+      "overall": 2,
+      "telemetry": {
+        "duration_seconds": 237.861,
+        "model_turn_count": 8,
+        "initial_ttft_seconds": 7.340174,
+        "mean_turn_ttft_seconds": 2.614272375,
+        "mean_generation_tokens_per_second": 62.933659155434164,
+        "tool_call_count": 9,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "concern": 1
+        }
+      }
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "run": 2,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 0
+      },
+      "notes": "Used nine non-error weather calls but became trapped in date correction loops. The final response is only an acknowledgement that it still needs to fetch Friday; it contains no usable forecast. Two concern and two blocker advisories identify the date-window failures.",
+      "overall": 1,
+      "telemetry": {
+        "duration_seconds": 603.178,
+        "model_turn_count": 9,
+        "initial_ttft_seconds": 0.7298259999999999,
+        "mean_turn_ttft_seconds": 0.49024388888888826,
+        "mean_generation_tokens_per_second": 66.0363675893007,
+        "tool_call_count": 9,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "concern": 2,
+          "blocker": 2
+        }
+      }
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "run": 3,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 3,
+        "readability": 4
+      },
+      "notes": "Used two current web searches and reached the correct West Lafayette Thu-Sat window, but did not use point-specific official data and one query mislabeled calendar dates. Thursday and Friday are broadly right; Saturday is overstated as likely wet instead of the clearly best/driest day, and the answer lacks lightning/radar guidance. The day-by-day layout is concise and readable.",
+      "overall": 3.3333333333333335,
+      "telemetry": {
+        "duration_seconds": 122.604,
+        "model_turn_count": 3,
+        "initial_ttft_seconds": 0.543933,
+        "mean_turn_ttft_seconds": 0.444341999999998,
+        "mean_generation_tokens_per_second": 66.76737304525847,
+        "tool_call_count": 2,
+        "tool_errors": 0,
+        "advisor_severity_counts": {}
+      }
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "run": 4,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 4
+      },
+      "notes": "Two current searches, but the model followed an incorrect advisor interpretation and shifted the requested Thu-Sat window to Fri-Sun. The table is compact and easy to scan, but the date-window error is disqualifying under the accuracy rubric and lightning guidance is absent.",
+      "overall": 2.3333333333333335,
+      "telemetry": {
+        "duration_seconds": 156.031,
+        "model_turn_count": 4,
+        "initial_ttft_seconds": 0.38285499999999995,
+        "mean_turn_ttft_seconds": 0.37739849999999836,
+        "mean_generation_tokens_per_second": 66.63757676910802,
+        "tool_call_count": 2,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "concern": 1
+        }
+      }
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "run": 5,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 4
+      },
+      "notes": "One relevant current search and the correct city, but the model reports Wed-Fri rather than the required Thu-Sat window. The compact table and play-window bullets are clear and it mentions lightning delays, but it omits Saturday entirely and therefore cannot identify the best day.",
+      "overall": 2.3333333333333335,
+      "telemetry": {
+        "duration_seconds": 59.723,
+        "model_turn_count": 2,
+        "initial_ttft_seconds": 0.54783,
+        "mean_turn_ttft_seconds": 0.5020085,
+        "mean_generation_tokens_per_second": 66.8327914038146,
+        "tool_call_count": 1,
+        "tool_errors": 0,
+        "advisor_severity_counts": {}
+      }
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "run": 1,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 4
+      },
+      "notes": "One current West Lafayette search, but the answer covers Wed-Fri and omits Saturday despite an advisor explicitly flagging the weekend/date mismatch. The table is concise and usable in form, but the wrong date window is a rubric-level accuracy failure and there is no lightning/radar safety guidance.",
+      "overall": 2.3333333333333335,
+      "telemetry": {
+        "duration_seconds": 97.03,
+        "model_turn_count": 2,
+        "initial_ttft_seconds": 6.281521000000001,
+        "mean_turn_ttft_seconds": 3.4835529999999983,
+        "mean_generation_tokens_per_second": 56.40680566916465,
+        "tool_call_count": 1,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "concern": 1
+        }
+      }
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "run": 2,
+      "scores": {
+        "tool_calling": 4,
+        "accuracy": 4,
+        "readability": 5
+      },
+      "notes": "Correctly queried West Lafayette for Aug 6-8 and grounded the answer in an NWS point forecast, though it used only one search result and that result cited an Aug 3 update. Temperatures and the Thursday-high/Saturday-best pattern are accurate. It mildly understates Friday's continuing storm risk and over-focuses Thursday storms after 2 PM. Excellent compact table with lightning and radar guidance.",
+      "overall": 4.333333333333333,
+      "telemetry": {
+        "duration_seconds": 101.85,
+        "model_turn_count": 2,
+        "initial_ttft_seconds": 0.749349,
+        "mean_turn_ttft_seconds": 0.720999999999999,
+        "mean_generation_tokens_per_second": 99.10767703482654,
+        "tool_call_count": 1,
+        "tool_errors": 0,
+        "advisor_severity_counts": {}
+      }
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "run": 3,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 3
+      },
+      "notes": "Correctly resolved the exact Birck complex using official Purdue sources and performed two weather searches, but advisor feedback redirected the final answer to Saturday-Sunday only. Omitting Thursday and Friday makes the date window wrong. The two-row table is clear, but severely incomplete and lacks hourly trends or lightning/radar guidance.",
+      "overall": 2,
+      "telemetry": {
+        "duration_seconds": 194.669,
+        "model_turn_count": 5,
+        "initial_ttft_seconds": 0.6675230000000001,
+        "mean_turn_ttft_seconds": 0.6724091999999937,
+        "mean_generation_tokens_per_second": 93.63941745177378,
+        "tool_call_count": 3,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "concern": 1
+        }
+      }
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "run": 4,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 4
+      },
+      "notes": "Resolved the exact Birck complex from the official Purdue site and used a relevant West Lafayette forecast, but interpreted 'next three days' as Wed-Fri and omitted Saturday. The compact table is easy to scan, yet the date-window error is disqualifying and no lightning/radar safety guidance is included.",
+      "overall": 2.3333333333333335,
+      "telemetry": {
+        "duration_seconds": 79.184,
+        "model_turn_count": 3,
+        "initial_ttft_seconds": 0.6247200000000002,
+        "mean_turn_ttft_seconds": 0.5704946666666675,
+        "mean_generation_tokens_per_second": 94.00828504697175,
+        "tool_call_count": 2,
+        "tool_errors": 0,
+        "advisor_severity_counts": {}
+      }
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "run": 5,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 4
+      },
+      "notes": "Used two current searches including an NWS result and gave a clear 9 AM-5 PM table, but again answered Wed-Fri instead of Thu-Sat. It consequently calls Thursday the best day and omits the actual best day, Saturday. Radar is mentioned, but the wrong window makes the forecast unusable for the required evaluation.",
+      "overall": 2.3333333333333335,
+      "telemetry": {
+        "duration_seconds": 129.921,
+        "model_turn_count": 3,
+        "initial_ttft_seconds": 0.8282470000000002,
+        "mean_turn_ttft_seconds": 0.7337496666666677,
+        "mean_generation_tokens_per_second": 93.85168362297087,
+        "tool_call_count": 2,
+        "tool_errors": 0,
+        "advisor_severity_counts": {}
+      }
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "run": 1,
+      "scores": {
+        "tool_calling": 4,
+        "accuracy": 4,
+        "readability": 4
+      },
+      "notes": "Resolved the exact Birck complex, queried a five-day West Lafayette forecast, and explicitly attempted an hourly search; the hourly source did not yield a table, which the model disclosed instead of inventing detail. Correct Thu-Sat window, temperatures, Thursday/Friday storm pattern, and relatively better Saturday. Missing actual hourly trends and explicit leave-the-course lightning safety keeps it below top marks.",
+      "overall": 4,
+      "telemetry": {
+        "duration_seconds": 389.985,
+        "model_turn_count": 4,
+        "initial_ttft_seconds": 23.536419,
+        "mean_turn_ttft_seconds": 7.355435749999999,
+        "mean_generation_tokens_per_second": 19.422658219454977,
+        "tool_call_count": 3,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "nit": 1
+        }
+      }
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "run": 2,
+      "scores": {
+        "tool_calling": 2,
+        "accuracy": 0,
+        "readability": 4
+      },
+      "notes": "Made eight tool calls, but date confusion, a useless shell call, a malformed JavaScript eval, an aborted final search, and reliance on explicitly interpolated hourly estimates left the answer weakly grounded. Despite an advisor warning, the final table covers Wed-Fri and labels it the golf weekend, omitting Saturday. The table itself is clear and includes lightning/radar guidance, but it is for the wrong dates.",
+      "overall": 2,
+      "telemetry": {
+        "duration_seconds": 601.468,
+        "model_turn_count": 9,
+        "initial_ttft_seconds": 3.173832,
+        "mean_turn_ttft_seconds": 9.149028000000007,
+        "mean_generation_tokens_per_second": 25.586352401327545,
+        "tool_call_count": 8,
+        "tool_errors": 1,
+        "advisor_severity_counts": {
+          "concern": 1
+        }
+      }
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "run": 3,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 0
+      },
+      "notes": "Resolved the official course and made five current weather searches without reported tool errors, but repeatedly searched mismatched Wed-Fri and Fri-Sun windows. The 10-minute OMP run ended after a blocker advisor intervention with an empty final answer. No forecast was delivered, so accuracy and readability are zero.",
+      "overall": 1,
+      "telemetry": {
+        "duration_seconds": 601.312,
+        "model_turn_count": 6,
+        "initial_ttft_seconds": 3.0626430000000004,
+        "mean_turn_ttft_seconds": 3.6046425000000055,
+        "mean_generation_tokens_per_second": 21.82388161540777,
+        "tool_call_count": 5,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "blocker": 1
+        }
+      }
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "run": 4,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 4
+      },
+      "notes": "Correctly resolved the exact Birck complex from Purdue's official site and queried West Lafayette weather, but explicitly requested and answered Wed-Fri rather than Thu-Sat. The clear table and radar/hydration advice are readable, yet Saturday is missing and the requested window is wrong.",
+      "overall": 2.3333333333333335,
+      "telemetry": {
+        "duration_seconds": 394.026,
+        "model_turn_count": 3,
+        "initial_ttft_seconds": 5.167981999999999,
+        "mean_turn_ttft_seconds": 47.723620333333336,
+        "mean_generation_tokens_per_second": 10.309869632279968,
+        "tool_call_count": 2,
+        "tool_errors": 0,
+        "advisor_severity_counts": {}
+      }
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "run": 5,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 4,
+        "readability": 4
+      },
+      "notes": "Resolved the exact Birck complex and correct Thu-Sat dates, then made five weather searches plus one aborted NWS-gridpoint search. The broad temperatures and risk pattern are accurate, but the claimed 2-4 PM storm tendency is an unverified climatological generalization rather than the requested hourly forecast. Clear table and radar advice; explicit lightning action and real hourly trends are missing.",
+      "overall": 3.6666666666666665,
+      "telemetry": {
+        "duration_seconds": 601.48,
+        "model_turn_count": 7,
+        "initial_ttft_seconds": 2.476113,
+        "mean_turn_ttft_seconds": 4.067736428571428,
+        "mean_generation_tokens_per_second": 25.00642674349762,
+        "tool_call_count": 6,
+        "tool_errors": 1,
+        "advisor_severity_counts": {
+          "concern": 1
+        }
+      }
+    },
+    {
+      "model": "qwen-3.6-35b-q8-fast",
+      "run": 1,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 3
+      },
+      "notes": "Used one current West Lafayette search but answered Wed-Fri, omitted Saturday, and ignored an advisor that supplied the corrected NWS pattern. The table is easy to scan, but it understates Thursday's disruption risk and the casual 'don't worry too much' language is poor lightning-safety guidance.",
+      "overall": 2,
+      "telemetry": {
+        "duration_seconds": 250.217,
+        "model_turn_count": 2,
+        "initial_ttft_seconds": 29.862623,
+        "mean_turn_ttft_seconds": 16.298570500000004,
+        "mean_generation_tokens_per_second": 14.482207122984933,
+        "tool_call_count": 1,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "concern": 1
+        }
+      }
+    },
+    {
+      "model": "qwen-3.6-35b-q8-fast",
+      "run": 2,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 1
+      },
+      "notes": "Used current searches and read the NWS West Lafayette point page, but an incorrect advisor request to add Sunday caused the final response to contain only Sunday. The required Thu-Sat forecast is absent. The single-day correction is legible but severely incomplete.",
+      "overall": 1.3333333333333333,
+      "telemetry": {
+        "duration_seconds": 219.391,
+        "model_turn_count": 5,
+        "initial_ttft_seconds": 0.32284299999999977,
+        "mean_turn_ttft_seconds": 6.048863199999991,
+        "mean_generation_tokens_per_second": 29.26697335451766,
+        "tool_call_count": 3,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "nit": 1
+        }
+      }
+    },
+    {
+      "model": "qwen-3.6-35b-q8-fast",
+      "run": 3,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 4
+      },
+      "notes": "Checked the system date and performed separate current forecast searches, but followed an incorrect advisor interpretation and delivered Fri-Sun instead of Thu-Sat. The three-row table is clear, yet it omits Thursday, adds Sunday, and incorrectly frames Sunday as the best evaluated day.",
+      "overall": 2.3333333333333335,
+      "telemetry": {
+        "duration_seconds": 156.397,
+        "model_turn_count": 4,
+        "initial_ttft_seconds": 3.8157259999999997,
+        "mean_turn_ttft_seconds": 2.730332999999995,
+        "mean_generation_tokens_per_second": 27.948831086522212,
+        "tool_call_count": 3,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "concern": 1
+        }
+      }
+    },
+    {
+      "model": "qwen-3.6-35b-q8-fast",
+      "run": 4,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 4
+      },
+      "notes": "One relevant current West Lafayette search, but it mechanically used calendar days Wed-Fri and ignored the weekend qualifier, omitting Saturday. The table is concise and readable, but the required date window and best-day conclusion are absent.",
+      "overall": 2.3333333333333335,
+      "telemetry": {
+        "duration_seconds": 63.949,
+        "model_turn_count": 2,
+        "initial_ttft_seconds": 4.079917,
+        "mean_turn_ttft_seconds": 3.4013865,
+        "mean_generation_tokens_per_second": 27.658375653876924,
+        "tool_call_count": 1,
+        "tool_errors": 0,
+        "advisor_severity_counts": {}
+      }
+    },
+    {
+      "model": "qwen-3.6-35b-q8-fast",
+      "run": 5,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 3
+      },
+      "notes": "One current West Lafayette search, but the final answer again covers Wed-Fri while claiming to run through the weekend, omitting Saturday and ignoring advisor feedback. The table is legible, but the false framing and absence of lightning-specific safety reduce its practical clarity.",
+      "overall": 2,
+      "telemetry": {
+        "duration_seconds": 118.195,
+        "model_turn_count": 2,
+        "initial_ttft_seconds": 0.277525,
+        "mean_turn_ttft_seconds": 1.4411414999999983,
+        "mean_generation_tokens_per_second": 27.868339114620113,
+        "tool_call_count": 1,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "concern": 1
+        }
+      }
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "run": 1,
+      "scores": {
+        "tool_calling": 2,
+        "accuracy": 0,
+        "readability": 3
+      },
+      "notes": "Made five current-source calls, but extracted the data incorrectly: Wednesday and Thursday tables are byte-for-byte duplicates, Wednesday's daytime forecast was already in the past, and an advisor explicitly flagged the fabrication. The answer also covers Wed-Fri rather than Thu-Sat. Detailed tables are scannable, but long, misleading, and unsupported.",
+      "overall": 1.6666666666666667,
+      "telemetry": {
+        "duration_seconds": 490.043,
+        "model_turn_count": 4,
+        "initial_ttft_seconds": 29.471618000000003,
+        "mean_turn_ttft_seconds": 32.57855325,
+        "mean_generation_tokens_per_second": 21.404718447083653,
+        "tool_call_count": 5,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "concern": 1
+        }
+      }
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "run": 2,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 3
+      },
+      "notes": "Made seven non-error calls and used current NWS plus weekend searches, but followed a blocker advisor into answering Saturday-Sunday only. Thursday and Friday are missing, so the required Thu-Sat window fails. The two-day summary is easy to read but severely incomplete and lacks lightning/radar action.",
+      "overall": 2,
+      "telemetry": {
+        "duration_seconds": 506.913,
+        "model_turn_count": 8,
+        "initial_ttft_seconds": 4.116714,
+        "mean_turn_ttft_seconds": 4.422675750000003,
+        "mean_generation_tokens_per_second": 28.90231572514957,
+        "tool_call_count": 7,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "blocker": 1
+        }
+      }
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "run": 3,
+      "scores": {
+        "tool_calling": 3,
+        "accuracy": 0,
+        "readability": 4
+      },
+      "notes": "Correctly named the Birck complex and used two weather searches, but asked for and answered Wed-Fri instead of Thu-Sat. Its highly specific Thursday and Friday precipitation percentages materially conflict with NWS/Open-Meteo, as the advisor flagged. The day-by-day answer is easy to scan and includes proper leave-the-course lightning advice, but Saturday is absent.",
+      "overall": 2.3333333333333335,
+      "telemetry": {
+        "duration_seconds": 225.078,
+        "model_turn_count": 2,
+        "initial_ttft_seconds": 3.6024849999999997,
+        "mean_turn_ttft_seconds": 7.1185779999999985,
+        "mean_generation_tokens_per_second": 28.853701287751623,
+        "tool_call_count": 2,
+        "tool_errors": 0,
+        "advisor_severity_counts": {
+          "concern": 1
+        }
+      }
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "run": 4,
+      "scores": {
+        "tool_calling": 4,
+        "accuracy": 3,
+        "readability": 4
+      },
+      "notes": "One current search with the correct West Lafayette Aug 6-8 window and accurate broad temperatures/risk pattern. It correctly ranks Saturday as more stable, but infers mainly afternoon/evening storms and recommends an early tee despite Thursday's highest official risk occurring in the morning and persisting through the window. Clear table, but no explicit lightning/radar instruction.",
+      "overall": 3.6666666666666665,
+      "telemetry": {
+        "duration_seconds": 84.871,
+        "model_turn_count": 2,
+        "initial_ttft_seconds": 3.7324979999999996,
+        "mean_turn_ttft_seconds": 3.0801579999999973,
+        "mean_generation_tokens_per_second": 28.93354323249436,
+        "tool_call_count": 1,
+        "tool_errors": 0,
+        "advisor_severity_counts": {}
+      }
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "run": 5,
+      "scores": {
+        "tool_calling": 4,
+        "accuracy": 4,
+        "readability": 4
+      },
+      "notes": "Used separate current daily and hourly searches for the correct West Lafayette Aug 6-8 window. Temperatures, Thursday-morning risk, Friday-afternoon buildup, and Saturday-afternoon best conclusion are supported across the source ensemble, though the chosen WeatherBug probabilities differ from NWS and the answer does not discuss that uncertainty. Compact, actionable table; lightning/radar safety is missing.",
+      "overall": 4,
+      "telemetry": {
+        "duration_seconds": 159.846,
+        "model_turn_count": 3,
+        "initial_ttft_seconds": 0.28216700000000006,
+        "mean_turn_ttft_seconds": 2.345899000000005,
+        "mean_generation_tokens_per_second": 28.939522980791395,
+        "tool_call_count": 2,
+        "tool_errors": 0,
+        "advisor_severity_counts": {}
+      }
+    }
+  ],
+  "summary": {
+    "ornith-1.0-9b-q6": {
+      "runs": 5,
+      "tool_calling_mean": 3,
+      "accuracy_mean": 0.6,
+      "readability_mean": 3,
+      "overall_mean": 2.2,
+      "per_run_overall": [
+        2,
+        1,
+        3.3333333333333335,
+        2.3333333333333335,
+        2.3333333333333335
+      ],
+      "runs_with_correct_date_window": 1,
+      "runs_with_accuracy_at_least_4": 0,
+      "runs_at_omp_time_limit": 1,
+      "empty_final_answers": 0,
+      "mean_duration_seconds": 235.8794,
+      "mean_initial_ttft_seconds": 1.9089236,
+      "mean_turn_ttft_seconds": 0.885653052777777,
+      "mean_generation_tokens_per_second": 65.84155359258318,
+      "total_tool_calls": 23,
+      "runs_with_tools": 5,
+      "total_tool_errors": 0,
+      "advisor_severity_counts": {
+        "concern": 4,
+        "blocker": 2
+      }
+    },
+    "gemma-4-12b-q5": {
+      "runs": 5,
+      "tool_calling_mean": 3.2,
+      "accuracy_mean": 0.8,
+      "readability_mean": 4,
+      "overall_mean": 2.6666666666666665,
+      "per_run_overall": [
+        2.3333333333333335,
+        4.333333333333333,
+        2,
+        2.3333333333333335,
+        2.3333333333333335
+      ],
+      "runs_with_correct_date_window": 1,
+      "runs_with_accuracy_at_least_4": 1,
+      "runs_at_omp_time_limit": 0,
+      "empty_final_answers": 0,
+      "mean_duration_seconds": 120.5308,
+      "mean_initial_ttft_seconds": 1.8302720000000001,
+      "mean_turn_ttft_seconds": 1.2362413066666653,
+      "mean_generation_tokens_per_second": 87.40277376514152,
+      "total_tool_calls": 9,
+      "runs_with_tools": 5,
+      "total_tool_errors": 0,
+      "advisor_severity_counts": {
+        "concern": 2
+      }
+    },
+    "gemma-4-26b-q8": {
+      "runs": 5,
+      "tool_calling_mean": 3,
+      "accuracy_mean": 1.6,
+      "readability_mean": 3.2,
+      "overall_mean": 2.6,
+      "per_run_overall": [
+        4,
+        2,
+        1,
+        2.3333333333333335,
+        3.6666666666666665
+      ],
+      "runs_with_correct_date_window": 2,
+      "runs_with_accuracy_at_least_4": 2,
+      "runs_at_omp_time_limit": 3,
+      "empty_final_answers": 1,
+      "mean_duration_seconds": 517.6542,
+      "mean_initial_ttft_seconds": 7.4833978,
+      "mean_turn_ttft_seconds": 14.380092602380955,
+      "mean_generation_tokens_per_second": 20.429837722393575,
+      "total_tool_calls": 24,
+      "runs_with_tools": 5,
+      "total_tool_errors": 2,
+      "advisor_severity_counts": {
+        "nit": 1,
+        "concern": 2,
+        "blocker": 1
+      }
+    },
+    "qwen-3.6-35b-q8-fast": {
+      "runs": 5,
+      "tool_calling_mean": 3,
+      "accuracy_mean": 0,
+      "readability_mean": 3,
+      "overall_mean": 2.0,
+      "per_run_overall": [
+        2,
+        1.3333333333333333,
+        2.3333333333333335,
+        2.3333333333333335,
+        2
+      ],
+      "runs_with_correct_date_window": 0,
+      "runs_with_accuracy_at_least_4": 0,
+      "runs_at_omp_time_limit": 0,
+      "empty_final_answers": 0,
+      "mean_duration_seconds": 161.6298,
+      "mean_initial_ttft_seconds": 7.6717268,
+      "mean_turn_ttft_seconds": 5.984058939999998,
+      "mean_generation_tokens_per_second": 25.44494526650437,
+      "total_tool_calls": 9,
+      "runs_with_tools": 5,
+      "total_tool_errors": 0,
+      "advisor_severity_counts": {
+        "concern": 3,
+        "nit": 1
+      }
+    },
+    "ornith-1.0-35b-q8": {
+      "runs": 5,
+      "tool_calling_mean": 3.2,
+      "accuracy_mean": 1.4,
+      "readability_mean": 3.6,
+      "overall_mean": 2.7333333333333334,
+      "per_run_overall": [
+        1.6666666666666667,
+        2,
+        2.3333333333333335,
+        3.6666666666666665,
+        4
+      ],
+      "runs_with_correct_date_window": 2,
+      "runs_with_accuracy_at_least_4": 1,
+      "runs_at_omp_time_limit": 0,
+      "empty_final_answers": 0,
+      "mean_duration_seconds": 293.35020000000003,
+      "mean_initial_ttft_seconds": 8.2410964,
+      "mean_turn_ttft_seconds": 9.9091728,
+      "mean_generation_tokens_per_second": 27.40676033465412,
+      "total_tool_calls": 17,
+      "runs_with_tools": 5,
+      "total_tool_errors": 0,
+      "advisor_severity_counts": {
+        "concern": 2,
+        "blocker": 1
+      }
+    }
+  }
+}

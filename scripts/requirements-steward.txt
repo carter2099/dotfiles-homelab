@@ -1,0 +1,2 @@
+# The steward uses only Python's standard library and scripts/workflow_state.py.
+# Keep this file explicit so deployment checks do not install unreviewed packages.

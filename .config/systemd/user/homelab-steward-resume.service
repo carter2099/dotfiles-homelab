@@ -1,0 +1,18 @@
+[Unit]
+Description=Homelab steward post-reboot resume — continues from pending.md
+After=network-online.target docker.service
+Wants=network-online.target
+OnFailure=notify-failure@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/carter/scripts/steward-resume.sh
+# Same as homelab-steward.service: the resumed run may have Dependabot stopped
+# (P0). Re-arm it even if the resume crashes, times out, or is killed -- but not
+# while a main steward run is in progress (a running oneshot is "activating"),
+# since that run's P0 stopped the webhook on purpose (F254).
+ExecStopPost=/bin/sh -c 'systemctl --user show -p ActiveState --value homelab-steward.service | grep -qx -e active -e activating -e reloading || exec systemctl --user start dependabot-webhook.service'
+TimeoutStartSec=7200
+MemoryHigh=6G
+MemoryMax=8G
+TasksMax=1024

@@ -1,0 +1,9 @@
+[Unit]
+Description=Publish Daily News at 02:00 America/New_York (2am ET)
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target

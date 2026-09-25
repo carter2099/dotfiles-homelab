@@ -1,0 +1,70 @@
+{
+  "protocol_version": "steward-worker-v1",
+  "identity": "steward-worker",
+  "proxy": {
+    "socket": "/run/steward-worker/proxy.sock",
+    "host_target": "127.0.0.1",
+    "port_target": 8082,
+    "worker_loopback_port": 18082,
+    "allow_other_destinations": false,
+    "idle_seconds": 300,
+    "max_connections": 8,
+    "max_buffer_bytes": 1048576
+  },
+  "source_root": "/home/carter/dev",
+  "writable_roots": [
+    "/var/lib/steward-worker/runs/<request-id>"
+  ],
+  "request_root": "/var/lib/steward-worker/requests/<request-id>.json",
+  "max_runtime_seconds": 2700,
+  "memory_max": "2G",
+  "cpu_quota": "200%",
+  "tasks_max": 256,
+  "publication": {
+    "mode": "local-review-ref",
+    "push": false,
+    "deploy": false,
+    "hooks": false,
+    "allowed_git_operations": [
+      "rev-parse",
+      "config --file --no-includes --name-only",
+      "diff --no-ext-diff --no-textconv",
+      "read-tree with private index",
+      "apply --cached with private index",
+      "write-tree with private index",
+      "commit-tree --no-gpg-sign",
+      "update-ref refs/steward-review/<base>-<tree>"
+    ]
+  },
+  "forbidden": [
+    "Carter home",
+    "OMP authentication/session databases",
+    "SSH keys/agent/control sockets",
+    "Cloudflare credentials",
+    "R2 credentials",
+    "Docker socket/group",
+    "LXD socket/group",
+    "sudo group",
+    "host D-Bus",
+    "deployment/infrastructure/security/backup/orchestrator paths"
+  ],
+  "sandbox": {
+    "private_network": true,
+    "private_users": true,
+    "no_new_privs": true,
+    "capability_bounding_set": [],
+    "worker_home": "/var/lib/steward-worker/runs/<request-id>/home (0700, discarded)",
+    "cross_job_visibility": false,
+    "job_storage": "1 GiB tmpfs; private /tmp and /var/tmp capped at 256 MiB each",
+    "address_families": ["AF_UNIX", "AF_INET"],
+    "host_sockets_mounted": ["/run/steward-worker/proxy.sock"],
+    "host_sockets_denied": [
+      "/run/dbus",
+      "/run/systemd",
+      "/var/run/docker.sock",
+      "/var/run/lxd",
+      "/home/carter/.ssh",
+      "/home/carter/.omp"
+    ]
+  }
+}

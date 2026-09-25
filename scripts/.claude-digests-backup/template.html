@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0; padding:0; background-color:#f4f4f7; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+<table role="presentation" width="100%" style="background-color:#f4f4f7; padding:24px 0;">
+<tr><td align="center">
+<table role="presentation" width="600" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:8px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+
+  <!-- Header -->
+  <tr>
+    <td style="background-color:#1a1a2e; padding:28px 32px;">
+      <h1 style="margin:0; color:#ffffff; font-size:22px; font-weight:600; letter-spacing:-0.3px;">{{DIGEST_TITLE}}</h1>
+      <p style="margin:6px 0 0; color:#a0a0b8; font-size:14px;">{{DATE}}</p>
+    </td>
+  </tr>
+
+  <!-- Intro -->
+  <tr>
+    <td style="padding:24px 32px 16px;">
+      <p style="margin:0; color:#444; font-size:15px; line-height:1.6;">{{INTRO}}</p>
+    </td>
+  </tr>
+
+  <!-- Divider -->
+  <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
+
+  <!-- Fresh Section -->
+  <tr>
+    <td style="padding:16px 32px 8px;">
+      <h2 style="margin:0; color:#1a1a2e; font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Fresh — Last 24 Hours</h2>
+    </td>
+  </tr>
+
+  {{FRESH_STORIES}}
+
+  <!-- Divider -->
+  <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:12px 0;"></td></tr>
+
+  <!-- Recent & Relevant Section -->
+  <tr>
+    <td style="padding:16px 32px 8px;">
+      <h2 style="margin:0; color:#1a1a2e; font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Recent & Relevant</h2>
+    </td>
+  </tr>
+
+  {{RECENT_STORIES}}
+
+  <!-- Footer -->
+  <tr>
+    <td style="padding:24px 32px; background-color:#f8f8fb; border-top:1px solid #e8e8ee;">
+      <p style="margin:0; color:#999; font-size:12px; text-align:center;">Curated by Claude — carter2099.com</p>
+    </td>
+  </tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>
+
+<!--
+STORY BLOCK TEMPLATE — use this HTML for each story:
+
+<tr>
+  <td style="padding:8px 32px;">
+    <p style="margin:0 0 2px;">
+      <a href="{{URL}}" style="color:#1a1a2e; font-size:15px; font-weight:600; text-decoration:none;">{{TITLE}}</a>
+      <span style="color:#999; font-size:12px; font-weight:400;"> · {{CATEGORY}}</span>
+    </p>
+    <p style="margin:0; color:#555; font-size:14px; line-height:1.5;">{{SUMMARY}}</p>
+  </td>
+</tr>
+
+For "Recent & Relevant" stories, append a WHY line:
+
+<tr>
+  <td style="padding:8px 32px;">
+    <p style="margin:0 0 2px;">
+      <a href="{{URL}}" style="color:#1a1a2e; font-size:15px; font-weight:600; text-decoration:none;">{{TITLE}}</a>
+      <span style="color:#999; font-size:12px; font-weight:400;"> · {{CATEGORY}}</span>
+    </p>
+    <p style="margin:0; color:#555; font-size:14px; line-height:1.5;">{{SUMMARY}}</p>
+    <p style="margin:2px 0 0; color:#7c6bbf; font-size:13px; font-style:italic;">↳ {{WHY_STILL_RELEVANT}}</p>
+  </td>
+</tr>
+-->

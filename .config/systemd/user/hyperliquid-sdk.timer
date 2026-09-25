@@ -1,0 +1,9 @@
+[Unit]
+Description=Run Hyperliquid SDK maintenance on Monday and Thursday at 4am ET
+
+[Timer]
+OnCalendar=Mon,Thu *-*-* 04:00:00 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target

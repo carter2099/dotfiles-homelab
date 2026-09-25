@@ -1,0 +1,16 @@
+# Minimal P7b worker configuration.  This file intentionally contains no
+# Carter auth, extension, history, GitHub, or local-model settings.  The
+# in-namespace loopback bridge forwards only to steward-worker-proxy.service's
+# fixed Unix-socket relay and ultimately 127.0.0.1:8082 on the host.
+setupVersion: 2
+modelRoles:
+  default: opencode-go/deepseek-v4.1-flash
+  task: opencode-go/deepseek-v4.1-flash
+  smol: opencode-go/deepseek-v4.1-flash
+  tiny: opencode-go/deepseek-v4.1-flash
+advisor:
+  enabled: false
+  syncBacklog: off
+extensions: []
+github:
+  enabled: false

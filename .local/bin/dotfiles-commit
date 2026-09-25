@@ -1,0 +1,3 @@
+#!/bin/bash
+# Commit exact dotfiles paths (secret scan + public showcase scope); see ~/scripts/dotfiles_commit.py
+exec python3 "$HOME/scripts/dotfiles_commit.py" "$@"

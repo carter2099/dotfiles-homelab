@@ -1,0 +1,11 @@
+[Unit]
+Description=Email failure notification for %i
+# Triggered via OnFailure=notify-failure@%n.service on the watched units.
+# Every trigger must run so the script can count rate-limited failures.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=%h/scripts/notify-failure.sh %i
+TimeoutStartSec=5min
+UMask=0077

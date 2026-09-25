@@ -1,0 +1,6 @@
+# Match Windows' MAC-based DHCP identity so both boots reuse the rig's LAN lease.
+network:
+  version: 2
+  ethernets:
+    eno2:
+      dhcp-identifier: mac

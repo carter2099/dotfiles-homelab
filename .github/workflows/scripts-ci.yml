@@ -1,0 +1,65 @@
+name: scripts-ci
+
+# Offline verification of the tracked ~/scripts pipelines. The verifiers resolve
+# every input relative to the checkout, so HOME is never the repository here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scripts-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SHELLCHECK_VERSION: v0.10.0
+      SHELLCHECK_SHA256: 6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install ShellCheck (matches host 0.10.0)
+        run: |
+          archive="shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSLo "$RUNNER_TEMP/$archive" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/${archive}"
+          echo "${SHELLCHECK_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 "$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}/shellcheck" "$RUNNER_TEMP/bin/shellcheck"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/shellcheck" --version
+
+      - name: Install Python requirements
+        run: |
+          python -m pip install --disable-pip-version-check \
+            -r scripts/requirements-daily-news.txt \
+            -r scripts/requirements-steward.txt
+
+      - name: verify-daily-news.sh full
+        run: bash scripts/verify-daily-news.sh full
+
+      - name: verify-steward.sh full
+        run: bash scripts/verify-steward.sh full
+
+      - name: verify-dependabot-intake.sh full
+        run: bash scripts/verify-dependabot-intake.sh full
+
+      - name: verify-hyperliquid-guard.sh full
+        run: bash scripts/verify-hyperliquid-guard.sh full

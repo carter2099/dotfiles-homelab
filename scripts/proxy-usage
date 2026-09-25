@@ -1,0 +1,4 @@
+#!/bin/bash
+# Show aggregate OpenCode Go quota usage from the proxy.
+# Run in omp with: /bash ~/scripts/proxy-usage
+curl -s http://localhost:8082/usage

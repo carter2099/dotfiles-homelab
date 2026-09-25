@@ -1,0 +1,282 @@
+{
+  "prompt": "I'm golfing at the Purdue golf courses this weekend. What will the weather be like the next 3 days there? From about 9am to 5pm each day",
+  "created_at": "2026-08-05T20:43:25.403453+00:00",
+  "runs": [
+    {
+      "model": "ornith-1.0-9b-q6",
+      "run": 1,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T20:43:25.403517+00:00",
+      "duration_seconds": 237.861,
+      "raw_file": "raw/golf/ornith-1.0-9b-q6--run-1.jsonl",
+      "stderr_file": "raw/golf/ornith-1.0-9b-q6--run-1.stderr.txt"
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "run": 2,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T20:47:23.264553+00:00",
+      "duration_seconds": 603.178,
+      "raw_file": "raw/golf/ornith-1.0-9b-q6--run-2.jsonl",
+      "stderr_file": "raw/golf/ornith-1.0-9b-q6--run-2.stderr.txt"
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "run": 3,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T20:57:26.443411+00:00",
+      "duration_seconds": 122.604,
+      "raw_file": "raw/golf/ornith-1.0-9b-q6--run-3.jsonl",
+      "stderr_file": "raw/golf/ornith-1.0-9b-q6--run-3.stderr.txt"
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "run": 4,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T20:59:29.048283+00:00",
+      "duration_seconds": 156.031,
+      "raw_file": "raw/golf/ornith-1.0-9b-q6--run-4.jsonl",
+      "stderr_file": "raw/golf/ornith-1.0-9b-q6--run-4.stderr.txt"
+    },
+    {
+      "model": "ornith-1.0-9b-q6",
+      "run": 5,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:02:05.079581+00:00",
+      "duration_seconds": 59.723,
+      "raw_file": "raw/golf/ornith-1.0-9b-q6--run-5.jsonl",
+      "stderr_file": "raw/golf/ornith-1.0-9b-q6--run-5.stderr.txt"
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "run": 1,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:03:04.803546+00:00",
+      "duration_seconds": 97.03,
+      "raw_file": "raw/golf/gemma-4-12b-q5--run-1.jsonl",
+      "stderr_file": "raw/golf/gemma-4-12b-q5--run-1.stderr.txt"
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "run": 2,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:04:41.834501+00:00",
+      "duration_seconds": 101.85,
+      "raw_file": "raw/golf/gemma-4-12b-q5--run-2.jsonl",
+      "stderr_file": "raw/golf/gemma-4-12b-q5--run-2.stderr.txt"
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "run": 3,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:06:23.685405+00:00",
+      "duration_seconds": 194.669,
+      "raw_file": "raw/golf/gemma-4-12b-q5--run-3.jsonl",
+      "stderr_file": "raw/golf/gemma-4-12b-q5--run-3.stderr.txt"
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "run": 4,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:09:38.354919+00:00",
+      "duration_seconds": 79.184,
+      "raw_file": "raw/golf/gemma-4-12b-q5--run-4.jsonl",
+      "stderr_file": "raw/golf/gemma-4-12b-q5--run-4.stderr.txt"
+    },
+    {
+      "model": "gemma-4-12b-q5",
+      "run": 5,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:10:57.539466+00:00",
+      "duration_seconds": 129.921,
+      "raw_file": "raw/golf/gemma-4-12b-q5--run-5.jsonl",
+      "stderr_file": "raw/golf/gemma-4-12b-q5--run-5.stderr.txt"
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "run": 1,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:13:07.460849+00:00",
+      "duration_seconds": 389.985,
+      "raw_file": "raw/golf/gemma-4-26b-q8--run-1.jsonl",
+      "stderr_file": "raw/golf/gemma-4-26b-q8--run-1.stderr.txt"
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "run": 2,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:19:37.446197+00:00",
+      "duration_seconds": 601.468,
+      "raw_file": "raw/golf/gemma-4-26b-q8--run-2.jsonl",
+      "stderr_file": "raw/golf/gemma-4-26b-q8--run-2.stderr.txt"
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "run": 3,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:29:38.915363+00:00",
+      "duration_seconds": 601.312,
+      "raw_file": "raw/golf/gemma-4-26b-q8--run-3.jsonl",
+      "stderr_file": "raw/golf/gemma-4-26b-q8--run-3.stderr.txt"
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "run": 4,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:39:40.228249+00:00",
+      "duration_seconds": 394.026,
+      "raw_file": "raw/golf/gemma-4-26b-q8--run-4.jsonl",
+      "stderr_file": "raw/golf/gemma-4-26b-q8--run-4.stderr.txt"
+    },
+    {
+      "model": "gemma-4-26b-q8",
+      "run": 5,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:46:14.254875+00:00",
+      "duration_seconds": 601.48,
+      "raw_file": "raw/golf/gemma-4-26b-q8--run-5.jsonl",
+      "stderr_file": "raw/golf/gemma-4-26b-q8--run-5.stderr.txt"
+    },
+    {
+      "model": "qwen-3.6-35b-q8-fast",
+      "run": 1,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T21:56:15.736136+00:00",
+      "duration_seconds": 250.217,
+      "raw_file": "raw/golf/qwen-3.6-35b-q8-fast--run-1.jsonl",
+      "stderr_file": "raw/golf/qwen-3.6-35b-q8-fast--run-1.stderr.txt"
+    },
+    {
+      "model": "qwen-3.6-35b-q8-fast",
+      "run": 2,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T22:00:25.953608+00:00",
+      "duration_seconds": 219.391,
+      "raw_file": "raw/golf/qwen-3.6-35b-q8-fast--run-2.jsonl",
+      "stderr_file": "raw/golf/qwen-3.6-35b-q8-fast--run-2.stderr.txt"
+    },
+    {
+      "model": "qwen-3.6-35b-q8-fast",
+      "run": 3,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T22:04:05.345168+00:00",
+      "duration_seconds": 156.397,
+      "raw_file": "raw/golf/qwen-3.6-35b-q8-fast--run-3.jsonl",
+      "stderr_file": "raw/golf/qwen-3.6-35b-q8-fast--run-3.stderr.txt"
+    },
+    {
+      "model": "qwen-3.6-35b-q8-fast",
+      "run": 4,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T22:06:41.742658+00:00",
+      "duration_seconds": 63.949,
+      "raw_file": "raw/golf/qwen-3.6-35b-q8-fast--run-4.jsonl",
+      "stderr_file": "raw/golf/qwen-3.6-35b-q8-fast--run-4.stderr.txt"
+    },
+    {
+      "model": "qwen-3.6-35b-q8-fast",
+      "run": 5,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T22:07:45.692203+00:00",
+      "duration_seconds": 118.195,
+      "raw_file": "raw/golf/qwen-3.6-35b-q8-fast--run-5.jsonl",
+      "stderr_file": "raw/golf/qwen-3.6-35b-q8-fast--run-5.stderr.txt"
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "run": 1,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T22:09:43.887508+00:00",
+      "duration_seconds": 490.043,
+      "raw_file": "raw/golf/ornith-1.0-35b-q8--run-1.jsonl",
+      "stderr_file": "raw/golf/ornith-1.0-35b-q8--run-1.stderr.txt"
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "run": 2,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T22:17:53.931425+00:00",
+      "duration_seconds": 506.913,
+      "raw_file": "raw/golf/ornith-1.0-35b-q8--run-2.jsonl",
+      "stderr_file": "raw/golf/ornith-1.0-35b-q8--run-2.stderr.txt"
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "run": 3,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T22:26:20.845308+00:00",
+      "duration_seconds": 225.078,
+      "raw_file": "raw/golf/ornith-1.0-35b-q8--run-3.jsonl",
+      "stderr_file": "raw/golf/ornith-1.0-35b-q8--run-3.stderr.txt"
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "run": 4,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T22:30:05.923780+00:00",
+      "duration_seconds": 84.871,
+      "raw_file": "raw/golf/ornith-1.0-35b-q8--run-4.jsonl",
+      "stderr_file": "raw/golf/ornith-1.0-35b-q8--run-4.stderr.txt"
+    },
+    {
+      "model": "ornith-1.0-35b-q8",
+      "run": 5,
+      "thinking": "off",
+      "status": "completed",
+      "return_code": 0,
+      "started_at": "2026-08-05T22:31:30.795374+00:00",
+      "duration_seconds": 159.846,
+      "raw_file": "raw/golf/ornith-1.0-35b-q8--run-5.jsonl",
+      "stderr_file": "raw/golf/ornith-1.0-35b-q8--run-5.stderr.txt"
+    }
+  ],
+  "updated_at": "2026-08-05T22:34:10.642333+00:00"
+}

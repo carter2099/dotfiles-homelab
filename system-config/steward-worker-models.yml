@@ -1,0 +1,10 @@
+# Canonical models.yml copied into each disposable ~/.omp/agent.
+# The worker has one fixed proxy model and no provider credentials.
+providers:
+  opencode-go:
+    baseUrl: http://127.0.0.1:18082/v1
+    api: openai-completions
+    apiKey: proxy
+    models:
+      - id: deepseek-v4.1-flash
+        name: deepseek-v4.1-flash

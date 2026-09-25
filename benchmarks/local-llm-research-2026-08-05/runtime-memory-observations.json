@@ -1,0 +1,29 @@
+{
+  "method": "Point-in-time measurements while processing the 200K planted-fact prompt through the 256K, q4_0 K/V finalist configuration. WorkingSetSize is the Windows llama-server process; VRAM is whole-GPU nvidia-smi usage.",
+  "observations": [
+    {
+      "observed_at": "2026-08-05T20:03:37Z",
+      "model": "ornith-1.0-35b-q8",
+      "prompt_tokens_after_completion": 201031,
+      "llama_server_working_set_bytes": 28791132160,
+      "gpu_memory_used_mib": 11458,
+      "gpu_memory_total_mib": 12227
+    },
+    {
+      "observed_at": "2026-08-05T20:21:11Z",
+      "model": "qwen-3.6-35b-q8-fast",
+      "prompt_target_tokens": 200000,
+      "llama_server_working_set_bytes": 29679095808,
+      "gpu_memory_used_mib": 11498,
+      "gpu_memory_total_mib": 12227
+    },
+    {
+      "observed_at": "2026-08-05T20:39:00Z",
+      "model": "gemma-4-12b-q5",
+      "prompt_target_tokens": 200000,
+      "llama_server_working_set_bytes": 10175983616,
+      "gpu_memory_used_mib": 11594,
+      "gpu_memory_total_mib": 12227
+    }
+  ]
+}

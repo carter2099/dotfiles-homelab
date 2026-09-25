@@ -1,0 +1,35 @@
+{
+  "failures": [
+    {
+      "model": "gemma-4-26b-q5",
+      "weights": "UD-Q5_K_M",
+      "context_tokens": 262144,
+      "kv_type": "q8_0",
+      "gpu_layers": "all",
+      "cpu_moe_layers": 24,
+      "mtp": true,
+      "result": "llama-server exited during load; llama-swap returned HTTP 500: upstream command exited prematurely",
+      "recovery": "Increasing CPU MoE layers from 24 to 26 loaded successfully at the full 262144-token context.",
+      "interpretation": "The target-only fit estimate left insufficient VRAM for the MTP drafter and runtime overhead."
+    },
+    {
+      "model": "qwen-3.6-35b",
+      "weights": "Q8_0",
+      "context_tokens": 262144,
+      "kv_type": "q8_0",
+      "result": "projected failure; host RAM exceeds reserve-adjusted capacity",
+      "attempted": false,
+      "recovery": "q4_0 K/V cache at the same Q8_0 weight quant and 262144-token context loaded and benchmarked successfully.",
+      "interpretation": "Quantizing only the KV cache from q8_0 to q4_0 preserves the requested weight quant and context while restoring RAM headroom."
+    },
+    {
+      "component": "llm-proxy",
+      "model": "ornith-1.0-35b-q8",
+      "context_tokens": 200000,
+      "result": "Production proxy closed the non-streamed response after 1002.62 seconds; the client observed RemoteDisconnected.",
+      "root_cause": "http.Server.WriteTimeout was 10 minutes. The backend completed after the absolute write deadline, so ReverseProxy could not deliver the response.",
+      "recovery": "A candidate proxy with WriteTimeout disabled returned the same 201031-token prompt in 1001.06 seconds with 10/10 planted facts. After releasing commit 8eae500, the deployed proxy returned another 201031-token run in 970.91 seconds, HTTP 200, with 10/10 recall and no fallback.",
+      "interpretation": "The model and 256K configuration were healthy; the failure was the homelab proxy's response deadline, not a context-window or memory failure."
+    }
+  ]
+}

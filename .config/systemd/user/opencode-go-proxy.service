@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenCode Go Proxy (multi-subscription reverse proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/opencode-go-proxy -config %h/.config/opencode-go-proxy/config.json
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=10
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

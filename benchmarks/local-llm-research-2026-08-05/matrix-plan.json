@@ -1,0 +1,72 @@
+{
+  "models": {
+    "ornith-1.0-35b": {
+      "architecture": "Qwen 3.5 MoE, about 3B active",
+      "native_context_tokens": 262144,
+      "cpu_moe": true,
+      "quants": [
+        {"label": "Q4_K_M", "file": "deepreinforce-ai_Ornith-1.0-35B-Q4_K_M.gguf"},
+        {"label": "Q5_K_M", "file": "ornith-1.0-35b-Q5_K_M.gguf"},
+        {"label": "Q6_K", "file": "deepreinforce-ai_Ornith-1.0-35B-Q6_K.gguf"},
+        {"label": "Q8_0", "file": "deepreinforce-ai_Ornith-1.0-35B-Q8_0.gguf"}
+      ]
+    },
+    "qwen-3.6-35b": {
+      "architecture": "Qwen 3.6 MoE, about 3B active",
+      "native_context_tokens": 262144,
+      "cpu_moe": true,
+      "quants": [
+        {"label": "Q4_K_M", "file": "Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf"},
+        {"label": "Q5_K_M", "file": "Qwen_Qwen3.6-35B-A3B-Q5_K_M.gguf"},
+        {"label": "Q6_K", "file": "Qwen_Qwen3.6-35B-A3B-Q6_K.gguf"},
+        {"label": "Q8_0", "file": "Qwen_Qwen3.6-35B-A3B-Q8_0.gguf"}
+      ]
+    },
+    "gemma-4-26b-a4b": {
+      "architecture": "Gemma 4 MoE, about 4B active",
+      "native_context_tokens": 262144,
+      "cpu_moe": true,
+      "quants": [
+        {"label": "UD-Q4_K_M", "file": "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"},
+        {"label": "UD-Q5_K_M", "file": "gemma-4-26B-A4B-it-UD-Q5_K_M.gguf"},
+        {"label": "UD-Q6_K", "file": "gemma-4-26B-A4B-it-UD-Q6_K.gguf"},
+        {"label": "Q8_0", "file": "gemma-4-26B-A4B-it-Q8_0.gguf"}
+      ],
+      "mtp_drafter": "mtp-gemma-4-26B-A4B-it.gguf"
+    },
+    "gemma-4-12b": {
+      "architecture": "Gemma 4 dense 12B",
+      "native_context_tokens": 262144,
+      "cpu_moe": false,
+      "quants": [
+        {"label": "Q4_K_M", "file": "gemma-4-12b-it-Q4_K_M.gguf"},
+        {"label": "Q5_K_M", "file": "gemma-4-12b-it-Q5_K_M.gguf"},
+        {"label": "Q6_K", "file": "gemma-4-12b-it-Q6_K.gguf"},
+        {"label": "Q8_0", "file": "gemma-4-12b-it-Q8_0.gguf"}
+      ],
+      "mtp_drafter": "mtp-gemma-4-12b-it.gguf"
+    },
+    "ornith-1.0-9b": {
+      "architecture": "Qwen 3.5 dense 9B",
+      "native_context_tokens": 262144,
+      "cpu_moe": false,
+      "quants": [
+        {"label": "Q4_K_M", "file": "deepreinforce-ai_Ornith-1.0-9B-Q4_K_M.gguf"},
+        {"label": "Q5_K_M", "file": "deepreinforce-ai_Ornith-1.0-9B-Q5_K_M.gguf"},
+        {"label": "Q6_K", "file": "deepreinforce-ai_Ornith-1.0-9B-Q6_K.gguf"},
+        {"label": "Q8_0", "file": "deepreinforce-ai_Ornith-1.0-9B-Q8_0.gguf"}
+      ]
+    }
+  },
+  "contexts": [131072, 262144],
+  "rules": {
+    "minimum_weight_quant": "Q4; no sub-Q4 weight quant is tested or retained",
+    "kv_cache": "Benchmark both q8_0 and q4_0 K/V cache for every quant-context pair",
+    "context_integrity": "Disable llama.cpp automatic fit so it cannot silently shrink the requested context",
+    "speed_benchmark": "llama-bench: 512 prompt tokens, 128 generated tokens, 3 measured repetitions",
+    "context_validation": "Every matrix row allocates its named context; 256K finalists additionally run the existing 200K planted-fact recall test",
+    "server_benchmark": "Five streamed requests per finalist through llm-proxy for measured TTFT and generation throughput",
+    "concurrency": "Two simultaneous requests per finalist with two 128K slots as a smoke check",
+    "quality_evaluation": "Five independent omp runs per final model using the exact golf-weather prompt"
+  }
+}

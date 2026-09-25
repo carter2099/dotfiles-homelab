@@ -1,0 +1,19 @@
+# Daily News headless-agent config.
+# Keeps Codex-primary digest search and SearXNG fallback separate from other omp -p consumers.
+advisor:
+  enabled: false
+  syncBacklog: off
+# omp -p exits when the model ends its turn, so a backgrounded job's result is
+# lost. Keep headless shell work and subagents in the foreground.
+async:
+  enabled: false
+bash:
+  autoBackground:
+    enabled: false
+providers:
+  webSearchOrder:
+    - codex
+    - searxng
+searxng:
+  endpoint: http://localhost:8080
+  categories: general,news

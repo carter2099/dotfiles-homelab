@@ -1,0 +1,49 @@
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:0.11.4
+    container_name: open-webui
+    restart: unless-stopped
+    mem_limit: 4g
+    pids_limit: 512
+    # Loopback-only: reachable solely via the CF tunnel (cloudflared hits localhost), never the LAN.
+    ports:
+      - "127.0.0.1:48100:8080"
+    # host.docker.internal → the owui-host bridge gateway (br-owui), so calls to the
+    # host proxies (llm-proxy :8081, opencode-go-proxy :8082) arrive on br-owui, the only
+    # Docker bridge UFW allows them on (see ~/system-config/ufw-expected-rules.txt).
+    extra_hosts:
+      - "host.docker.internal:172.31.250.1"
+    env_file:
+      - .env            # WEBUI_SECRET_KEY only; model connections live in webui.db
+    environment:
+      # Second credential layer behind CF Access (first signup = admin)
+      - WEBUI_AUTH=True
+      - ENABLE_SIGNUP=False     # no self-registration; admin already created over loopback
+      - WEBUI_NAME=Homelab Chat
+    volumes:
+      - open-webui:/app/backend/data
+    networks:
+      owui-host:             # dedicated host-access bridge; attach nothing else to it
+        gw_priority: 1       # default route (egress) via br-owui
+      chat-search: {}        # shared with searxng so 'searxng' hostname resolves in-app
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  open-webui:
+
+networks:
+  owui-host:
+    name: owui-host
+    driver_opts:
+      com.docker.network.bridge.name: br-owui   # fixed name: UFW rules key on it
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+          gateway: 172.31.250.1
+  chat-search:
+    external: true
+    name: homelab-chat-search

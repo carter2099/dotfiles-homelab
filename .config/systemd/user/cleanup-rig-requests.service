@@ -1,0 +1,8 @@
+[Unit]
+Description=Clean up request files in ~/rig-requests older than 14 days
+OnFailure=notify-failure@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/carter/scripts/cleanup-rig-requests.sh
+TimeoutStartSec=60

@@ -1,0 +1,41 @@
+#!/bin/bash
+# ocusage — aggregate OpenCode Go usage from the proxy health endpoint
+set -euo pipefail
+
+json=$(curl -sf http://localhost:8082/health) || {
+    echo "Error: could not reach opencode-go-proxy on localhost:8082" >&2
+    exit 1
+}
+
+echo "+-------------------+----------+-------+------+------+------+---------+---------+---------+"
+echo "| Account           | Tier     | API   |  5h  |  7d  |  30d | R5h     | R7d     | R30d    |"
+echo "+-------------------+----------+-------+------+------+------+---------+---------+---------+"
+
+echo "$json" | jq -r '
+    .accounts[] |
+    [
+        .name,
+        .tier,
+        if .usage_fresh then "ok" else "STALE" end,
+        (.rolling.pct | tostring) + "%",
+        (.weekly.pct | tostring) + "%",
+        (.monthly.pct | tostring) + "%",
+        .rolling.reset_in,
+        .weekly.reset_in,
+        .monthly.reset_in
+    ] | @tsv' | while IFS=$'\t' read -r name tier api rh wh mh r5h r7d r30d; do
+    printf "| %-17s | %-8s | %-5s | %-4s | %-4s | %-4s | %-7s | %-7s | %-7s |\n" "$name" "$tier" "$api" "$rh" "$wh" "$mh" "$r5h" "$r7d" "$r30d"
+done
+
+echo "+-------------------+----------+-------+------+------+------+---------+---------+---------+"
+echo "$json" | jq -r '
+    "Aggregate: \(.aggregate.active_accounts)/\(.aggregate.total_accounts) active accounts",
+    "Peak usage:  5h \(.aggregate.max_rolling_pct)% | 7d \(.aggregate.max_weekly_pct)% | 30d \(.aggregate.max_monthly_pct)%",
+    if .aggregate.any_usage_stale then
+        "Usage API:   stale data on one or more accounts"
+    else
+        "Usage API:   fresh for every account"
+    end,
+    "Status:      \(.status)",
+    "Upstream:    \(.upstream)"
+' | while IFS= read -r line; do echo "  $line"; done

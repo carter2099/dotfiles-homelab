@@ -1,0 +1,19 @@
+[Unit]
+Description=Curate and publish the daily news edition
+Wants=network-online.target
+After=network-online.target homelab-steward.service
+OnFailure=notify-failure@%n.service
+
+[Service]
+Type=oneshot
+Environment="PATH=/home/carter/.local/bin:/home/carter/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/usr/bin/python3 %h/.local/lib/homelab-monitor/run_job.py --job news -- %h/scripts/run_all_digests.sh
+# 20h: per-topic `timeout 14400` (4h) in run_all_digests.sh is the real cap;
+# a 9h service timeout killed the 2026-08-05 run mid-gaming with world never
+# started (ai-tech/agentic took ~3h each that day).
+TimeoutStartSec=72000
+MemoryHigh=4G
+MemoryMax=6G
+TasksMax=1024
+NoNewPrivileges=true
+UMask=0077

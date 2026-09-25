@@ -1,0 +1,6 @@
+# Expected UFW user rules (exact `sudo ufw show added` lines). Source of truth for
+# ufw-rebuild.sh and steward P3a (report-only). Edit here, then run ufw-rebuild.sh.
+ufw allow from 192.168.4.103 to any port 8082 proto tcp
+ufw allow from 192.168.4.0/22 to any port 22 proto tcp
+ufw allow in on br-owui to any port 8081 proto tcp comment 'llm-proxy <- open-webui (owui-host)'
+ufw allow in on br-owui to any port 8082 proto tcp comment 'opencode-go-proxy <- open-webui (owui-host)'

@@ -1,0 +1,40 @@
+providers:
+  opencode-go:
+    baseUrl: http://192.168.4.92:8082/v1
+    apiKey: proxy
+    api: openai-completions
+    models:
+      - id: deepseek-v4-flash
+        name: deepseek-v4-flash
+      - id: deepseek-v4-pro
+        name: deepseek-v4-pro
+      - id: mimo-v2.5
+        name: mimo-v2.5
+  local-llm:
+    baseUrl: http://192.168.4.103:8080/v1
+    api: openai-completions
+    apiKey: none
+    compat:
+      supportsDeveloperRole: false
+      supportsReasoningEffort: false
+    models:
+      - id: ornith-1.0-35b-q8
+        name: ornith-1.0-35b-q8
+        reasoning: true
+        contextWindow: 262144
+      - id: qwen-3.8-27b-iq2
+        name: qwen-3.8-27b-iq2
+        reasoning: true
+        contextWindow: 81920
+      - id: ornith-1.0-9b-q6
+        name: ornith-1.0-9b-q6
+        reasoning: true
+        contextWindow: 262144
+      - id: gemma-4-12b-q6
+        name: gemma-4-12b-q6
+        reasoning: true
+        contextWindow: 131072
+      - id: gemma-4-26b-q8
+        name: gemma-4-26b-q8
+        reasoning: true
+        contextWindow: 262144

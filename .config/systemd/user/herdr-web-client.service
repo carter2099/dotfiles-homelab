@@ -1,0 +1,45 @@
+[Unit]
+Description=Herdr Web client terminal attachment
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=1min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+ExecStart=%h/.local/bin/herdr-web-client
+EnvironmentFile=-%h/.config/herdr-web-client/env
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=15s
+TimeoutStopSec=20s
+KillMode=control-group
+# Each attachment runs in its own transient user service.
+StandardOutput=journal
+StandardError=journal
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+# Best-effort physical-device masking for the long-lived user service. Each
+# transient attachment additionally masks every current non-pseudo /dev entry.
+InaccessiblePaths=-/dev/block -/dev/char -/dev/bus -/dev/cpu -/dev/disk -/dev/dma_heap -/dev/dri -/dev/input -/dev/mapper -/dev/net -/dev/snd -/dev/vfio -/dev/v4l -/dev/kvm
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/herdr
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+TasksMax=128
+MemoryMax=512M
+CPUQuota=200%
+LimitNOFILE=4096
+
+[Install]
+WantedBy=default.target

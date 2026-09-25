@@ -1,0 +1,146 @@
+{
+  "as_of": "2026-08-05T13:35:00-04:00",
+  "latest_nws_validation": {
+    "checked_at": "2026-08-05T16:49:22-04:00",
+    "forecast_generated_at": "2026-08-05T20:49:22Z",
+    "golf_window": {
+      "2026-08-06": {"temperature_f_range": [71, 80], "precip_probability_pct_range": [21, 64], "condition": "Isolated to scattered/chance showers and thunderstorms"},
+      "2026-08-07": {"temperature_f_range": [72, 83], "precip_probability_pct_range": [32, 32], "condition": "Scattered showers and thunderstorms"},
+      "2026-08-08": {"temperature_f_range": [73, 83], "precip_probability_pct_range": [15, 18], "condition": "Slight chance showers and thunderstorms"}
+    },
+    "interpretation": "The refreshed official forecast preserves the original consensus: Thursday has the greatest storm risk, Friday remains unsettled, and Saturday is the best/driest day with residual storm risk."
+  },
+  "evaluation_prompt": "I'm golfing at the Purdue golf courses this weekend. What will the weather be like the next 3 days there? From about 9am to 5pm each day",
+  "location": {
+    "name": "Birck Boilermaker Golf Complex (Ackerman-Allen and Kampen-Cosler)",
+    "address": "1295 Cherry Lane, West Lafayette, Indiana",
+    "latitude": 40.4386914,
+    "longitude": -86.9259606,
+    "timezone": "America/Indiana/Indianapolis (EDT, UTC-4)"
+  },
+  "date_interpretation": {
+    "today": "Wednesday, 2026-08-05",
+    "next_three_days": [
+      "Thursday, 2026-08-06",
+      "Friday, 2026-08-07",
+      "Saturday, 2026-08-08"
+    ]
+  },
+  "sources": [
+    {
+      "name": "Birck Boilermaker Golf Complex official site",
+      "url": "https://purduegolf.com/",
+      "use": "Official address, courses, EDT timezone, and Aug 6-8 operating schedule"
+    },
+    {
+      "name": "National Weather Service point metadata",
+      "url": "https://api.weather.gov/points/40.4387,-86.9260",
+      "use": "Official NWS grid IND 29,98 and timezone"
+    },
+    {
+      "name": "National Weather Service hourly forecast",
+      "url": "https://api.weather.gov/gridpoints/IND/29,98/forecast/hourly",
+      "generated_at": "2026-08-05T17:30:41Z",
+      "use": "Primary hourly source"
+    },
+    {
+      "name": "National Weather Service seven-day forecast",
+      "url": "https://api.weather.gov/gridpoints/IND/29,98/forecast",
+      "generated_at": "2026-08-05T17:31:36Z",
+      "use": "Primary daily narrative and precipitation risk"
+    },
+    {
+      "name": "AccuWeather West Lafayette hourly and 10-day forecasts",
+      "url": "https://www.accuweather.com/en/us/west-lafayette/47906/10-day-weather-forecast/2135952?page=0",
+      "use": "Independent commercial cross-check"
+    },
+    {
+      "name": "Open-Meteo GFS, ECMWF IFS, and ICON forecasts",
+      "url": "https://api.open-meteo.com/v1/forecast",
+      "use": "Independent model cross-checks at the golf-course coordinates"
+    }
+  ],
+  "days": {
+    "2026-08-06": {
+      "label": "Thursday",
+      "consensus": "Very humid and mostly cloudy with meaningful, intermittently timed shower/thunderstorm risk throughout the golf window. Thursday is the riskiest day for disruption. Lightning can require leaving the course.",
+      "nws_daily": {
+        "high_f": 80,
+        "precip_probability_pct": 70,
+        "summary": "Showers and thunderstorms likely before 2 PM; another likely period 3-5 PM; 0.10-0.25 inch possible; SSW wind 2-7 mph."
+      },
+      "nws_9am_to_5pm": {
+        "temperature_f_range": [70, 80],
+        "relative_humidity_pct_range": [77, 97],
+        "dewpoint_f_range": [69, 72],
+        "wind": "WSW/SSW 2-6 mph",
+        "hourly_temperature_f": {"09": 70, "10": 73, "11": 75, "12": 76, "13": 77, "14": 78, "15": 79, "16": 79, "17": 80},
+        "hourly_precip_probability_pct": {"09": 54, "10": 49, "11": 46, "12": 47, "13": 48, "14": 43, "15": 35, "16": 25, "17": 54},
+        "hourly_condition": "Scattered showers and thunderstorms"
+      },
+      "cross_checks": {
+        "accuweather": "71-79 F, RealFeel 75-87 F, 15-51% hourly precipitation; thunderstorms shown at 4 PM; daily 55% and about two rain hours.",
+        "gfs": "71-81 F, 6-25% precipitation, about 0.03 inch, gusts up to 25 mph.",
+        "ecmwf": "69-80 F, 57-75% precipitation, about 0.19 inch.",
+        "icon": "71-78 F, 20-45% precipitation, about 0.03 inch."
+      }
+    },
+    "2026-08-07": {
+      "label": "Friday",
+      "consensus": "Warm, muggy, and mostly cloudy with scattered shower/thunderstorm risk. Timing is uncertain; risk persists through the golf window and trends somewhat higher in the afternoon in NWS/AccuWeather. Not a guaranteed washout.",
+      "nws_daily": {
+        "high_f": 82,
+        "precip_probability_pct": 50,
+        "summary": "Chance of showers and thunderstorms, mostly cloudy, SSW wind 1-6 mph, less than 0.10 inch daytime rainfall expected."
+      },
+      "nws_9am_to_5pm": {
+        "temperature_f_range": [71, 82],
+        "relative_humidity_pct_range": [74, 95],
+        "dewpoint_f_range": [70, 73],
+        "wind": "S/SSW/SW 2-6 mph",
+        "hourly_temperature_f": {"09": 71, "10": 74, "11": 76, "12": 78, "13": 79, "14": 81, "15": 81, "16": 82, "17": 82},
+        "hourly_precip_probability_pct": {"09": 29, "10": 29, "11": 29, "12": 29, "13": 29, "14": 38, "15": 38, "16": 38, "17": 38},
+        "hourly_condition": "Scattered showers and thunderstorms"
+      },
+      "cross_checks": {
+        "accuweather": "71-83 F, RealFeel 77-92 F, 19-47% hourly precipitation; daily 55% and about two rain hours.",
+        "gfs": "72-85 F, 27-35% precipitation, about 0.09 inch.",
+        "ecmwf": "69-81 F, 41-67% precipitation, about 0.06 inch.",
+        "icon": "71-84 F, 3% precipitation and dry."
+      }
+    },
+    "2026-08-08": {
+      "label": "Saturday",
+      "consensus": "Best golfing day of the three. A morning or isolated early-afternoon shower remains possible, then generally partly to mostly sunny, warm, and humid. Most guidance is dry after about 2 PM.",
+      "nws_daily": {
+        "high_f": 83,
+        "precip_probability_pct": 20,
+        "summary": "Slight shower chance before 8 AM and slight shower/thunderstorm chance 8 AM-2 PM; partly sunny; WSW wind near 7 mph."
+      },
+      "nws_9am_to_5pm": {
+        "temperature_f_range": [72, 83],
+        "relative_humidity_pct_range": [72, 94],
+        "dewpoint_f_range": [70, 74],
+        "wind": "SW/WSW 3-6 mph",
+        "hourly_temperature_f": {"09": 72, "10": 74, "11": 77, "12": 78, "13": 80, "14": 81, "15": 82, "16": 82, "17": 83},
+        "hourly_precip_probability_pct": {"09": 15, "10": 15, "11": 15, "12": 15, "13": 15, "14": 12, "15": 12, "16": 12, "17": 12},
+        "hourly_condition": "Isolated showers/thunderstorms through 1 PM, then mostly sunny"
+      },
+      "cross_checks": {
+        "accuweather": "72-85 F, RealFeel 76-93 F; a shower at 9 AM (51%) and possible shower at 2 PM (42%), otherwise 17-47%; daily 55% but only about one rain hour.",
+        "gfs": "72-83 F, 7-10% precipitation and dry.",
+        "ecmwf": "73-81 F, 12-25% precipitation, about 0.04 inch.",
+        "icon": "73-84 F, 12-33% precipitation, trace rainfall."
+      }
+    }
+  },
+  "evaluation_rules": {
+    "date_accuracy": "Must interpret next three days as Thu Aug 6, Fri Aug 7, and Sat Aug 8, 2026. A shifted three-day window is a major error.",
+    "location_accuracy": "Must resolve Purdue golf courses to the Birck Boilermaker Golf Complex in West Lafayette, Indiana, not Purdue Fort Wayne or another Purdue location.",
+    "weather_accuracy": "Temperatures within roughly 4 F of the NWS/consensus ranges are acceptable. The response must communicate meaningful thunderstorm risk Thursday, continued but uncertain storm risk Friday, and Saturday as the best/mostly drier day with a residual early shower risk.",
+    "uncertainty": "Exact thunderstorm timing varies materially across NWS, GFS, ECMWF, ICON, and AccuWeather. Confidently claiming a dry Thursday/Friday or an all-day washout is inaccurate.",
+    "golf_safety": "A strong answer warns that lightning means leaving the course and suggests checking radar/alerts shortly before tee time.",
+    "tool_calling": "The model should proactively use current web/weather sources. Fabricating current conditions without a tool call is a failure.",
+    "readability": "Prefer a compact day-by-day 9 AM-5 PM breakdown with temperature trend, rain/storm risk, wind/humidity or feels-like, and a clear best-day conclusion."
+  }
+}

@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily homelab steward at 00:00 America/New_York (midnight ET)
+
+[Timer]
+OnCalendar=*-*-* 00:00:00 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target

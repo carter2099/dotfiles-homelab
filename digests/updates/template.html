@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0; padding:0; background-color:#f4f4f7; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+<table role="presentation" width="100%" style="background-color:#f4f4f7; padding:24px 0;">
+<tr><td align="center">
+<table role="presentation" width="600" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:8px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+
+  <!-- Header -->
+  <tr>
+    <td style="background-color:#1a1a2e; padding:28px 32px;">
+      <h1 style="margin:0; color:#ffffff; font-size:22px; font-weight:600; letter-spacing:-0.3px;">🏠 Homelab Update Report</h1>
+      <p style="margin:6px 0 0; color:#a0a0b8; font-size:14px;">{{DATE}}</p>
+    </td>
+  </tr>
+
+  <!-- Intro -->
+  <tr>
+    <td style="padding:24px 32px 16px;">
+      <p style="margin:0; color:#444; font-size:15px; line-height:1.6;">
+        Automated maintenance run completed in {{DURATION}}. {{STATUS_SUMMARY}}
+      </p>
+    </td>
+  </tr>
+
+  <!-- Divider -->
+  <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
+
+  {{ROLLBACK}}
+
+  <!-- Auto-Applied -->
+  <tr>
+    <td style="padding:16px 32px 8px;">
+      <h2 style="margin:0; color:#2e7d32; font-size:15px; font-weight:700;">✅ Auto-Applied</h2>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:8px 32px 16px;">
+      {{AUTO_APPLIED}}
+    </td>
+  </tr>
+
+  <!-- Divider -->
+  <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
+
+  <!-- Needs Attention -->
+  <tr>
+    <td style="padding:16px 32px 8px;">
+      <h2 style="margin:0; color:#c62828; font-size:15px; font-weight:700;">🔴 Needs Attention</h2>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:8px 32px;">
+      {{NEEDS_ATTENTION}}
+    </td>
+  </tr>
+  {{NEW_SINCE_YESTERDAY}}
+
+  <!-- Divider -->
+  <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
+
+  <!-- Behind but Safe -->
+  <tr>
+    <td style="padding:16px 32px 8px;">
+      <h2 style="margin:0; color:#f57f17; font-size:15px; font-weight:700;">ℹ️ Behind but Safe</h2>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:8px 32px;">
+      {{BEHIND_SAFE}}
+    </td>
+  </tr>
+
+  <!-- Divider -->
+  <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
+
+  <!-- System Health -->
+  <tr>
+    <td style="padding:16px 32px 8px;">
+      <h2 style="margin:0; color:#1a1a2e; font-size:15px; font-weight:700;">📊 System Health</h2>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:8px 32px;">
+      <table style="width:100%; border-collapse:collapse;">
+        {{SYSTEM_HEALTH}}
+      </table>
+    </td>
+  </tr>
+
+  <!-- Divider -->
+  <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
+
+  <!-- Heartbeat -->
+  <tr>
+    <td style="padding:16px 32px 8px;">
+      <h2 style="margin:0; color:#1565c0; font-size:15px; font-weight:700;">💓 Status Heartbeat</h2>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:8px 32px 16px;">
+      {{HEARTBEAT}}
+    </td>
+  </tr>
+
+  <!-- Divider -->
+  <tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>
+
+  <!-- Validation -->
+  <tr>
+    <td style="padding:16px 32px 8px;">
+      <h2 style="margin:0; color:#1a1a2e; font-size:15px; font-weight:700;">✅ Validation — Endpoint Checks</h2>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:8px 32px;">
+      {{VALIDATION}}
+    </td>
+  </tr>
+
+  <!-- Footer -->
+  <tr>
+    <td style="padding:24px 32px; background-color:#f8f8fb; border-top:1px solid #e8e8ee;">
+      <p style="margin:0; color:#999; font-size:12px; text-align:center;">carter2099.com · Generated {{TIMESTAMP}} · {{ENGINE}}</p>
+    </td>
+  </tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>

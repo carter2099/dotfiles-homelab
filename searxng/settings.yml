@@ -1,0 +1,56 @@
+# SearXNG settings for homelab digest backend.
+# The REPLACE_AT_DEPLOY placeholder is swapped for a random secret by up.sh on first
+# deploy (see up.sh). JSON output enabled for the rpiv-web-tools API; limiter off so
+# no Valkey sidecar is needed. use_default_settings pulls all default engines.
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Homelab SearXNG"
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "REPLACE_AT_DEPLOY"
+  limiter: false
+  image_proxy: false
+
+outgoing:
+  request_timeout: 15.0
+  max_request_timeout: 30.0
+
+# Engine overrides: disable the default engines that are all rate-limited/CAPTCHA'd
+# from this IP, and enable the ones that actually return results.
+# These overrides merge into the container's built-in defaults.
+engines:
+  # Disable broken/rate-limited engines
+  - name: wikipedia
+    disabled: true
+  - name: wikidata
+    disabled: true
+  - name: duckduckgo
+    disabled: true
+  - name: google cse
+    disabled: true
+  - name: startpage
+    disabled: true
+  - name: brave
+    disabled: true
+  # Enable working engines
+  - name: bing
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: yandex
+    disabled: false
+  - name: yep
+    disabled: false
+  - name: presearch
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: mojeek
+    disabled: false

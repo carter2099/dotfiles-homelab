@@ -1,0 +1,90 @@
+# llama-swap config
+healthCheckTimeout: 120
+sendLoadingState: true
+startPort: 5800
+models:
+  "qwen-3.6-35b-q8":
+    cmd: >-
+      C:\llm\llama-server.exe -m C:\llm\Qwen_Qwen3.6-35B-A3B-Q8_0.gguf
+      -ngl all --n-cpu-moe 33 --fit off -c 262144
+      --flash-attn on --no-mmap -t 8 -tb 8
+      -ctk q4_0 -ctv q4_0 -np 2 --cache-ram 2048 --prio 2 --poll 50
+      --temp 0.5 --top-k 20 --min-p 0.1
+      --host 0.0.0.0 --port ${PORT}
+      --reasoning-format auto
+      --reasoning-budget 1024
+      --reasoning-budget-message "[Thinking budget exceeded. Provide your answer.]"
+    aliases: ["qwen-3.6-35b-q8", "qwen-3.6-35b"]
+  "qwen-3.6-35b-q8-fast":
+    cmd: >-
+      C:\llm\llama-server.exe -m C:\llm\Qwen_Qwen3.6-35B-A3B-Q8_0.gguf
+      -ngl all --n-cpu-moe 33 --fit off -c 262144
+      --flash-attn on --no-mmap -t 8 -tb 8
+      -ctk q4_0 -ctv q4_0 -np 2 --cache-ram 2048 --prio 2 --poll 50
+      --temp 0.5 --top-k 20 --min-p 0.1
+      --host 0.0.0.0 --port ${PORT}
+      --reasoning-format auto
+      --reasoning off
+    aliases: ["qwen-3.6-35b-q8-fast"]
+  "qwen-3.5-4b-q8":
+    cmd: >-
+      C:\llm\llama-server.exe -m C:\llm\Qwen_Qwen3.5-4B-Q8_0.gguf
+      -ngl 99 -c 262144 --flash-attn on -t 4
+      --cache-ram 512 --prio 1 --poll 50
+      --temp 0.5 --top-k 20 --min-p 0.1
+      --reasoning-format auto
+      --reasoning-budget 1024
+      --reasoning-budget-message "[Thinking budget exceeded. Provide your answer.]"
+      --host 0.0.0.0 --port ${PORT}
+    aliases: ["qwen-3.5-4b-q8", "qwen-3.5-4b"]
+  "agents-a1-4b-q8":
+    cmd: >-
+      C:\llm\llama-server.exe -m C:\llm\Agents-A1-4B-Q8_0.gguf
+      -ngl 99 -c 262144 --flash-attn on -t 4
+      --cache-ram 512 --prio 1 --poll 50
+      --temp 0.5 --top-k 20 --min-p 0.1
+      --reasoning-format auto
+      --reasoning-budget 1024
+      --reasoning-budget-message "[Thinking budget exceeded. Provide your answer.]"
+      --host 0.0.0.0 --port ${PORT}
+    aliases: ["agents-a1-4b-q8", "agents-a1-4b"]
+  "ornith-1.0-35b-q8":
+    cmd: >-
+      C:\llm\llama-server.exe -m C:\llm\deepreinforce-ai_Ornith-1.0-35B-Q8_0.gguf
+      -ngl all --n-cpu-moe 32 --fit off -c 262144
+      --flash-attn on --no-mmap -t 8 -tb 8
+      -ctk q4_0 -ctv q4_0 -np 2 --cache-ram 2048 --prio 2 --poll 50
+      --temp 0.5 --top-k 20 --min-p 0.1
+      --host 0.0.0.0 --port ${PORT}
+      --reasoning-format auto
+    aliases: ["ornith-1.0-35b-q8", "ornith-35b"]
+  "ornith-1.0-9b-q6":
+    cmd: >-
+      C:\llm\llama-server.exe -m C:\llm\deepreinforce-ai_Ornith-1.0-9B-Q6_K.gguf
+      -ngl all --fit off -c 262144 --flash-attn on -t 8 -tb 8
+      -ctk q4_0 -ctv q4_0 -np 2 --cache-ram 2048 --prio 2 --poll 50
+      --temp 0.6 --top-k 20 --min-p 0.1 --repeat-penalty 1.05
+      --host 0.0.0.0 --port ${PORT}
+      --reasoning-format auto
+    aliases: ["ornith-1.0-9b-q6", "ornith-9b"]
+  "gemma-4-12b-q5":
+    cmd: >-
+      C:\llm\llama-server.exe -m C:\llm\gemma-4-12b-it-Q5_K_M.gguf
+      -ngl all --fit off -c 262144 --flash-attn on -t 8 -tb 8
+      -ctk q4_0 -ctv q4_0 -np 2 --cache-ram 2048 --prio 2 --poll 50
+      --temp 0.5 --top-k 20 --min-p 0.1
+      --model-draft C:\llm\mtp-gemma-4-12b-it.gguf
+      --spec-type draft-mtp --spec-draft-n-max 4
+      --host 0.0.0.0 --port ${PORT}
+    aliases: ["gemma-4-12b-q5", "gemma-4-12b"]
+  "gemma-4-26b-q8":
+    cmd: >-
+      C:\llm\llama-server.exe -m C:\llm\gemma-4-26B-A4B-it-Q8_0.gguf
+      -ngl all --n-cpu-moe 26 --fit off -c 262144
+      --flash-attn on --no-mmap -t 8 -tb 8
+      -ctk q4_0 -ctv q4_0 -np 2 --cache-ram 2048 --prio 2 --poll 50
+      --temp 0.5 --top-k 20 --min-p 0.1
+      --model-draft C:\llm\mtp-gemma-4-26B-A4B-it.gguf
+      --spec-type draft-mtp --spec-draft-n-max 4
+      --host 0.0.0.0 --port ${PORT}
+    aliases: ["gemma-4-26b-q8", "gemma-4-26b"]

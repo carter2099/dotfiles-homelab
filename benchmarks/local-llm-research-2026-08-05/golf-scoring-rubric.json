@@ -1,0 +1,30 @@
+{
+  "source_truth": "weather-source-truth.json",
+  "scales": {
+    "tool_calling": {
+      "5": "Proactively resolves the correct location and dates, obtains current point-specific weather from credible sources, and uses the results correctly without consequential tool errors.",
+      "4": "Proactively obtains current relevant weather from at least one credible source; minor source coverage or tool-use weakness.",
+      "3": "Uses a current-weather tool, but source selection, location/date resolution, extraction, or cross-checking is materially weak.",
+      "2": "Attempts tools, but failures or poor calls leave the answer weakly grounded.",
+      "1": "Only token tool use; the answer is effectively guessed.",
+      "0": "No current-weather tool call, fabricated sourcing, or wrong-location lookup."
+    },
+    "accuracy": {
+      "5": "Correct West Lafayette location and Thu Aug 6 through Sat Aug 8 window; temperatures are within about 4 F of consensus; communicates high Thursday risk, continued uncertain Friday risk, and Saturday as best/drier with residual early risk; handles uncertainty and lightning safety.",
+      "4": "The key three-day pattern and usable numbers are correct, with only a minor omission or timing/numeric error.",
+      "3": "Broadly usable but one day's risk pattern, a key number, uncertainty, or golf guidance is materially wrong or omitted.",
+      "2": "Multiple significant errors or misleading confidence.",
+      "1": "Mostly inaccurate despite identifying some correct context.",
+      "0": "Wrong location or date window, or no usable forecast."
+    },
+    "readability": {
+      "5": "Compact day-by-day 9 AM-5 PM breakdown with temperature trend, rain/storm risk, useful conditions, lightning/radar guidance, and a clear best-day conclusion.",
+      "4": "Clear and actionable; minor excess or one useful detail is missing.",
+      "3": "Readable but noticeably verbose, repetitive, awkward, or insufficiently organized for a golfer.",
+      "2": "Hard to scan or important conclusions are buried.",
+      "1": "Confusing or severely incomplete.",
+      "0": "No coherent final answer."
+    }
+  },
+  "overall": "Unweighted mean of tool_calling, accuracy, and readability. Advisor interventions, tool errors, and failed runs are reported separately and inform the criterion scores rather than creating a hidden numeric penalty."
+}
