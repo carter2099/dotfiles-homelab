@@ -132,6 +132,10 @@ OMP is installed through Bun at `~/.bun/bin/omp`.
 - State and sessions are rig-local under `~/.omp/`; do not copy ThinkPad history or auth.
 - Starting `omp` directly in `/home/carte` automatically adds `--allow-home`; subcommands
   do not.
+- `~/.omp-noop-repo` is an intentionally empty git repo. When omp starts in a folder that is
+  not a repo and exactly one direct child is, it treats that child as the active project
+  (in `~` that was `~/.rbenv`, shown as `~ ↳ .rbenv detached`). This second repo turns that
+  off. Keep it; if it is missing, recreate it with `git init -q ~/.omp-noop-repo`.
 
 Herdr is installed at `~/.local/bin/herdr`. Its preferences use the One Dark theme,
 `Ctrl+Space` prefix, and agent pane labels. Herdr sessions and logs are runtime state, not

@@ -131,6 +131,7 @@ from .fixes import (
     phase_7b_fix,
 )
 from .dotfiles import untracked_in_scope as _dotfiles_untracked_in_scope
+from .setup import P0B_PROBLEM_ACTIONS
 
 
 def _dotfiles_untracked_paths():
@@ -1948,6 +1949,32 @@ def _tldr_deterministic(facts):
     return " ".join(parts + changes)
 
 
+def _html_session_memory(p0b):
+    """P0b sessions whose memoir could not be written or updated (degraded phase only)."""
+    if not p0b or p0b.get("phase_status") != "degraded":
+        return ""
+    esc = html.escape
+    rows = [s for s in (p0b.get("sessions") or [])
+            if isinstance(s, dict) and s.get("action") in P0B_PROBLEM_ACTIONS]
+    items = [esc(str(p0b.get("reason") or "degraded"))[:400]]
+    items += [
+        f"{esc(str(s.get('action')))}: <code>{esc(Path(str(s.get('path') or '?')).name)}</code>"
+        f" ({esc(str(s.get('reason') or s.get('error') or ''))[:200]})"
+        for s in rows[:20]
+    ]
+    if len(rows) > 20:
+        items.append(f"+{len(rows) - 20} more")
+    li = "".join(f"<li>{item}</li>" for item in items)
+    return (
+        '<tr><td style="padding:16px 32px 8px;">'
+        '<h2 style="margin:0; color:#e65100; font-size:15px; font-weight:700;">'
+        'Session memory degraded (memoirs left unchanged)</h2></td></tr>'
+        '<tr><td style="padding:8px 32px 16px;">'
+        f'<ul style="margin:0; padding-left:20px; color:#555; font-size:12px;">{li}</ul>'
+        '</td></tr>'
+    )
+
+
 def _html_showcase(showcase):
     """Last P9c public-showcase run: published and held paths with reasons."""
     if not showcase:
@@ -2175,6 +2202,8 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     except ValueError:
         prev_showcase = {}
     troubleshoot_html += _html_showcase(prev_showcase)
+    p0b_path = run_dir / "00b-session-memory.json"
+    troubleshoot_html += _html_session_memory(read_json(p0b_path) if p0b_path.exists() else {})
 
     # Footer
     engine = "steward_runner.py (dry-run)" if dry_run else "steward_runner.py"

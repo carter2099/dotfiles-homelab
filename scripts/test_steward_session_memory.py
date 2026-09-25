@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
-from steward import setup
+from steward import report, runtime, setup, workflow
 
 START = datetime(2026, 9, 24, 1, 0, tzinfo=timezone.utc)
 
@@ -192,14 +193,13 @@ class MemoirChunkTests(unittest.TestCase):
         self.assertTrue(model.chunk_timeouts)
         self.assertTrue(all(t <= 180 for t in model.chunk_timeouts))
 
-    def test_passed_deadline_makes_no_call_and_leaves_memoir(self):
+    def test_passed_deadline_runs_no_model_and_leaves_memoir(self):
         path = self.session(60)
-        model = FakeModel()
-        with patch.object(setup, "_call_omp_p", side_effect=model), \
-                self.assertRaises(setup._DeadlinePassed):
+        with patch.object(runtime.subprocess, "run") as run, \
+                self.assertRaises(setup.DeadlinePassed):
             setup._judge_existing_memoir(path, self.entry, self.memoir,
                                          setup.time.monotonic() - 1)
-        self.assertEqual(model.chunk_prompts + model.final_prompts, [])
+        run.assert_not_called()
         self.assertEqual(self.memoir.read_text(), self.original)
 
     def test_new_memoir_over_whole_session_cap_is_skipped(self):
@@ -225,6 +225,59 @@ class MemoirChunkTests(unittest.TestCase):
         (summary_prompt,) = model.final_prompts
         self.assertIn("MSG-030", summary_prompt)
         self.assertIn("everything", Path(result["memoir"]).read_text())
+
+
+class OmpRetryDeadlineTests(unittest.TestCase):
+    def test_retries_are_capped_by_remaining_time_then_stop(self):
+        clock = [1000.0]
+        timeouts = []
+
+        def slow_model(cmd, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            clock[0] += kwargs["timeout"]
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with patch.object(runtime.subprocess, "run", side_effect=slow_model), \
+                patch.object(runtime.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(runtime.time, "sleep", side_effect=sleep), \
+                self.assertRaises(runtime.DeadlinePassed):
+            runtime._call_omp_p("p", timeout=180, mode="json", tools=runtime.NO_TOOLS,
+                                deadline=1250.0)
+        self.assertEqual(timeouts, [180, 69])  # second attempt gets only what is left
+
+
+class PhaseStatusTests(unittest.TestCase):
+    def test_deadline_skips_mark_phase_degraded_and_reach_the_email(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        session = root / "proj" / "s.jsonl"
+        old = datetime.now(timezone.utc) - timedelta(days=1)
+        scan = [("proj", session, old, {"id": "s1", "timestamp": old.isoformat()})]
+        with patch.object(setup, "RUNS_LOG", root / "missing.jsonl"), \
+                patch.object(setup, "_sessions_to_scan", return_value=iter(scan)), \
+                patch.object(setup, "_existing_memoir_for", return_value=None), \
+                patch.object(setup, "P0B_DEADLINE_SECONDS", 0), \
+                patch.object(setup, "_call_omp_p") as call:
+            setup.phase_0b_session_memory(root)
+        call.assert_not_called()
+        data = json.loads((root / "00b-session-memory.json").read_text())
+        self.assertEqual(data["sessions"][0]["action"], "skipped_deadline")
+        self.assertEqual(data["phase_status"], "degraded")
+        self.assertIn("1 skipped_deadline", data["reason"])
+        self.assertEqual(workflow._with_canonical_status("session-memory", dict(data))
+                         ["phase_status"], "degraded")
+        email = report._html_session_memory(data)
+        self.assertIn("s.jsonl", email)
+        self.assertIn("1 skipped_deadline", email)
+
+    def test_clean_run_stays_succeeded_and_adds_nothing_to_the_email(self):
+        self.assertEqual(setup._p0b_problems([{"action": "documented"},
+                                              {"action": "up_to_date"}], {"ok": True}), [])
+        self.assertEqual(report._html_session_memory({"sessions": []}), "")
 
 
 class ChunkBlocksTests(unittest.TestCase):

@@ -22,6 +22,7 @@ published version stays.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -38,7 +39,8 @@ from . import dotfiles
 from .config import HOME
 from .runtime import atomic_write_json
 
-POLICY_PATH = HOME / "system-config" / "dotfiles-publish.toml"
+POLICY_REL = "system-config/dotfiles-publish.toml"
+POLICY_PATH = HOME / POLICY_REL
 DECISIONS_PATH = HOME / "system-config" / "dotfiles-publish-decisions.json"
 STATE_DIR = HOME / ".local" / "state" / "dotfiles-showcase"
 PUBLIC_REPO = "carter2099/dotfiles-homelab"
@@ -124,6 +126,7 @@ class Decision:
     by: str  # "rule" | "scan" | "decision" | "jev"
     reason: str
     record: dict[str, Any] | None = None  # new decision to persist
+    vetted: bool = False  # Jev cleared this exact content (fresh scope answer or same-blob decision)
 
 
 def _glob_re(glob: str, flags: int = 0) -> re.Pattern[str]:
@@ -148,8 +151,17 @@ def _glob_re(glob: str, flags: int = 0) -> re.Pattern[str]:
     return re.compile("".join(out), flags)
 
 
+def blob_oid(content: bytes) -> str:
+    """Git blob id of ``content`` (decisions are tied to exact content)."""
+    return hashlib.sha1(b"blob %d\0" % len(content) + content).hexdigest()
+
+
 def load_policy(path: Path = POLICY_PATH) -> Policy:
-    data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    return parse_policy(Path(path).read_text(encoding="utf-8"), str(path))
+
+
+def parse_policy(text: str, path: str) -> Policy:
+    data = tomllib.loads(text)
     private, public = data.get("private"), data.get("public")
     exempt = data.get("entropy_exempt", [])
     if not (isinstance(private, list) and isinstance(public, list) and isinstance(exempt, list)
@@ -178,17 +190,31 @@ def save_decisions(path: Path, decisions: dict[str, dict[str, Any]]) -> None:
 
 
 _URL_OR_NAME = re.compile(
-    r"//\S*"  # URL remainder after "https:"
+    r"//[^\s@]*"  # URL remainder after "https:" (never with userinfo; see _EXTRA_LINE_RULES)
     r"|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+[,;)]*"  # dotted identifier (module.CONST)
     r"|[\w.@-]*(?:/[\w.@~-]+)+/?[\"',;)]*"  # path or owner/repo
     r"|[A-Z][A-Z0-9_]*=\S*"  # ENV=value (the value is checked on its own)
 )
 _PLACEHOLDER = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|<[^>]*>|x{8,}|\*{4,}", re.IGNORECASE)
+# Credentials the P9b detectors miss; checked on every line before any exemption.
+_EXTRA_LINE_RULES = (
+    ("bearer token", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}", re.IGNORECASE)),
+    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
+    ("Slack webhook URL",
+     re.compile(r"hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9/_-]{8,}")),
+    ("Discord webhook URL", re.compile(r"discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{8,}")),
+    ("credentials in URL", re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@", re.IGNORECASE)),
+    ("secret URL parameter", re.compile(
+        r"[?&](?:access_token|api_key|apikey|key|token|secret|sig|signature|password)="
+        r"[A-Za-z0-9._~%+/-]{12,}", re.IGNORECASE)),
+    ("32-hex key", re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")),
+)
 
 
 def _line_finding(text: str, entropy: bool = True, mac: bool = True) -> str | None:
     """One credential rule for a line, reusing the P9b detectors."""
-    rule = next((name for name, pattern in dotfiles._SECRET_LINE_RULES if pattern.search(text)), None)
+    rule = next((name for name, pattern in dotfiles._SECRET_LINE_RULES + _EXTRA_LINE_RULES
+                 if pattern.search(text)), None)
     if rule:
         return rule
     token = dotfiles._TOKEN_ASSIGNMENT.search(text)
@@ -285,7 +311,7 @@ def _ask(client: Any, purpose: str, state: dict[str, Any],
         return None, "Jev answer incomplete"
 
 
-def _jev_scope(path: str, text: str, client: Any, today: str) -> Decision:
+def _jev_scope(path: str, text: str, client: Any, today: str, blob: str) -> Decision:
     if len(text) > MAX_JEV_CHARS:
         return Decision("held", "jev", f"too large for Jev ({len(text)} chars); decide manually")
     probs, why = _ask(client, "dotfiles-showcase-scope", {"path": path, "content": text},
@@ -301,12 +327,14 @@ def _jev_scope(path: str, text: str, client: Any, today: str) -> Decision:
         "probabilities": {k: round(v, 4) for k, v in probs.items()},
         "confidence": round(min(jev.noul_certainty(v) for v in probs.values()), 4),
         "date": today,
+        "blob": blob,
     }
     shown = ", ".join(f"{k}={v:.2f}" for k, v in probs.items())
     if (all(probs[k] < limit for k, limit in SCOPE_PUBLISH.items())
             and probs["homelab"] >= SCOPE_HOMELAB_PUBLISH):
         record["scope"] = "public"
-        return Decision("public", "jev", f"Jev: safe homelab content ({shown})", record)
+        return Decision("public", "jev", f"Jev: safe homelab content ({shown})", record,
+                        vetted=True)
     if (probs["credential"] >= SCOPE_PRIVATE or probs["personal"] >= SCOPE_PRIVATE
             or probs["homelab"] <= SCOPE_HOMELAB_PRIVATE):
         record["scope"] = "private"
@@ -326,12 +354,15 @@ def decide(path: str, content: bytes, *, policy: Policy,
     if policy.is_public(path):
         return Decision("public", "rule", "public rule")
     recorded = decisions.get(path)
+    blob = blob_oid(content)
     if recorded:
+        same = recorded.get("blob") == blob
+        note = "" if same else "; content changed since the decision"
         return Decision(recorded["scope"], "decision",
-                        f"recorded decision by {recorded.get('by', '?')}")
+                        f"recorded decision by {recorded.get('by', '?')}{note}", vetted=same)
     jev_client = client() if callable(client) and not hasattr(client, "ask") else client
     return _jev_scope(path, content.decode("utf-8"), jev_client,
-                      today or datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+                      today or datetime.now(timezone.utc).strftime("%Y-%m-%d"), blob)
 
 
 def veto(path: str, old: bytes, new: bytes, client: Any) -> tuple[str, str]:
@@ -442,17 +473,19 @@ def _outgoing_findings(mirror: Path, commit: str, parent: str | None,
 
 def publish(*, dry_run: bool = False, push: bool = True, client: Any = _load_jev_client,
             git_dir: Path = dotfiles.DOTFILES_GIT, ref: str = "HEAD",
-            policy_path: Path = POLICY_PATH, decisions_path: Path = DECISIONS_PATH,
+            policy_rel: str = POLICY_REL, decisions_path: Path = DECISIONS_PATH,
             state_dir: Path = STATE_DIR, remote_url: str = PUBLIC_URL,
             today: str | None = None) -> dict[str, Any]:
     """Build (and unless dry_run, push) the public snapshot of the private repo."""
     today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    policy = load_policy(policy_path)
     decisions = load_decisions(decisions_path)
     state_path = Path(state_dir) / "state.json"
     state = _load_state(state_path)
     previous: dict[str, dict[str, str]] = state["published"]
     source = _git(git_dir, "rev-parse", ref).decode().strip()
+    # The policy that governs a snapshot is the one committed in it, never the working tree.
+    policy = parse_policy(_git(git_dir, "show", f"{source}:{policy_rel}").decode("utf-8"),
+                          f"{source[:12]}:{policy_rel}")
 
     jev_client: list[Any] = []
 
@@ -490,8 +523,17 @@ def publish(*, dry_run: bool = False, push: bool = True, client: Any = _load_jev
             continue
         entry = {"mode": mode, "blob": oid}
         if not prev:
+            reason = d.reason
+            if not d.vetted:
+                # First publication: Jev must clear the whole content, not just the regex scan.
+                verdict, why = veto(path, b"", content, get_client())
+                why = why.replace("; previous version kept", "; not published")
+                if verdict != "publish":
+                    (blocked if verdict == "blocked" else held).append({"path": path, "reason": why})
+                    continue
+                reason = f"{d.reason}; {why}"
             final[path] = entry
-            added.append({"path": path, "reason": d.reason})
+            added.append({"path": path, "reason": reason})
             continue
         old = _git(git_dir, "cat-file", "blob", prev["blob"])
         verdict, why = veto(path, old, content, get_client())
@@ -523,9 +565,14 @@ def publish(*, dry_run: bool = False, push: bool = True, client: Any = _load_jev
         "decisions_recorded": sorted(recorded),
         "published_paths": sorted(final),
     }
-    if recorded and not dry_run:
-        save_decisions(decisions_path, {**load_decisions(decisions_path), **recorded})
+    def save_recorded() -> None:
+        # Only after the snapshot they justify is public (or nothing needed publishing).
+        if recorded:
+            save_decisions(decisions_path, {**load_decisions(decisions_path), **recorded})
+
     if not changed:
+        if not dry_run:
+            save_recorded()
         result["status"] = "unchanged"
         result["commit"] = state.get("commit")
         return result
@@ -556,14 +603,36 @@ def publish(*, dry_run: bool = False, push: bool = True, client: Any = _load_jev
         "published": final, "commit": commit, "source_head": source,
         "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
+    save_recorded()
     result["status"] = "published" if push else "committed"
     return result
+
+
+def commit_decisions(*, decisions_path: Path = DECISIONS_PATH,
+                     git_dir: Path = dotfiles.DOTFILES_GIT, home: Path = HOME,
+                     push: bool = True) -> dict[str, Any]:
+    """Commit exactly the decisions file to the private repo (P9b's exact-path commit + scan)."""
+    try:
+        rel = Path(decisions_path).resolve().relative_to(Path(home).resolve()).as_posix()
+    except ValueError:
+        return {"status": "skipped", "reason": "decisions file is outside the dotfiles work tree"}
+    status, error = dotfiles._snapshot(git_dir, home)
+    if error:
+        return {"status": "ambiguous", "reason": error}
+    if rel not in status:
+        return {"status": "unchanged"}
+    return dotfiles._commit_exact_paths(
+        [rel], git_dir=git_dir, home=home, expected_dirty_paths=set(status), push=push,
+        new_paths=[rel] if status[rel] == dotfiles.UNTRACKED_STATUS else (),
+    )
 
 
 def phase_9c_showcase(run_dir: Path, dry_run: bool = False) -> dict[str, Any]:
     """Nightly P9c: publish the public subset of the dotfiles repo."""
     print("[P9c] public showcase")
     result = publish(dry_run=dry_run)
+    if result["decisions_recorded"] and not dry_run:
+        result["decisions_commit"] = commit_decisions()
     atomic_write_json(Path(run_dir) / ARTIFACT, result)
     print(f"  showcase {result['status']}: {result['published_count']} published, "
           f"{len(result['held'])} held, {len(result['blocked'])} blocked")

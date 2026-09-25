@@ -29,7 +29,7 @@ BRANCH = "main"
 
 def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     cp = subprocess.run(
-        ["git", f"--git-dir={GIT_DIR}", f"--work-tree={HOME}", *args],
+        ["git", "--literal-pathspecs", f"--git-dir={GIT_DIR}", f"--work-tree={HOME}", *args],
         capture_output=True, text=True, timeout=180,
     )
     if check and cp.returncode != 0:

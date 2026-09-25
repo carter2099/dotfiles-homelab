@@ -301,7 +301,8 @@ P3_ENDPOINT_SERVICES = {
 # Endpoints reached from the internet through the Cloudflare tunnel.
 P3_TUNNEL_ENDPOINTS = frozenset({"open-webui", "blog", "news", "tunnel-health"})
 # P1 steps that deploy an endpoint; host package steps (apt/auto_*) apply to all.
-P3_ENDPOINT_P1_STEPS = {"open-webui": {"openwebui_update"}, "searxng": {"searxng"}}
+P3_ENDPOINT_P1_STEPS = {"open-webui": {"openwebui_update"}, "searxng": {"searxng"},
+                        "freshrss": {"freshrss"}}
 P3_FIX_MIN_CONFIDENCE = 0.8
 P3_FIX_MAX_ACTIONS = 3
 P3_FIX_TIMEOUT = 180

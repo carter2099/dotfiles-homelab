@@ -304,6 +304,10 @@ def _omp_tool_args(tools):
     return ["--tools", ",".join(names)]
 
 
+class DeadlinePassed(Exception):
+    """A caller's deadline (time.monotonic() value) passed before a model call."""
+
+
 def _call_omp_p(
     prompt,
     model=STEWARD_MODEL,
@@ -313,11 +317,15 @@ def _call_omp_p(
     extra_args=None,
     *,
     tools,
+    deadline=None,
 ):
     """Call omp -p (headless). Returns assistant text. Retries on transient API errors.
 
     tools is mandatory: NO_TOOLS (evidence must be inlined in the prompt) or
     READ_ONLY_TOOLS / a subset of it. The model never gets bash/edit/write.
+
+    deadline: optional time.monotonic() value. Every attempt (retries included) is
+    capped at the time remaining; once it has passed, raises DeadlinePassed.
 
     mode="text": plain -p stdout (final assistant message only). Fine for free-form
     summaries. Rejects NDJSON event streams (misconfigured --mode json bleed).
@@ -353,6 +361,12 @@ def _call_omp_p(
         return any(code in (err_text or "") for code in recoverable_markers)
 
     for attempt in range(max_retries):
+        attempt_timeout = timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DeadlinePassed(f"deadline passed before omp -p attempt {attempt + 1}")
+            attempt_timeout = min(timeout, max(1, int(remaining)))
         try:
             result = subprocess.run(
                 cmd,
@@ -361,7 +375,7 @@ def _call_omp_p(
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
-                timeout=timeout,
+                timeout=attempt_timeout,
                 env={**os.environ, "HOME": str(HOME), "PATH": f"{STEWARD_PATH}:{os.environ.get('PATH', '')}"},
             )
         except subprocess.TimeoutExpired as e:

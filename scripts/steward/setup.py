@@ -68,6 +68,7 @@ from .config import (
 from .runtime import (
     NO_TOOLS,
     READ_ONLY_TOOLS,
+    DeadlinePassed,
     atomic_write_text,
     _assistant_text_from_message,
     _balanced_json_slice,
@@ -296,13 +297,10 @@ MEMOIR_MAX_MEMOIR_CHARS = 20000  # an existing memoir longer than this is left t
 MEMOIR_CHUNK_TIMEOUT = 180   # seconds per chunk/merge call
 MEMOIR_FINAL_TIMEOUT = 600   # seconds per summarize/extend call
 P0B_DEADLINE_SECONDS = 2400  # whole P0b budget; later sessions are skipped_deadline
+P0B_PROBLEM_ACTIONS = ("skipped_deadline", "error", "judge_error", "summarizer_failed")
 
 
 class _TranscriptTooLong(Exception):
-    pass
-
-
-class _DeadlinePassed(Exception):
     pass
 
 
@@ -388,22 +386,12 @@ def _chunk_blocks(blocks, limit=MEMOIR_CHUNK_CHARS):
     return chunks
 
 
-def _call_timeout(deadline, cap):
-    """Per-call timeout: at most cap, never past the P0b deadline (monotonic seconds)."""
-    if deadline is None:
-        return cap
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise _DeadlinePassed("P0b deadline passed")
-    return min(cap, max(1, int(remaining)))
-
-
 def _map_chunk(path, index, total, chunk, deadline=None):
-    timeout = _call_timeout(deadline, MEMOIR_CHUNK_TIMEOUT)
     raw = _call_omp_p(
         MEMOIR_CHUNK_NOTES_PROMPT.format(path=path, index=index, total=total, chunk=chunk,
                                          max_chars=MEMOIR_NOTE_CHARS),
-        model=STEWARD_MODEL, timeout=timeout, mode="json", tools=NO_TOOLS)
+        model=STEWARD_MODEL, timeout=MEMOIR_CHUNK_TIMEOUT, mode="json", tools=NO_TOOLS,
+        deadline=deadline)
     notes = _extract_json(raw, "session-memoir-chunk").get("notes")
     if not isinstance(notes, str):
         raise ValueError(f"chunk {index}/{total}: packet without notes")
@@ -411,11 +399,11 @@ def _map_chunk(path, index, total, chunk, deadline=None):
 
 
 def _merge_notes(path, group, deadline=None):
-    timeout = _call_timeout(deadline, MEMOIR_CHUNK_TIMEOUT)
     raw = _call_omp_p(
         MEMOIR_NOTES_MERGE_PROMPT.format(path=path, notes="\n\n".join(group),
                                          max_chars=MEMOIR_NOTE_CHARS),
-        model=STEWARD_MODEL, timeout=timeout, mode="json", tools=NO_TOOLS)
+        model=STEWARD_MODEL, timeout=MEMOIR_CHUNK_TIMEOUT, mode="json", tools=NO_TOOLS,
+        deadline=deadline)
     notes = _extract_json(raw, "session-memoir-merge").get("notes")
     if not isinstance(notes, str) or not notes.strip():
         raise ValueError("notes merge returned no notes")
@@ -429,7 +417,7 @@ def _session_evidence(path, blocks, max_chunks, scope="TRANSCRIPT", deadline=Non
     notes (bounded concurrency), merge levels until the notes fit the reduce budget,
     then append the raw end. Any chunk failure raises (the caller leaves the memoir
     unchanged); more than max_chunks raises _TranscriptTooLong; passing the deadline
-    raises _DeadlinePassed. Returns (evidence_text, n_chunks).
+    raises DeadlinePassed. Returns (evidence_text, n_chunks).
     """
     text = "\n".join(blocks)
     if len(text) <= MEMOIR_CHUNK_CHARS:
@@ -650,14 +638,16 @@ def _document_session(path, s, deadline=None):
     if len(excerpt.strip()) < 200:
         return {"action": "skipped_empty", "reason": "transcript too short (<200 chars)"}
 
-    filter_timeout = _call_timeout(deadline, 300)
     try:
         raw = _call_omp_p(
             FILTER_JUDGE_PROMPT.format(project=s["project"], title=s.get("title") or "(untitled)",
                                        started=s["started"], cwd=s.get("cwd") or "",
                                        excerpt=excerpt),
-            model=STEWARD_MODEL, timeout=filter_timeout, mode="json", tools=NO_TOOLS)
+            model=STEWARD_MODEL, timeout=300, mode="json", tools=NO_TOOLS,
+            deadline=deadline)
         packet = _extract_json(raw, "session-filter-judge")
+    except DeadlinePassed:
+        raise
     except Exception as e:
         packet = {"verdict": "document", "filter_error": str(e)[:200]}
     if packet.get("verdict") == "skip":
@@ -670,23 +660,25 @@ def _document_session(path, s, deadline=None):
                                                  deadline=deadline)
     except _TranscriptTooLong as e:
         return {"action": "summarizer_skipped", "reason": f"too long: {e}"}
-    except _DeadlinePassed:
+    except DeadlinePassed:
         raise
     except Exception as e:
         return {"action": "summarizer_failed", "error": f"chunk notes: {str(e)[:200]}"}
-    timeout = _call_timeout(deadline, MEMOIR_FINAL_TIMEOUT)
     try:
         raw = _call_omp_p(
             SUMMARIZER_PROMPT.format(path=path, project=s["project"],
                                      title=s.get("title") or "(untitled)",
                                      started=s["started"],
                                      transcript=transcript),
-            model=STEWARD_MODEL, timeout=timeout, mode="json", tools=NO_TOOLS)
+            model=STEWARD_MODEL, timeout=MEMOIR_FINAL_TIMEOUT, mode="json", tools=NO_TOOLS,
+            deadline=deadline)
         packet = _extract_json(raw, "session-summarizer")
         body = (packet.get("markdown") or "").strip()
         label = _sanitize_slug(packet.get("label") or s.get("title"))
         if not body:
             raise ValueError("summarizer returned empty markdown")
+    except DeadlinePassed:
+        raise
     except Exception as e:
         return {"action": "summarizer_failed", "error": str(e)[:200]}
 
@@ -732,19 +724,21 @@ def _judge_existing_memoir(path, s, memoir_path, deadline=None):
     except _TranscriptTooLong as e:
         return {"action": "judge_skipped",
                 "reason": f"later part too long: {e}; memoir left unchanged"}
-    except _DeadlinePassed:
+    except DeadlinePassed:
         raise
     except Exception as e:
         return {"action": "judge_error", "error": f"chunk notes: {str(e)[:200]}"}
-    timeout = _call_timeout(deadline, MEMOIR_FINAL_TIMEOUT)
     try:
         raw = _call_omp_p(
             MEMOIR_EXTEND_PROMPT.format(memoir_path=memoir_path,
                                         covered=covered.isoformat() if covered else "unknown",
                                         memoir_content=content, path=path,
                                         transcript=transcript),
-            model=STEWARD_MODEL, timeout=timeout, mode="json", tools=NO_TOOLS)
+            model=STEWARD_MODEL, timeout=MEMOIR_FINAL_TIMEOUT, mode="json", tools=NO_TOOLS,
+            deadline=deadline)
         packet = _extract_json(raw, "session-memoir-judge")
+    except DeadlinePassed:
+        raise
     except Exception as e:
         return {"action": "judge_error", "error": str(e)[:200]}
     verdict = packet.get("verdict")
@@ -894,12 +888,12 @@ def phase_0b_session_memory(run_dir, dry_run=False, setup=None):
         path = Path(s["path"])
         try:
             if time.monotonic() >= deadline:
-                raise _DeadlinePassed("P0b deadline passed")
+                raise DeadlinePassed("P0b deadline passed")
             if s["action"] == "judge":
                 s.update(_judge_existing_memoir(path, s, Path(s["memoir"]), deadline))
             else:
                 s.update(_document_session(path, s, deadline))
-        except _DeadlinePassed:
+        except DeadlinePassed:
             s["action"] = "skipped_deadline"
             s["reason"] = f"P0b deadline ({P0B_DEADLINE_SECONDS}s) passed; memoir left unchanged"
         except Exception as e:
@@ -913,8 +907,26 @@ def phase_0b_session_memory(run_dir, dry_run=False, setup=None):
         commit = _commit_memoirs(datetime.now(timezone.utc).strftime("%Y-%m-%d"))
         print(f"  notes commit: {commit}")
 
-    write_json(run_dir / "00b-session-memory.json",
-               {"cutoff": cutoff.isoformat(), "sessions": sessions, "commit": commit,
-                "errors": errors})
+    result = {"cutoff": cutoff.isoformat(), "sessions": sessions, "commit": commit,
+              "errors": errors}
+    problems = _p0b_problems(sessions, commit)
+    if problems:
+        # Degraded, not failed: the run goes on; the workflow and the email show it.
+        result["phase_status"] = "degraded"
+        result["reason"] = "session memory: " + ", ".join(problems)
+        print(f"  degraded: {result['reason']}")
+    write_json(run_dir / "00b-session-memory.json", result)
     print(f"[P0b] done -> {run_dir / '00b-session-memory.json'}")
+
+
+def _p0b_problems(sessions, commit):
+    """Human-readable counts of sessions P0b could not handle (memoirs left unchanged)."""
+    problems = []
+    for action in P0B_PROBLEM_ACTIONS:
+        n = sum(1 for s in sessions if s.get("action") == action)
+        if n:
+            problems.append(f"{n} {action}")
+    if commit and not commit.get("ok"):
+        problems.append("notes commit failed")
+    return problems
 

@@ -192,6 +192,11 @@ class P3FixMenuTests(unittest.TestCase):
                 for banned in ("herdr", "llama", "k3s", "ssh", "sh -c"):
                     self.assertNotIn(banned, joined)
 
+    def test_jev_state_includes_the_endpoints_own_p1_step(self):
+        steps = [{"step": "freshrss", "status": "bumped"}, {"step": "searxng", "status": "ok"}]
+        state = health._p3_jev_state("freshrss", steps, self.PACKET)
+        self.assertEqual([s["step"] for s in state["p1_steps_tonight"]], ["freshrss"])
+
     def test_off_menu_or_wrong_target_choice_never_executes(self):
         for choice in ("restart_container", "restart_cloudflared", "rm -rf /", None):
             with self.subTest(choice=choice):
