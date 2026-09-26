@@ -16,7 +16,6 @@ StandardOutput=journal
 StandardError=journal
 UMask=0077
 Environment="PATH=%h/.local/bin:%h/.bun/bin:%h/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-Environment="KUBECONFIG=%h/.kube/config"
 
 [Install]
 WantedBy=default.target

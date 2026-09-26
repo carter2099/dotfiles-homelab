@@ -166,10 +166,12 @@ maintenance and never to bypass a project error.
 
 The ThinkPad's nightly homelab steward maintains this Linux installation through the
 pinned `gamingrig-linux` alias. It may apply APT, OMP, and Herdr updates and reboot Linux
-when `/var/run/reboot-required` exists. It skips the rig when offline, sleeping, or running
-Windows; it never wakes or switches the OS for maintenance. Post-update health requires
-SSH, a new boot ID after reboot, NVIDIA, `llama-swap`, the model endpoint, disk capacity,
-and no failed units.
+when `/var/run/reboot-required` exists. It upgrades the NVIDIA module metapackage with
+the kernel and defers the reboot (a warning in its report) if the kernel it would boot has
+no NVIDIA module matching the installed driver. It skips the rig when offline, sleeping,
+or running Windows; it never wakes or switches the OS for maintenance. Post-update health
+requires SSH, a new boot ID after reboot, NVIDIA, `llama-swap`, the model endpoint, disk
+capacity, and no failed units.
 
 Do not install a second steward, notes service, Kubernetes node, or production scheduler
 on this host.

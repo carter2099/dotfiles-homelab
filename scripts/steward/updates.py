@@ -31,6 +31,7 @@ from .config import (
     RIG_BOOT_ENTRY,
     RIG_DISK_MAX_PERCENT,
     RIG_MODEL_ENDPOINT,
+    RIG_NVIDIA_ML_LIBRARY,
     RIG_REBOOT_WAIT_TIMEOUT,
     RIG_REMOTE_PATH,
     RIG_REQUIRED_MODEL_IDS,
@@ -2027,7 +2028,12 @@ def _rig_platform_probe():
 
 
 def _rig_apt_upgrade():
-    """Run unattended apt update/upgrade and report planned and applied counts."""
+    """Run unattended apt update/upgrade and report planned and applied counts.
+
+    Plain ``upgrade`` never installs new packages, so it keeps back the NVIDIA
+    module metapackage whenever a kernel update needs a new per-kernel module
+    package; ``_rig_nvidia_module_upgrade`` then upgrades just that metapackage.
+    """
     update = _rig_command_result(
         "apt_update",
         [
@@ -2119,6 +2125,81 @@ def _rig_apt_upgrade():
         result["error"] = "apt upgrade did not report an applied upgrade count"
     elif status == "failed":
         result["error"] = upgrade.get("error", "apt upgrade failed")
+    if result["status"] == "ok":
+        nvidia = _rig_nvidia_module_upgrade()
+        result["substeps"].append(nvidia)
+        if nvidia["status"] == "ok":
+            result["upgraded_count"] += nvidia["upgraded_count"]
+        elif nvidia["status"] == "failed":
+            result["status"] = "failed"
+            result["error"] = nvidia["error"]
+    return result
+
+
+_RIG_KERNEL_ABI = re.compile(r"-\d+\.\d+\.\d+-\d+-")
+
+
+def _rig_nvidia_module_upgrade():
+    """Keep the NVIDIA module metapackage paired with the installed kernel.
+
+    ``linux-modules-nvidia-<branch>-generic`` follows a new kernel by depending
+    on a new per-kernel package (and the matching userspace driver). Upgrading
+    only the installed metapackages installs that module without taking the
+    unrelated new packages ``--with-new-pkgs`` would pull in.
+    """
+    listing = _rig_command_result(
+        "nvidia_module_packages",
+        ["dpkg-query", "-W", "-f", "${db:Status-Abbrev} ${Package}\\n",
+         "linux-modules-nvidia-*"],
+        timeout=30,
+        capture_full=True,
+    )
+    stdout = listing.pop("_full_stdout", "")
+    stderr = listing.pop("_full_stderr", "")
+    if listing["status"] != "ok":
+        if listing.get("exit_code") == 1 and "no packages found" in stderr.lower():
+            return {"step": "nvidia_modules", "status": "skipped",
+                    "reason": "no NVIDIA module packages installed",
+                    "upgraded_count": 0}
+        return {"step": "nvidia_modules", "status": "failed",
+                "error": listing.get("error", "dpkg-query failed"),
+                "upgraded_count": 0}
+    packages = sorted(
+        parts[1] for parts in (line.split() for line in stdout.splitlines())
+        if len(parts) == 2 and parts[0] == "ii" and not _RIG_KERNEL_ABI.search(parts[1])
+    )
+    if not packages:
+        return {"step": "nvidia_modules", "status": "skipped",
+                "reason": "no NVIDIA module metapackage installed",
+                "upgraded_count": 0}
+    install = _rig_command_result(
+        "nvidia_module_upgrade",
+        [
+            "sudo", "-n", "env", "DEBIAN_FRONTEND=noninteractive",
+            "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+            "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
+            "install", "--only-upgrade", *packages,
+        ],
+        timeout=RIG_APT_TIMEOUT,
+        capture_full=True,
+    )
+    output = "\n".join(
+        part for part in (install.pop("_full_stdout", ""), install.pop("_full_stderr", ""))
+        if part
+    )
+    counts = re.search(r"(?im)(\d+)\s+upgraded,\s+(\d+)\s+newly installed", output)
+    result = {
+        "step": "nvidia_modules",
+        "status": "ok" if install["status"] == "ok" and counts else "failed",
+        "packages": packages,
+        "upgraded_count": int(counts.group(1)) if counts else 0,
+        "installed_count": int(counts.group(2)) if counts else 0,
+        "output_tail": output.strip()[-700:],
+    }
+    if result["status"] == "failed":
+        result["error"] = install.get("error") or (
+            "NVIDIA module upgrade did not report its package counts")
+        result["upgraded_count"] = 0
     return result
 
 
@@ -2448,6 +2529,71 @@ def _rig_reboot_required():
         result["error"] = result.get("error", "could not inspect reboot-required flag")
     return result
 
+
+def _rig_gpu_deferral(result, reason, command):
+    result.update({
+        "status": "warning",
+        "reason": f"reboot deferred: {reason}",
+        "evidence": _rig_tail(
+            command.get("stdout_tail", ""), command.get("stderr_tail", "")),
+    })
+    return result
+
+
+def _rig_boot_gpu_ready():
+    """Check the kernel the rig boots next has an NVIDIA module for its driver.
+
+    Ubuntu ships NVIDIA modules per kernel ABI. A kernel installed before its
+    module package (kept back, or not yet published) boots without the GPU, so
+    the reboot waits until module and userspace driver versions match. Deferral
+    is a warning, not a failure: the running kernel keeps serving models.
+    """
+    result = {"step": "boot_gpu_ready"}
+    kernel = _rig_command_result(
+        "boot_kernel", ["readlink", "-e", "/boot/vmlinuz"], timeout=20)
+    match = re.fullmatch(
+        r"/boot/vmlinuz-([0-9A-Za-z._+~-]+)",
+        (kernel.get("stdout_tail") or "").strip(),
+    )
+    if kernel["status"] != "ok" or match is None:
+        return _rig_gpu_deferral(result, "could not identify the boot kernel", kernel)
+    result["kernel"] = match.group(1)
+
+    driver = _rig_command_result(
+        "nvidia_driver", ["readlink", "-e", RIG_NVIDIA_ML_LIBRARY], timeout=20)
+    match = re.search(
+        r"libnvidia-ml\.so\.(\d+(?:\.\d+)+)$",
+        (driver.get("stdout_tail") or "").strip(),
+    )
+    if driver["status"] != "ok" or match is None:
+        return _rig_gpu_deferral(
+            result, "could not read the installed NVIDIA driver version", driver)
+    result["driver_version"] = match.group(1)
+
+    module = _rig_command_result(
+        "nvidia_module",
+        ["modinfo", "-k", result["kernel"], "-F", "version", "nvidia"],
+        timeout=20,
+    )
+    version = (module.get("stdout_tail") or "").strip()
+    if module["status"] != "ok" or not version:
+        return _rig_gpu_deferral(
+            result,
+            f"kernel {result['kernel']} has no NVIDIA module "
+            f"(driver {result['driver_version']})",
+            module,
+        )
+    result["module_version"] = version
+    if version != result["driver_version"]:
+        return _rig_gpu_deferral(
+            result,
+            f"kernel {result['kernel']} NVIDIA module {version} does not match "
+            f"driver {result['driver_version']}",
+            module,
+        )
+    result["status"] = "ok"
+    return result
+
 def _rig_boot_id(step="boot_id"):
     """Read and validate the current Linux boot identifier."""
     result = _rig_command_result(
@@ -2658,13 +2804,12 @@ def _p1_gamingrig_maintenance(dry_run=False):
         result["substeps"].append(_rig_herdr_update())
         result["substeps"].append(_rig_omp_update())
 
-        health = _rig_health_checks()
-        result["substeps"].append(health)
-        result["health"] = health
-
         reboot = _rig_reboot_required()
         result["substeps"].append(reboot)
-        if reboot.get("required"):
+        gpu = _rig_boot_gpu_ready() if reboot.get("required") else None
+        if gpu is not None:
+            result["substeps"].append(gpu)
+        if gpu is not None and gpu["status"] == "ok":
             boot_id = _rig_boot_id("pre_reboot_boot_id")
             result["substeps"].append(boot_id)
             if boot_id["status"] == "ok":
@@ -2689,6 +2834,13 @@ def _p1_gamingrig_maintenance(dry_run=False):
                             result["post_reboot_health_passed"] = (
                                 post_health.get("status") == "ok"
                             )
+
+        # After a reboot its own health gate is authoritative. Checking before
+        # it would fail on a driver update that only the reboot activates.
+        if not result["reboot_requested"]:
+            health = _rig_health_checks()
+            result["substeps"].append(health)
+            result["health"] = health
 
         result["rebooted"] = (
             result["reboot_requested"] and result["new_boot_observed"]

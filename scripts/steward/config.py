@@ -157,6 +157,8 @@ RIG_REQUIRED_MODEL_IDS = (
     "gemma-4-26b-q8",
     "bonsai-2-27b-pq2",
 )
+# Resolves to libnvidia-ml.so.<driver version>; readable without the kernel module.
+RIG_NVIDIA_ML_LIBRARY = "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1"
 RIG_REMOTE_PATH = (
     "/home/carte/.rbenv/shims:/home/carte/.bun/bin:/home/carte/.local/bin:"
     "/home/carte/.local/share/fnm:/home/carte/go/bin:"

@@ -359,6 +359,8 @@ def _html_gamingrig_update(step):
                     f'{html.escape(str(sub.get("error") or sub.get("reason") or sub_status))}',
                     "#c62828",
                 )
+        elif name == "boot_gpu_ready" and sub_status == "warning":
+            row(f'{host}: {html.escape(str(sub.get("reason") or "reboot deferred"))}', "#e65100")
         elif name == "reboot" and sub_status == "ok":
             if step.get("rebooted") and step.get("post_reboot_health_passed"):
                 row(f'{host}: rebooted; Linux SSH return and post-reboot health were validated')
@@ -1433,6 +1435,8 @@ def _tldr_collect_gamingrig_updates(step):
                 f"{host} {name} {_p1_status_label(status).lower()}: "
                 f"{str(sub.get('error') or sub.get('reason') or status)[:120]}"
             )
+        elif name == "boot_gpu_ready" and status == "warning":
+            updates.append(f"{host} {str(sub.get('reason') or 'reboot deferred')[:160]}")
         elif name == "reboot" and status == "ok":
             if step.get("rebooted") and step.get("post_reboot_health_passed"):
                 updates.append(f"{host} rebooted and Linux health was rechecked")
