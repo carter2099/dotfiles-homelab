@@ -2030,9 +2030,10 @@ def _rig_platform_probe():
 def _rig_apt_upgrade():
     """Run unattended apt update/upgrade and report planned and applied counts.
 
-    Plain ``upgrade`` never installs new packages, so it keeps back the NVIDIA
-    module metapackage whenever a kernel update needs a new per-kernel module
-    package; ``_rig_nvidia_module_upgrade`` then upgrades just that metapackage.
+    ``--with-new-pkgs`` matches the ThinkPad's ``apt upgrade``: it installs the
+    new packages an upgrade depends on and never removes one. Plain ``upgrade``
+    keeps such upgrades back for good: a new kernel's NVIDIA module package
+    (the rig booted GPU-less on 2026-09-25) and the split linux-firmware.
     """
     update = _rig_command_result(
         "apt_update",
@@ -2057,7 +2058,7 @@ def _rig_apt_upgrade():
         }
 
     plan = _rig_command_result(
-        "apt_upgrade_plan", ["apt-get", "--simulate", "upgrade"],
+        "apt_upgrade_plan", ["apt-get", "--simulate", "--with-new-pkgs", "upgrade"],
         timeout=RIG_APT_TIMEOUT,
         capture_full=True,
     )
@@ -2090,7 +2091,7 @@ def _rig_apt_upgrade():
             "sudo", "-n", "env", "DEBIAN_FRONTEND=noninteractive",
             "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
             "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
-            "upgrade",
+            "--with-new-pkgs", "upgrade",
         ],
         timeout=RIG_APT_TIMEOUT,
         capture_full=True,
@@ -2105,6 +2106,9 @@ def _rig_apt_upgrade():
     apply_output = _rig_tail(apply_stdout, apply_stderr, limit=1400)
     applied_match = re.search(r"(?im)(\d+)\s+upgraded\b", apply_stdout + "\n" + apply_stderr)
     applied = int(applied_match.group(1)) if applied_match else 0
+    installed_match = re.search(
+        r"(?im)\d+\s+upgraded,\s+(\d+)\s+newly installed", apply_stdout + "\n" + apply_stderr)
+    installed = int(installed_match.group(1)) if installed_match else 0
 
     output = _rig_tail(
         update.get("stdout_tail", ""), update.get("stderr_tail", ""),
@@ -2116,6 +2120,7 @@ def _rig_apt_upgrade():
         "status": status,
         "planned_count": planned,
         "upgraded_count": applied if status == "ok" else 0,
+        "installed_count": installed if status == "ok" else 0,
         "substeps": [update, plan, upgrade],
         "output_tail": output[-1800:],
     }
@@ -2125,81 +2130,6 @@ def _rig_apt_upgrade():
         result["error"] = "apt upgrade did not report an applied upgrade count"
     elif status == "failed":
         result["error"] = upgrade.get("error", "apt upgrade failed")
-    if result["status"] == "ok":
-        nvidia = _rig_nvidia_module_upgrade()
-        result["substeps"].append(nvidia)
-        if nvidia["status"] == "ok":
-            result["upgraded_count"] += nvidia["upgraded_count"]
-        elif nvidia["status"] == "failed":
-            result["status"] = "failed"
-            result["error"] = nvidia["error"]
-    return result
-
-
-_RIG_KERNEL_ABI = re.compile(r"-\d+\.\d+\.\d+-\d+-")
-
-
-def _rig_nvidia_module_upgrade():
-    """Keep the NVIDIA module metapackage paired with the installed kernel.
-
-    ``linux-modules-nvidia-<branch>-generic`` follows a new kernel by depending
-    on a new per-kernel package (and the matching userspace driver). Upgrading
-    only the installed metapackages installs that module without taking the
-    unrelated new packages ``--with-new-pkgs`` would pull in.
-    """
-    listing = _rig_command_result(
-        "nvidia_module_packages",
-        ["dpkg-query", "-W", "-f", "${db:Status-Abbrev} ${Package}\\n",
-         "linux-modules-nvidia-*"],
-        timeout=30,
-        capture_full=True,
-    )
-    stdout = listing.pop("_full_stdout", "")
-    stderr = listing.pop("_full_stderr", "")
-    if listing["status"] != "ok":
-        if listing.get("exit_code") == 1 and "no packages found" in stderr.lower():
-            return {"step": "nvidia_modules", "status": "skipped",
-                    "reason": "no NVIDIA module packages installed",
-                    "upgraded_count": 0}
-        return {"step": "nvidia_modules", "status": "failed",
-                "error": listing.get("error", "dpkg-query failed"),
-                "upgraded_count": 0}
-    packages = sorted(
-        parts[1] for parts in (line.split() for line in stdout.splitlines())
-        if len(parts) == 2 and parts[0] == "ii" and not _RIG_KERNEL_ABI.search(parts[1])
-    )
-    if not packages:
-        return {"step": "nvidia_modules", "status": "skipped",
-                "reason": "no NVIDIA module metapackage installed",
-                "upgraded_count": 0}
-    install = _rig_command_result(
-        "nvidia_module_upgrade",
-        [
-            "sudo", "-n", "env", "DEBIAN_FRONTEND=noninteractive",
-            "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
-            "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
-            "install", "--only-upgrade", *packages,
-        ],
-        timeout=RIG_APT_TIMEOUT,
-        capture_full=True,
-    )
-    output = "\n".join(
-        part for part in (install.pop("_full_stdout", ""), install.pop("_full_stderr", ""))
-        if part
-    )
-    counts = re.search(r"(?im)(\d+)\s+upgraded,\s+(\d+)\s+newly installed", output)
-    result = {
-        "step": "nvidia_modules",
-        "status": "ok" if install["status"] == "ok" and counts else "failed",
-        "packages": packages,
-        "upgraded_count": int(counts.group(1)) if counts else 0,
-        "installed_count": int(counts.group(2)) if counts else 0,
-        "output_tail": output.strip()[-700:],
-    }
-    if result["status"] == "failed":
-        result["error"] = install.get("error") or (
-            "NVIDIA module upgrade did not report its package counts")
-        result["upgraded_count"] = 0
     return result
 
 

@@ -291,7 +291,9 @@ def _html_gamingrig_update(step):
         if name == "apt_upgrade":
             count = sub.get("upgraded_count", 0)
             if count:
-                row(f'{host} apt: {html.escape(str(count))} packages upgraded')
+                new = sub.get("installed_count", 0)
+                row(f'{host} apt: {html.escape(str(count))} packages upgraded'
+                    + (f', {html.escape(str(new))} newly installed' if new else ''))
             if sub_status in _P1_FAILURE_STATUSES:
                 row(
                     f'{host} apt: {_p1_status_label(sub_status)} — '
@@ -1345,7 +1347,9 @@ def _tldr_collect_gamingrig_updates(step):
         if name == "apt_upgrade":
             count = sub.get("upgraded_count", 0)
             if count:
-                updates.append(f"{host} apt: {count} packages upgraded")
+                new = sub.get("installed_count", 0)
+                updates.append(f"{host} apt: {count} packages upgraded"
+                               + (f", {new} newly installed" if new else ""))
             if status in _P1_FAILURE_STATUSES:
                 n_failed += 1
                 emitted_failure = True

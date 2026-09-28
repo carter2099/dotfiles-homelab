@@ -17,8 +17,8 @@ Pick the latest dated dir. Read `summary.md`, `01-applied.json`, `07-audit.json`
 ## Step 2: Summarize steward state
 
 From the artifacts, answer:
-- What did the steward apply last night? (apt, Docker, cloudflared, FreshRSS), and did its report-only Open WebUI check find a newer stable release?
-- What version-currency findings did the audit flag? (k3s, Go, Node, Ruby, neovim, images)
+- What did the steward apply last night? (apt, Docker, cloudflared, FreshRSS, Open WebUI, SearXNG, omp, the gaming rig, app deploys)
+- What version-currency findings did the audit flag? (Go, Node, Ruby, neovim, images)
 - Are health checks passing?
 - Are any audit sections showing DRIFT/ATTENTION?
 
@@ -28,7 +28,6 @@ If the user wants a fresh check (not just the steward report), run:
 
 ```bash
 apt list --upgradable 2>/dev/null | grep -v "^Listing"
-kubectl get deploy -A -o wide 2>/dev/null
 docker ps --format '{{.Names}} {{.Image}} {{.Status}}'
 test -f /var/run/reboot-required && echo "REBOOT REQUIRED" || echo "No reboot required"
 ```
@@ -42,5 +41,5 @@ Present a short summary: what the steward already handled, what is behind, and w
 ## Notes
 
 - Report-only. Never installs, upgrades, or restarts anything.
-- The nightly steward (`homelab-steward.timer`, 1:00 AM ET) auto-applies apt, Docker engine/plugins, cloudflared, and FreshRSS tag bumps. It reports but never applies Open WebUI releases; use `/update-openweb-ui` for the guarded manual update.
-- Custom app deploys use `/deploy-app`. Runtimes (Go/Ruby/Node/k3s distro) are manual.
+- The nightly steward (`homelab-steward.timer`, 00:00 ET) auto-applies apt, Docker engine/plugins, cloudflared, FreshRSS tag bumps, the latest stable Open WebUI release (snapshot, health gate, rollback) and gaming-rig maintenance. `/update-openweb-ui` remains the guarded manual path.
+- Custom app deploys use `/deploy-app`. Runtimes (Go/Ruby/Node) are manual.
