@@ -1059,6 +1059,186 @@ def test_phase_three_uses_product_priority() -> None:
         )
 
 
+def _record_fetches(urls: list[str]):
+    def fake_omp(prompt: str, **kwargs: object) -> str:
+        url = prompt.split("Fetch this article: ", 1)[1].splitlines()[0]
+        urls.append(url)
+        return json.dumps({
+            "title": "Fetched", "url": url, "date_confirmed": "2026-09-27",
+            "author": "", "summary": "A detailed factual summary.",
+            "key_details": ["detail"], "fetch_success": True,
+        })
+    return fake_omp
+
+
+def test_hard_paywall_story_never_reaches_fetch() -> None:
+    check(contracts.hard_paywall_domain("https://amp.washingtonpost.com/x") == "washingtonpost.com",
+          "subdomain of a paywalled publisher not matched")
+    check(contracts.hard_paywall_domain("WWW.TheInformation.com/articles/x") == "theinformation.com",
+          "scheme-less mixed-case host not matched")
+    check(contracts.hard_paywall_domain("https://notwashingtonpost.com/x") is None,
+          "suffix without a label boundary matched")
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / catalog.TOPICS["world"]["category"] / "2026-09-27"
+        run_dir.mkdir(parents=True)
+        paywalled = [
+            ("https://www.washingtonpost.com/weather/2026/09/26/noreaster/", 95.0,
+             "Major nor'easter batters East Coast", ["nor'easter", "coastal flooding"]),
+            ("https://amp.washingtonpost.com/science/2026/09/26/dogs-words/", 94.0,
+             "Dogs learn words the same way babies do", ["dog word learning"]),
+            ("https://www.theinformation.com/articles/chip-talks", 93.0,
+             "Anthropic in talks with Samsung on custom chips", ["Samsung custom chips"]),
+        ]
+        fresh = [{
+            "title": title, "url": url, "priority_score": score,
+            "editorial_significance": "medium", "date_published": "2026-09-27",
+            "event": title, "event_terms": terms,
+        } for url, score, title, terms in paywalled]
+        fresh.append({
+            "title": "Mortgage rates break past 7%", "url": "https://wboi.org/mortgage-rates",
+            "priority_score": 50.0, "editorial_significance": "medium",
+            "date_published": "2026-09-27", "event": "Mortgage rates top 7%",
+            "event_terms": ["mortgage rates"],
+        })
+        research_findings = copy.deepcopy(fresh)
+        fetched: list[str] = []
+        with patch.object(runtime, "DIGESTS_DIR", root), \
+                patch.object(runtime, "ARTICLE_CACHE_DIR", root / "cache"), \
+                patch.object(research, "FRESH_CAP", 1), \
+                patch.object(runtime, "_call_omp_p", side_effect=_record_fetches(fetched)):
+            queue, _ = research.phase_3_rank(
+                catalog.TOPICS["world"], fresh, [], {"stories": []}, run_dir,
+                research_findings,
+            )
+            research.phase_4_fetch(catalog.TOPICS["world"], queue, run_dir)
+        # The paywalled stories rank first, so they must be gone before the cap
+        # or the one fresh slot is wasted on an unreadable page.
+        check(fetched == ["https://wboi.org/mortgage-rates"], f"fetched={fetched!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        check(
+            sorted(item["url"] for item in artifact["paywall_dropped"])
+            == sorted(url for url, *_ in paywalled),
+            artifact["paywall_dropped"],
+        )
+        check(artifact["paywall_substituted"] == [], artifact["paywall_substituted"])
+
+
+def test_hard_paywall_story_uses_alternate_source() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / catalog.TOPICS["world"]["category"] / "2026-09-27"
+        run_dir.mkdir(parents=True)
+        wapo = "https://www.washingtonpost.com/national-security/2026/09/26/trump-rejects-iran-proposal/"
+        story = {
+            "title": "Trump rejects Iran's proposal to reopen Strait of Hormuz, restart peace talks",
+            "url": wapo, "source_domain": "washingtonpost.com",
+            "priority_score": 88.0, "editorial_significance": "high",
+            "date_published": "2026-09-26",
+            "event": "Trump rejected Iran's proposal to reopen the Strait of Hormuz and restart peace talks.",
+            "event_terms": ["Strait of Hormuz", "Trump rejects Iran proposal"],
+        }
+        alternate = {
+            "title": "Trump rejects Iran's proposal to reopen the Strait of Hormuz",
+            "url": "https://www.aljazeera.com/news/2026/9/26/trump-rejects-iran-roadmap",
+            "source_domain": "aljazeera.com", "date_published": "2026-09-26",
+            "summary": "Trump rejected Iran's roadmap to reopen the strait.",
+            "event": "Trump rejected Iran's proposal to reopen the Strait of Hormuz.",
+            "event_terms": ["Strait of Hormuz", "Iran roadmap rejected"],
+        }
+        research_findings = [
+            copy.deepcopy(story),
+            # Same story on another paywalled host is never a substitute.
+            {**alternate, "url": "https://www.theinformation.com/articles/hormuz"},
+            # Shares a term but describes a different event.
+            {"title": "US helps double oil volume exiting the Gulf",
+             "url": "https://fortune.com/2026/09/26/gulf-oil-volume/",
+             "event": "The US military is guiding tankers out of the Gulf.",
+             "event_terms": ["Strait of Hormuz", "tanker escorts"]},
+            alternate,
+        ]
+        fetched: list[str] = []
+        with patch.object(runtime, "DIGESTS_DIR", root), \
+                patch.object(runtime, "ARTICLE_CACHE_DIR", root / "cache"), \
+                patch.object(runtime, "_call_omp_p", side_effect=_record_fetches(fetched)):
+            queue, _ = research.phase_3_rank(
+                catalog.TOPICS["world"], [copy.deepcopy(story)], [], {"stories": []},
+                run_dir, research_findings,
+            )
+            research.phase_4_fetch(catalog.TOPICS["world"], queue, run_dir)
+        check(fetched == [alternate["url"]], f"fetched={fetched!r}")
+        check(len(queue) == 1, queue)
+        kept = queue[0]
+        check(kept["title"] == alternate["title"] and kept["source_domain"] == "aljazeera.com", kept)
+        check(kept["priority_score"] == 88.0 and kept["editorial_significance"] == "high",
+              f"story ranking fields lost: {kept!r}")
+        check(kept["paywall_substituted_from"] == wapo, kept)
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        check(artifact["paywall_dropped"] == [], artifact["paywall_dropped"])
+        check(
+            [(item["original_url"], item["alternate_url"]) for item in artifact["paywall_substituted"]]
+            == [(wapo, alternate["url"])],
+            artifact["paywall_substituted"],
+        )
+
+
+def test_hard_paywall_story_uses_same_event_attention_url() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        category = catalog.TOPICS["world"]["category"]
+        run_dir = root / category / "2026-09-27"
+        run_dir.mkdir(parents=True)
+        covered = "https://www.apnews.com/article/noreaster-yesterday-coverage"
+        (root / category / "2026-09-26").mkdir()
+        (root / category / "2026-09-26" / "06-curated.json").write_text(json.dumps({
+            "fresh": [{"url": covered}], "ongoing": [],
+        }))
+        wapo = "https://www.washingtonpost.com/weather/2026/09/26/major-noreaster/"
+        ranked_elsewhere = "https://www.cbsnews.com/news/noreaster-east-coast-flooding/"
+        chosen = "https://www.dw.com/en/powerful-noreaster-storm-batters-us/a-1234"
+        story = {
+            "title": "Major nor'easter batters East Coast with coastal flooding",
+            "url": wapo, "source_domain": "washingtonpost.com", "priority_score": 90.0,
+            "editorial_significance": "high", "date_published": "2026-09-26",
+            "event": "A nor'easter brought coastal flooding and outages to the East Coast.",
+            "event_terms": ["nor'easter", "coastal flooding"],
+            "attention": {"status": "ok", "evidence": {"same_event_urls": [
+                # Each earlier entry is unusable here: paywalled, already ranked on its
+                # own, or covered by a previous day's edition.
+                {"url": "https://www.theinformation.com/articles/noreaster", "domain": "theinformation.com",
+                 "title": "Nor'easter", "source": "panel"},
+                {"url": ranked_elsewhere, "domain": "cbsnews.com", "title": "Nor'easter floods coast",
+                 "source": "gkg"},
+                {"url": covered, "domain": "apnews.com", "title": "Powerful nor'easter", "source": "gkg"},
+                {"url": chosen, "domain": "dw.com",
+                 "title": "Powerful 'nor'easter' storm batters US", "source": "gkg"},
+            ]}},
+        }
+        other = {
+            "title": "Unrelated budget story", "url": ranked_elsewhere,
+            "priority_score": 10.0, "editorial_significance": "low", "date_published": "2026-09-27",
+        }
+        fetched: list[str] = []
+        with patch.object(runtime, "DIGESTS_DIR", root), \
+                patch.object(runtime, "ARTICLE_CACHE_DIR", root / "cache"), \
+                patch.object(runtime, "_call_omp_p", side_effect=_record_fetches(fetched)):
+            queue, _ = research.phase_3_rank(
+                catalog.TOPICS["world"], [copy.deepcopy(story), other], [], {"stories": []},
+                run_dir, [copy.deepcopy(story), other],
+            )
+            research.phase_4_fetch(catalog.TOPICS["world"], queue, run_dir)
+        check(sorted(fetched) == sorted([chosen, ranked_elsewhere]), f"fetched={fetched!r}")
+        swapped = next(item for item in queue if item.get("paywall_substituted_from") == wapo)
+        check(swapped["url"] == chosen and swapped["source_domain"] == "dw.com"
+              and swapped["priority_score"] == 90.0, swapped)
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        check(
+            [(item["alternate_url"], item["alternate_origin"]) for item in artifact["paywall_substituted"]]
+            == [(chosen, "attention:gkg")],
+            artifact["paywall_substituted"],
+        )
+
+
 def test_phase_four_concurrency_and_shared_cache() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -3056,6 +3236,9 @@ def main() -> None:
         test_attention_phase_leaves_out_failed_sources_and_unadjudicated_stories,
         test_offline_attention_phase_never_reaches_the_network,
         test_phase_three_uses_product_priority,
+        test_hard_paywall_story_never_reaches_fetch,
+        test_hard_paywall_story_uses_alternate_source,
+        test_hard_paywall_story_uses_same_event_attention_url,
         test_phase_four_concurrency_and_shared_cache,
         test_phase_five_backfills_date_confirmed_from_date_published,
         test_cached_curation_regenerates_referenced_url_sidecar,

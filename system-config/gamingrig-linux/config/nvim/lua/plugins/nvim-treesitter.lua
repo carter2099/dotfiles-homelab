@@ -7,7 +7,7 @@ return {
 
         vim.api.nvim_create_autocmd("FileType", {
             pattern = { "lua", "ruby", "go", "json", "yaml", "markdown" },
-            callback = function() vim.treesitter.start() end,
+            callback = function() pcall(vim.treesitter.start) end,
         })
     end,
 }

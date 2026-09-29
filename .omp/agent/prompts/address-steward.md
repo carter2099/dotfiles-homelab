@@ -26,7 +26,7 @@ If the issue is recurring, compare with prior 1-2 day artifacts.
 ## Step 2: Classify each complaint
 
 - **Real host failure** (service down, disk full, endpoint unreachable) → fix the host issue
-- **Steward bug** (PATH missing, KUBECONFIG unset, collector crash, bad email render, noisy audit finding) → fix the Python code in `~/scripts/steward_runner.py`
+- **Steward bug** (PATH missing, collector crash, bad email render, noisy audit finding) → fix the Python code in `~/scripts/steward_runner.py`
 - **Unit env issue** (missing env vars in `~/.config/systemd/user/homelab-steward.service`) → fix the unit file, then `systemctl --user daemon-reload`
 - **Intentional holdback** (version pinned, tool not installed) → confirm and brief the user
 
@@ -42,15 +42,15 @@ For unit/env fixes in `~/.config/systemd/user/homelab-steward.service`:
 - Add missing `Environment=` lines
 - Run `systemctl --user daemon-reload`
 
-For k3s/manifest issues in `~/k3s/`:
-- Fix deployment YAML, then `kubectl apply`
+For Compose app issues (for example `~/freshrss/`), fix the compose file or its `up.sh`
+and redeploy with that stack's documented command.
 
 ## Step 4: Smoke test the fix
 
 - Re-run the affected helper in isolation (e.g., import and call the collector function)
 - For env issues: prove the command works under `user_env()`:
   ```python
-  python3 -c "import sys; sys.path.insert(0,'/home/carter/scripts'); from steward_runner import user_env; env = user_env(); print('KUBECONFIG:', env.get('KUBECONFIG'))"
+  python3 -c "import sys; sys.path.insert(0,'/home/carter/scripts'); from steward.runtime import user_env; print('PATH:', user_env().get('PATH'))"
   ```
 - For email issues: render HTML from last run's JSON into `/tmp/steward-email-preview.html` and inspect
 - Do NOT run a full multi-hour steward unless the user asks

@@ -27,7 +27,7 @@ providers:
       - id: qwen-3.8-27b-iq2
         name: qwen-3.8-27b-iq2
         reasoning: true
-        contextWindow: 150000
+        contextWindow: 81920
       - id: ornith-1.0-9b-q6
         name: ornith-1.0-9b-q6
         reasoning: true

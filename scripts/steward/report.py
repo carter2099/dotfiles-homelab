@@ -654,6 +654,19 @@ def _html_updates(applied_data):
                              f'searxng: {_p1_status_label(status)} — '
                              f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
 
+        # docker cleanup: show reclaimed images/cache, or why it only partly ran
+        elif name == "docker_cleanup":
+            if status == "ok":
+                lines.append(_p1_line(f"docker cleanup: {s.get('reason') or ''}", "#7b7b8a"))
+            elif status == "warning":
+                lines.append(_p1_line(f"docker cleanup: WARNING — {s.get('reason') or ''}",
+                                      "#e65100"))
+            elif status in _P1_FAILURE_STATUSES:
+                lines.append(_p1_line(
+                    f"docker cleanup: {_p1_status_label(status)} — {s.get('reason') or ''}",
+                    "#c62828",
+                ))
+
         # Generic fallback: show any step with real change/failure
         else:
             if status in ("ok", "bumped"):
@@ -1983,18 +1996,18 @@ def _html_session_memory(p0b):
     )
 
 
-def _html_showcase(showcase):
-    """Last P9c public-showcase run: published and held paths with reasons."""
-    if not showcase:
+def _html_public_dotfiles(public):
+    """Last P9c public dotfiles run: published and held paths with reasons."""
+    if not public:
         return ""
     esc = html.escape
-    status = str(showcase.get("status") or ("failed" if showcase.get("phase_failed") else "unknown"))
+    status = str(public.get("status") or ("failed" if public.get("phase_failed") else "unknown"))
     summary = (
-        f"Status <strong>{esc(status)}</strong> · {int(showcase.get('published_count') or 0)} files public"
-        f" in {esc(str(showcase.get('repo') or 'carter2099/dotfiles-homelab'))}"
+        f"Status <strong>{esc(status)}</strong> · {int(public.get('published_count') or 0)} files public"
+        f" in {esc(str(public.get('repo') or 'carter2099/dotfiles-homelab'))}"
     )
-    if showcase.get("reason") or showcase.get("error"):
-        summary += f" — {esc(str(showcase.get('reason') or showcase.get('error')))[:400]}"
+    if public.get("reason") or public.get("error"):
+        summary += f" — {esc(str(public.get('reason') or public.get('error')))[:400]}"
     items = [summary]
     groups = (
         ("Published (new)", "added"),
@@ -2004,7 +2017,7 @@ def _html_showcase(showcase):
         ("Blocked by Jev veto", "blocked"),
     )
     for label, key in groups:
-        rows = [r for r in (showcase.get(key) or []) if isinstance(r, dict)]
+        rows = [r for r in (public.get(key) or []) if isinstance(r, dict)]
         if not rows:
             continue
         shown = "; ".join(
@@ -2013,15 +2026,15 @@ def _html_showcase(showcase):
         )
         more = f" (+{len(rows) - 25} more)" if len(rows) > 25 else ""
         items.append(f"{label}: {shown}{more}")
-    if showcase.get("decisions_recorded"):
+    if public.get("decisions_recorded"):
         items.append("Jev decisions recorded: " + ", ".join(
-            f"<code>{esc(str(p))}</code>" for p in showcase["decisions_recorded"][:25]
+            f"<code>{esc(str(p))}</code>" for p in public["decisions_recorded"][:25]
         ))
     li = "".join(f"<li>{item}</li>" for item in items)
     return (
         '<tr><td style="padding:16px 32px 8px;">'
         '<h2 style="margin:0; color:#1565c0; font-size:15px; font-weight:700;">'
-        'Public showcase (last P9c run)</h2></td></tr>'
+        'Public dotfiles (last P9c run)</h2></td></tr>'
         '<tr><td style="padding:8px 32px 16px;">'
         f'<ul style="margin:0; padding-left:20px; color:#555; font-size:12px;">{li}</ul>'
         '</td></tr>'
@@ -2206,10 +2219,10 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     troubleshoot_html += _html_host_drift(remediation, _dotfiles_untracked_paths(), prev_dotfiles)
     try:
         prev_date = prev_workday(datetime.strptime(date_str, "%Y-%m-%d")).strftime("%Y-%m-%d")
-        prev_showcase = _load_prev_artifact(run_dir, prev_date, "09c-showcase.json") or {}
+        prev_public = _load_prev_artifact(run_dir, prev_date, "09c-public-dotfiles.json") or {}
     except ValueError:
-        prev_showcase = {}
-    troubleshoot_html += _html_showcase(prev_showcase)
+        prev_public = {}
+    troubleshoot_html += _html_public_dotfiles(prev_public)
     p0b_path = run_dir / "00b-session-memory.json"
     troubleshoot_html += _html_session_memory(read_json(p0b_path) if p0b_path.exists() else {})
 

@@ -37,7 +37,6 @@ alias zs="source ~/.zshrc"
 alias ez="nvim ~/.zshrc"
 alias cmatrix="cmatrix -b -C blue -u 5"
 alias cdnvim="cd ~/.config/nvim"
-alias k="kubectl"
 # dotfiles sync (command at ~/.local/bin/dotfiles — no alias needed)
 alias carterhelp='nvim ~/README.md'
 
@@ -57,7 +56,6 @@ omp() {
 }
 
 
-export KUBECONFIG=~/.kube/config
 
 
 # fnm

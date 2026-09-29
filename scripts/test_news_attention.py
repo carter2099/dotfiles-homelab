@@ -180,6 +180,39 @@ def test_related_coverage_counts_at_half_weight() -> None:
     check(measures["panel_groups"] == 1.0, measures)
 
 
+def test_same_event_urls_are_jev_same_publisher_articles_only() -> None:
+    rows = _rows() + [
+        # Same headline as the wire write-up, so Jev answers "same" for each of these.
+        {"src": "gkg", "t": END_S - 3400, "domain": "yahoo.com",
+         "url": "https://finance.yahoo.com/news/acme-quasar-9-ships", "title": AP_HEADLINE},
+        {"src": "gkg", "t": END_S - 3300, "domain": "washingtonpost.com",
+         "url": "https://www.washingtonpost.com/technology/2026/09/24/acme-quasar-9/", "title": AP_HEADLINE},
+        {"src": "jetstream", "t": END_S - 700, "author": "a3", "urls": ["https://social-pick.example/quasar-9-story"],
+         "url": "https://social-pick.example/quasar-9-story", "title": AP_HEADLINE, "text": ""},
+    ]
+    relations = {AP_HEADLINE: "same", AP_HEADLINE + " - Wire Three": "related",
+                 "Hands on with Acme's Quasar 9 accelerator launch": "same",
+                 "Acme Quasar 9 accelerator": "same", "Acme Ships Quasar 9 Accelerator": "same",
+                 "Acme Quasar 9 accelerator now shipping": "same"}
+    index = attention_match.Index(rows)
+    documents = attention_match.retrieve(CANDIDATE, index)
+    attention_match.Adjudicator(FakeJev(relations)).adjudicate([(CANDIDATE, documents)])
+    found = attention_match.measure(CANDIDATE, documents, index, window_end_s=END_S, sample_fraction=0.05)
+    # Curated panel first, then GKG. Every other retrieved document is Jev-"same" or
+    # "related" yet never qualifies: related wire, press wire, self, aggregator,
+    # paywalled, HN, and Bluesky-shared URLs.
+    check([entry["url"] for entry in found["same_event_urls"]] == [
+        "https://techsite.example/q9", "https://wire-one.example/a1", "https://wire-two.example/a1",
+    ], found["same_event_urls"])
+    attention, _ = measured_attention(found, section="ai-tech", measured_sources=ALL_SOURCES,
+                                      references={}, window_end=WINDOW_END, first_seen=found["first_seen"])
+    check(attention["evidence"]["same_event_urls"] == found["same_event_urls"], attention["evidence"])
+
+    unadjudicated = [{**doc, "relation": None} for doc in documents]
+    check(attention_match.same_event_urls(unadjudicated, index, "acme.example") == [],
+          "a document without a Jev relation was offered as an alternate")
+
+
 def test_a_failed_adjudication_is_reported_per_story_and_stops_during_an_outage() -> None:
     class DownFor:
         def __init__(self, headline: str | None) -> None:
@@ -443,6 +476,7 @@ def main() -> None:
         test_bulk_parsers_extract_titled_rows,
         test_same_event_counts_once_per_write_up_and_excludes_wires_and_self,
         test_related_coverage_counts_at_half_weight,
+        test_same_event_urls_are_jev_same_publisher_articles_only,
         test_a_failed_adjudication_is_reported_per_story_and_stops_during_an_outage,
         test_measured_zero_is_not_unavailable,
         test_a_missing_source_is_left_out_instead_of_counted_as_zero,

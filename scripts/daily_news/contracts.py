@@ -104,6 +104,34 @@ def is_asset_cdn_url(url: str) -> bool:
     return host in _ASSET_CDN_URL_HOSTS or any(
         host.endswith(f".{cdn}") for cdn in _ASSET_CDN_URL_HOSTS
     )
+
+# Hard-paywalled publishers the Phase 4 reader cannot open. Phase 3 swaps each
+# such URL for another research finding on the same story, or drops the story,
+# so none of them consumes a fetch slot. Add a domain only on fetch-failure
+# evidence from 04-fetch-summaries.json that names a paywall or wall-level
+# block (September 2026: washingtonpost.com 11/12 failed with timeouts or a
+# metered page; theinformation.com 4/5 returned HTTP 403 paywall). Keep
+# bot-blocked outlets that mostly fetch (apnews.com 9/67, arstechnica.com
+# 6/13, both intermittent 403s) out of this set.
+HARD_PAYWALL_DOMAINS = frozenset({
+    "theinformation.com",
+    "washingtonpost.com",
+})
+
+def hard_paywall_domain(url: str) -> str | None:
+    """Return the hard-paywall domain serving ``url`` (any subdomain), else None."""
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    try:
+        host = (urlsplit(raw if "://" in raw else f"https://{raw}").hostname or "").lower()
+    except ValueError:
+        return None
+    for domain in HARD_PAYWALL_DOMAINS:
+        if host == domain or host.endswith(f".{domain}"):
+            return domain
+    return None
+
 def load_cross_topic_urls(
     topic: dict,
     run_dir: Path,

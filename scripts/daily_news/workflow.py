@@ -7,6 +7,7 @@ import signal
 import sys
 import time
 import traceback
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,16 @@ def validate_runtime_contract() -> None:
             "ATTENTION_STAGE_BUDGET_SECONDS must be a number between 0 and "
             f"MAX_ATTENTION_STAGE_BUDGET_SECONDS (got {budget!r}, ceiling "
             f"{budget_ceiling!r})"
+        )
+    paywall_domains = getattr(contracts, "HARD_PAYWALL_DOMAINS", None)
+    if not isinstance(paywall_domains, frozenset) or not paywall_domains or not all(
+        isinstance(domain, str) and domain == domain.strip().lower()
+        and "." in domain and not domain.startswith("www.")
+        for domain in paywall_domains
+    ):
+        errors.append(
+            "HARD_PAYWALL_DOMAINS must be a non-empty frozenset of lowercase "
+            f"bare domains (got {paywall_domains!r})"
         )
     if len(TOPICS) != 5:
         errors.append(f"TOPICS must contain five sections (got {len(TOPICS)})")
@@ -283,6 +294,9 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 else:
                     runtime.check_search_health("post-fallback-retry")
             phase_done("Phase 1: Research", started)
+            # Phase 2 edits findings in place; Phase 3 draws paywall alternates
+            # from the research output as persisted in 01-research-raw.json.
+            research_findings = deepcopy(findings)
 
             started = phase_start("Phase 2: Judge Research")
             fresh_findings, ongoing_findings = research.phase_2_judge_research(
@@ -299,6 +313,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
             started = phase_start("Phase 3: Rank URLs")
             phase_4_queue, sif_candidates = research.phase_3_rank(
                 topic, fresh_findings, ongoing_findings, stories_in_flight, run_dir,
+                research_findings,
             )
             phase_done("Phase 3: Rank URLs", started)
 

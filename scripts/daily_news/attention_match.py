@@ -16,8 +16,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlsplit
 
-from .attention import event_terms
-from .contracts import coverage_key
+from .attention import canonicalize_publisher_url, event_terms
+from .contracts import coverage_key, hard_paywall_domain, is_asset_cdn_url, is_listing_url
 from jev import JevClient, JevUnavailable
 
 TOKEN = re.compile(r"[a-z0-9]+(?:\.[0-9]+)*")
@@ -57,6 +57,16 @@ VERY_RARE_DF = 100
 RECENT_SECONDS = 6 * 3600
 SYNDICATION_JACCARD = 0.6
 MAX_SAMPLES = 6
+# Publisher-article inventories whose Jev-"same" rows can stand in for a hard-paywalled
+# candidate at Phase 3, most curated first. Social shares (Jetstream, Mastodon), HN,
+# Kagi clusters, Bluesky trends, and Wikipedia are never article sources.
+SAME_EVENT_URL_SOURCES = ("panel", "techmeme", "gkg")
+# Hosts that republish or frame other outlets' articles rather than report them.
+AGGREGATOR_HOSTS = frozenset({
+    "digg.com", "flipboard.com", "ground.news", "inkl.com", "msn.com", "news.google.com",
+    "newsbreak.com", "smartnews.com", "yahoo.com",
+})
+MAX_SAME_EVENT_URLS = 5
 
 
 def toks(text: Any) -> list[str]:
@@ -371,9 +381,55 @@ def measure(
         "measures": {key: value for key, value in sorted(measures.items()) if value},
         "recent": {key: value for key, value in sorted(recent.items()) if value},
         "samples": samples,
+        "same_event_urls": same_event_urls(docs, index, own),
         "first_seen": first_seen,
         "adjudication": {
             "documents": len(docs), "accepted": len(accepted),
             "jev": decided.get("jev", 0), "url": decided.get("url", 0),
         },
     }
+
+
+def _is_publisher_article(url: str, own: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower()
+    domain = registrable_domain(host)
+    return (
+        parts.scheme in ("http", "https")
+        and bool(host) and bool(parts.path.strip("/"))
+        and domain != own and domain not in PR_DOMAINS
+        and not any(host == item or host.endswith(f".{item}") for item in AGGREGATOR_HOSTS)
+        and hard_paywall_domain(url) is None
+        and not is_asset_cdn_url(url)
+        and not is_listing_url(url)
+    )
+
+
+def same_event_urls(docs: list[dict[str, Any]], index: Index, own: str) -> list[dict[str, str]]:
+    """Publisher article URLs Jev judged to report the candidate's exact event.
+
+    Only ``same`` relations count (never related, different, or unadjudicated), only
+    from SAME_EVENT_URL_SOURCES, ordered by source curation, retrieval score, then URL.
+    """
+    best: dict[str, tuple[tuple[int, float, str], dict[str, str]]] = {}
+    for doc in docs:
+        if doc.get("relation") != "same":
+            continue
+        for row_index in doc["rows"]:
+            row = index.rows[row_index]
+            if row["src"] not in SAME_EVENT_URL_SOURCES:
+                continue
+            url = canonicalize_publisher_url(row.get("url") or "")
+            if not _is_publisher_article(url, own):
+                continue
+            order = (SAME_EVENT_URL_SOURCES.index(row["src"]), -float(doc.get("score") or 0.0), url)
+            key = coverage_key(url)
+            if key not in best or order < best[key][0]:
+                best[key] = (order, {
+                    "url": url, "domain": registrable_domain(url),
+                    "title": (row.get("title") or "")[:160], "source": row["src"],
+                })
+    return [entry for _, entry in sorted(best.values(), key=lambda pair: pair[0])][:MAX_SAME_EVENT_URLS]

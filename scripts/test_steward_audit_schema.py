@@ -188,6 +188,31 @@ class DocsFirewallEvidenceTests(unittest.TestCase):
         self.assertTrue(evidence["firewall"]["truncated"])
 
 
+class FleetEvidenceTests(unittest.TestCase):
+    def test_recent_webhook_failure_survives_a_long_journal(self):
+        noise = "".join(f"Sep 22 05:00:{i % 60:02d} tp-server dependabot-webhook[1]:   ✓ step {i}\n"
+                        for i in range(5000))
+        old = 'Sep 22 05:01:00 tp-server dependabot-webhook[1]: time=t level=INFO msg=done\n'
+        failed = ('Sep 28 05:42:52 tp-server dependabot-webhook[1]: time=t level=ERROR '
+                  'msg="trusted publish step failed"\n')
+        unit = ('Sep 28 05:43:00 tp-server systemd[9]: dependabot-webhook.service: '
+                "Failed with result 'exit-code'.\n")
+        journal = old + noise + failed + unit
+
+        def fake_run_capture(cmd, **kwargs):
+            return journal if "dependabot-webhook" in cmd else "hyperliquid"
+
+        with patch.object(audit, "run_capture", side_effect=fake_run_capture), \
+                patch.object(audit, "user_env", return_value={}):
+            evidence = audit._audit_collector_7_agent_fleet()
+        self.assertIn("trusted publish step failed", evidence["dependabot_problems"])
+        self.assertIn("Failed with result", evidence["dependabot_problems"])
+        self.assertNotIn("msg=done", evidence["dependabot_problems"])
+        self.assertTrue(evidence["dependabot_recent_events"].endswith(unit.rstrip("\n")))
+        self.assertNotIn("✓ step", evidence["dependabot_recent_events"])
+        self.assertLessEqual(len(evidence["dependabot_recent_events"]), 3000)
+
+
 class AuditPoolTests(unittest.TestCase):
     def test_audit_pool_uses_audit_max_workers(self):
         sizes = []

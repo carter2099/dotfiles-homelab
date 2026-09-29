@@ -126,7 +126,7 @@ def _upstream_versions():
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())
 
-    for name in ("go", "nodejs", "ruby", "traefik"):
+    for name in ("go", "nodejs", "ruby"):
         try:
             cycles = _fetch(f"https://endoflife.date/api/{name}.json")[:4]
             upstream[name] = [
@@ -761,21 +761,30 @@ def _audit_collector_6_notes_resources():
 
 
 def _audit_collector_7_agent_fleet():
-    """Collector: other unattended agents' recent runs."""
+    """Collector: other unattended agents' recent runs, bounded from the newest end."""
     env = user_env()
     hyperliquid_log = run_capture(
         ["journalctl", "--user", "-u", "hyperliquid-sdk",
          "--since", "4 days ago", "--no-pager", "-n", "100"],
         env=env,
     )
-    dependabot_errors = run_capture(
+    dependabot_log = run_capture(
         ["journalctl", "--user", "-u", "dependabot-webhook",
          "--since", "7 days ago", "--no-pager"],
         env=env,
     )
+    # The webhook's structured slog lines (level=...) and systemd's own unit lines carry
+    # job outcomes; the bulk of the journal is verbose agent output. Keep those lines only
+    # and truncate from the oldest end so recent failures always fit the bound.
+    events = [line for line in dependabot_log.splitlines()
+              if "level=" in line or " systemd[" in line]
+    problems = [line for line in events
+                if "level=WARN" in line or "level=ERROR" in line
+                or (" systemd[" in line and "fail" in line.lower())]
     return {
-        "hyperliquid_sdk_recent": hyperliquid_log[:3000],
-        "dependabot_errors": dependabot_errors[:2000],
+        "hyperliquid_sdk_recent": hyperliquid_log[-3000:],
+        "dependabot_problems": "\n".join(problems)[-3000:],
+        "dependabot_recent_events": "\n".join(events)[-3000:],
     }
 
 def _audit_collector_8_docs_accuracy():
@@ -856,7 +865,7 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Compare current versions (in evidence) against latest upstream stable for components NOT "
-            "auto-updated by P1: Go, Node, Ruby (rbenv), neovim, and the traefik docker image. "
+            "auto-updated by P1: Go, Node, Ruby (rbenv), and neovim. "
             "Do NOT report freshrss, open-webui, herdr, omp, the pinned searxng image, or llama.cpp "
             "on the gaming rig — P1 updates those earlier in the same run after their safety gates. "
             "Report per component: current / latest / status (current | behind | behind-major). "

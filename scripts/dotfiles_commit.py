@@ -2,9 +2,9 @@
 """dotfiles-commit: commit exact paths to the private dotfiles repo, showing publish scope.
 
     dotfiles-commit -m MSG PATH...   stage exactly PATHs, secret-scan (block on hit),
-                                     show each path's public-showcase scope, commit, push
+                                     show each path's public dotfiles scope, commit, push
     dotfiles-commit --classify PATH...  show scopes only (dry run: nothing staged or recorded)
-    dotfiles-commit --publish [--dry-run]  run the public showcase publisher now
+    dotfiles-commit --publish [--dry-run]  run the public dotfiles publisher now
 
 Scope comes from ~/system-config/dotfiles-publish.toml; ambiguous paths are
 decided by Jev (after the secret scan) and recorded in
@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from steward import dotfiles, showcase  # noqa: E402
+from steward import dotfiles, public_dotfiles  # noqa: E402
 
 HOME = Path.home()
 GIT_DIR = HOME / ".dotfiles-homelab"
@@ -61,39 +61,40 @@ def read_content(rel: str) -> bytes | None:
 
 def classify(paths: list[str], *, record: bool) -> list[str]:
     """Print each path's scope; returns extra paths to commit (the decisions file)."""
-    policy = showcase.load_policy(showcase.POLICY_PATH)
-    decisions = showcase.load_decisions(showcase.DECISIONS_PATH)
+    policy = public_dotfiles.load_policy(public_dotfiles.POLICY_PATH)
+    decisions = public_dotfiles.load_decisions(public_dotfiles.DECISIONS_PATH)
     client: list = []
 
     def get_client():
         if not client:
-            client.append(showcase._load_jev_client())
+            client.append(public_dotfiles._load_jev_client())
         return client[0]
 
     recorded = {}
     for rel in paths:
         content = read_content(rel)
         if content is None:
-            print(f"  {rel}: deleted (removed from the showcase on next publish)")
+            print(f"  {rel}: deleted (removed from the public dotfiles on next publish)")
             continue
-        d = showcase.decide(rel, content, policy=policy, decisions={**decisions, **recorded},
-                            client=get_client)
+        d = public_dotfiles.decide(rel, content, policy=policy, decisions={**decisions, **recorded},
+                                   client=get_client)
         if d.record:
             recorded[rel] = d.record
         print(f"  {rel}: {d.scope} ({d.by}: {d.reason})")
     if recorded and record:
-        showcase.save_decisions(showcase.DECISIONS_PATH,
-                                {**showcase.load_decisions(showcase.DECISIONS_PATH), **recorded})
-        print(f"  recorded {len(recorded)} Jev decision(s) in {showcase.DECISIONS_PATH}")
-        return [showcase.DECISIONS_PATH.relative_to(HOME).as_posix()]
+        public_dotfiles.save_decisions(
+            public_dotfiles.DECISIONS_PATH,
+            {**public_dotfiles.load_decisions(public_dotfiles.DECISIONS_PATH), **recorded})
+        print(f"  recorded {len(recorded)} Jev decision(s) in {public_dotfiles.DECISIONS_PATH}")
+        return [public_dotfiles.DECISIONS_PATH.relative_to(HOME).as_posix()]
     return []
 
 
 def commit(message: str, paths: list[str], push: bool) -> int:
-    policy = showcase.load_policy(showcase.POLICY_PATH)
+    policy = public_dotfiles.load_policy(public_dotfiles.POLICY_PATH)
     git("add", "--all", "--", *paths)
     diff = git("diff", "--cached", "--no-color", "--", *paths).stdout
-    findings = showcase.scan_diff(diff, policy, mac=False)
+    findings = public_dotfiles.scan_diff(diff, policy, mac=False)
     if findings:
         git("reset", "--quiet", "--", *paths)
         print("dotfiles-commit: secret scan blocked the commit (paths unstaged):", file=sys.stderr)
@@ -119,7 +120,7 @@ def commit(message: str, paths: list[str], push: bool) -> int:
         return 1
     git("fetch", "--quiet", "origin", BRANCH)
     outgoing = git("diff", "--no-color", "FETCH_HEAD", "HEAD").stdout
-    findings = showcase.scan_diff(outgoing, policy, mac=False)
+    findings = public_dotfiles.scan_diff(outgoing, policy, mac=False)
     if findings:
         print("dotfiles-commit: secret scan blocked the push (commit kept locally):", file=sys.stderr)
         for f in findings[:50]:
@@ -134,14 +135,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dotfiles-commit", description=__doc__.split("\n\n")[0])
     parser.add_argument("-m", "--message")
     parser.add_argument("--classify", action="store_true", help="show publish scope only")
-    parser.add_argument("--publish", action="store_true", help="run the showcase publisher now")
+    parser.add_argument("--publish", action="store_true", help="run the public dotfiles publisher now")
     parser.add_argument("--dry-run", action="store_true", help="with --publish: compute only")
     parser.add_argument("--no-push", action="store_true", help="commit without pushing")
     parser.add_argument("paths", nargs="*")
     args = parser.parse_args(argv)
     if args.publish:
-        result = showcase.publish(dry_run=args.dry_run)
-        print(f"showcase {result['status']}: {result['published_count']} public, "
+        result = public_dotfiles.publish(dry_run=args.dry_run)
+        print(f"public dotfiles {result['status']}: {result['published_count']} public, "
               f"{len(result['held'])} held, {len(result['blocked'])} blocked")
         for key in ("added", "updated", "removed", "held", "blocked"):
             for row in result[key]:

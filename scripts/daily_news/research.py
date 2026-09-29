@@ -15,6 +15,7 @@ import jev as jev_api
 from . import attention, attention_match, attention_sources
 from .attention import (
     SCHEMA_VERSION as ATTENTION_SCHEMA_VERSION,
+    canonicalize_publisher_url,
     priority_sort_key,
 )
 from .catalog import *
@@ -105,6 +106,10 @@ def phase_1_research(
         "site (e.g. techcrunch.com, theverge.com, arstechnica.com, reuters.com). "
         "Avoid news aggregators, roundup sites, and link-blog posts — find the real "
         "source behind the story.\n\n"
+        "HARD PAYWALLS: the article reader cannot open "
+        f"{', '.join(sorted(HARD_PAYWALL_DOMAINS))}. When one of them reports a "
+        "story, cite another outlet's article on the same event instead; if no "
+        "other outlet has it, leave the story out.\n\n"
         "Use web_search with 2-3 different queries to find stories from the last 24 hours. "
         "After searching, output your findings as a JSON array wrapped in ```json fences. "
         "Each finding must have these fields:\n"
@@ -691,6 +696,121 @@ def phase_2b_attention(
     )
     return scored_fresh, scored_ongoing
 
+# A research finding is the same story as a paywalled candidate when they share
+# a normalized event term and their title+event wording overlaps this much.
+# Calibrated on September 2026 01-research-raw.json pairs: at or above it every
+# pair sharing a term described one event; below it pairs diverged.
+PAYWALL_ALTERNATE_MIN_OVERLAP = 0.3
+
+def _story_terms(finding: dict) -> set[str]:
+    return {
+        " ".join(attention_match.toks(term))
+        for term in finding.get("event_terms") or []
+        if attention_match.toks(term)
+    }
+
+def _story_tokens(finding: dict) -> set[str]:
+    return set(attention_match.toks(
+        f"{finding.get('title', '')} {finding.get('event') or ''}"
+    ))
+
+def _same_story_overlap(candidate: dict, other: dict) -> float:
+    """Title+event token Jaccard when two findings share an event term, else 0."""
+    if not _story_terms(candidate) & _story_terms(other):
+        return 0.0
+    left, right = _story_tokens(candidate), _story_tokens(other)
+    union = left | right
+    return len(left & right) / len(union) if union else 0.0
+
+def _fetchable_alternate_url(url: str) -> str:
+    """Canonical URL when it may replace a paywalled one, else empty."""
+    url = canonicalize_publisher_url(url or "")
+    if not url or hard_paywall_domain(url) or is_asset_cdn_url(url) or is_listing_url(url):
+        return ""
+    return url
+
+def resolve_hard_paywalls(
+    candidates: list[dict],
+    research_findings: list[dict],
+    blocked_keys: set[str],
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Keep hard-paywalled candidates away from Phase 4.
+
+    Each candidate on HARD_PAYWALL_DOMAINS takes, in order: the research
+    finding that best matches its story, else the first of its Phase 2b
+    ``same_event_urls`` (publisher articles Jev judged to report the same
+    event). Without either, the candidate is dropped. An alternate URL is
+    fetchable, substitutes at most once, never duplicates a URL already ranked
+    on its own, and never has a blocked coverage key.
+    Returns (kept, substituted, dropped); the last two are audit records.
+    """
+    taken = {coverage_key(item.get("url", "")) for item in candidates} | set(blocked_keys)
+    alternates = []
+    for finding in research_findings:
+        url = _fetchable_alternate_url(finding.get("url", "")) if isinstance(finding, dict) else ""
+        if url:
+            alternates.append({**finding, "url": url})
+
+    kept: list[dict] = []
+    substituted: list[dict] = []
+    dropped: list[dict] = []
+    for item in candidates:
+        domain = hard_paywall_domain(item.get("url", ""))
+        if domain is None:
+            kept.append(item)
+            continue
+        best, best_overlap = None, PAYWALL_ALTERNATE_MIN_OVERLAP
+        for alternate in alternates:
+            if coverage_key(alternate["url"]) in taken:
+                continue
+            overlap = _same_story_overlap(item, alternate)
+            if overlap >= best_overlap and (best is None or overlap > best_overlap):
+                best, best_overlap = alternate, overlap
+        if best is not None:
+            origin = "research"
+            replacement = {
+                "url": best["url"],
+                "title": best.get("title") or item.get("title", ""),
+                "source_domain": best.get("source_domain")
+                or attention_match.registrable_domain(best["url"]),
+                "date_published": best.get("date_published") or item.get("date_published", ""),
+                "summary": best.get("summary") or item.get("summary", ""),
+            }
+        else:
+            same_event = ((item.get("attention") or {}).get("evidence") or {}).get("same_event_urls") or []
+            for entry in same_event:
+                url = _fetchable_alternate_url(entry.get("url", "")) if isinstance(entry, dict) else ""
+                if url and coverage_key(url) not in taken:
+                    origin = f"attention:{entry.get('source', '')}"
+                    replacement = {
+                        "url": url,
+                        "title": entry.get("title") or item.get("title", ""),
+                        "source_domain": entry.get("domain")
+                        or attention_match.registrable_domain(url),
+                    }
+                    break
+            else:
+                dropped.append({
+                    **item,
+                    "rejection_reason": (
+                        f"hard-paywalled source ({domain}); no fetchable research "
+                        "finding or same-event attention URL for the story"
+                    ),
+                })
+                continue
+        taken.add(coverage_key(replacement["url"]))
+        kept.append({**item, **replacement, "paywall_substituted_from": item.get("url", "")})
+        substituted.append({
+            "paywall_domain": domain,
+            "original_url": item.get("url", ""),
+            "original_title": item.get("title", ""),
+            "alternate_url": replacement["url"],
+            "alternate_title": replacement["title"],
+            "alternate_origin": origin,
+            "overlap": round(best_overlap, 3) if origin == "research" else None,
+        })
+    return kept, substituted, dropped
+
 @runtime.track_phase_failure("rank")
 def phase_3_rank(
     topic: dict,
@@ -698,6 +818,7 @@ def phase_3_rank(
     ongoing: list[dict],
     stories_in_flight: dict,
     run_dir: Path,
+    research_findings: list[dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Phase 3: Deterministic priority ranking with caps.
 
@@ -714,11 +835,22 @@ def phase_3_rank(
       - Sort by last_updated descending and cap at SIF_CAP (3)
       - Passed directly to Phase 6 with its evidence history and latest development
 
+    Before the caps, a candidate on a hard-paywalled domain takes the URL of a
+    fetchable ``research_findings`` entry for the same story, else one of its
+    Jev-judged same-event attention URLs, or is dropped; both outcomes are
+    recorded in the artifact.
+
     Returns (phase_4_queue, sif_candidates).
     Phase 4 queue = Pool A + Pool B, with fresh first.
     """
     output_path = run_dir / "03-urls-ranked.json"
     other_topic_urls = load_cross_topic_urls(topic, run_dir)
+    research_findings = research_findings or []
+    # Paywall alternates come from raw research and the attention snapshot, so
+    # they must clear the previous-days coverage ledger Phase 2 applied.
+    recent_coverage = load_recent_coverage_ledger(
+        run_dir.parent.parent, runtime.issue_date_for_run(run_dir), CROSS_DAY_DEDUP_DAYS,
+    )
     phase_inputs = runtime.phase_inputs(
         "rank", topic=topic,
         upstream={
@@ -726,8 +858,13 @@ def phase_3_rank(
             "ongoing": runtime.canonical_fingerprint(ongoing),
             "stories_in_flight": runtime.canonical_fingerprint(stories_in_flight),
             "cross_topic_urls": sorted(other_topic_urls),
+            "research_findings": runtime.canonical_fingerprint(research_findings),
+            "covered_urls": sorted(recent_coverage),
         },
-        policy={"ranking_schema": RANKING_SCHEMA_VERSION},
+        policy={
+            "ranking_schema": RANKING_SCHEMA_VERSION,
+            "hard_paywall_domains": sorted(HARD_PAYWALL_DOMAINS),
+        },
     )
     state, cached = runtime.begin_or_load_phase(
         run_dir, "rank", inputs=phase_inputs, artifact_path=output_path,
@@ -780,6 +917,20 @@ def phase_3_rank(
     if asset_cdn_rejected:
         print(f"  [Phase 3 URL-host] rejected {len(asset_cdn_rejected)} "
               "asset-CDN URL(s) (not article hosts) before fetch")
+
+    # Hard paywalls never reach Phase 4: swap in a fetchable same-story URL or
+    # drop the story before the caps, so it frees its slot
+    # (September 2026: 11 of 12 washingtonpost.com fetches failed).
+    kept, paywall_substituted, paywall_dropped = resolve_hard_paywalls(
+        eligible_fresh + eligible_ongoing,
+        research_findings,
+        other_topic_urls | recent_coverage,
+    )
+    eligible_fresh = [item for item in kept if item["source_verdict"] == "fresh"]
+    eligible_ongoing = [item for item in kept if item["source_verdict"] == "ongoing"]
+    if paywall_substituted or paywall_dropped:
+        print(f"  [Phase 3 paywall] {len(paywall_substituted)} story(s) moved to a "
+              f"fetchable source, {len(paywall_dropped)} dropped before fetch")
 
     # Product priority combines editorial consequence with observed attention.
     pool_a = sorted(
@@ -836,6 +987,8 @@ def phase_3_rank(
         "pool_a": pool_a,
         "pool_b": pool_b,
         "cross_topic_rejected": cross_topic_rejected,
+        "paywall_substituted": paywall_substituted,
+        "paywall_dropped": paywall_dropped,
         "status": "ok" if phase_4_queue or pool_c else "empty",
         "reason": "" if phase_4_queue or pool_c else "no eligible URLs",
     }

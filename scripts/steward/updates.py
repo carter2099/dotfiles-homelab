@@ -852,6 +852,7 @@ def _owui_transaction(current_tag, target_tag, compose_text, common):
     if not gate:
         result = {
             **common, "status": "ok", "post_version": target_tag,
+            "pre_image": image_old, "post_image": image_new,
             "local_mutation": True,
             "counts_after": evidence.get("db", {}).get("counts", {}),
             "revert": (
@@ -2795,6 +2796,182 @@ def _p1_gamingrig_maintenance(dry_run=False):
         return result
 
 
+# Docker hygiene runs last in P1.  The previous image of a successful image
+# update (Open WebUI after its gates, FreshRSS/SearXNG after their health
+# checks) is removed; a rolled-back or reverted update records no pre_image,
+# so its previous image stays.  Dangling images go too.  Nothing a container
+# (running or stopped) uses is ever removed.  Build cache is pruned per chain:
+# a record goes only when it and every record built on it have been unused
+# for BUILD_CACHE_KEEP_DAYS, so cache any build touched in the last week stays
+# warm.  `docker builder prune --filter until=` cannot express this here: on
+# Docker 29 / BuildKit 0.33 deleting a record refreshes its parent's last-used
+# time, so `until=` removes one layer of a stale chain per week.
+BUILD_CACHE_KEEP_DAYS = 7
+_SUPERSEDED_IMAGE_STEPS = {"openwebui_update": "ok", "freshrss": "bumped", "searxng": "ok"}
+_DOCKER_TIME = re.compile(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)(?:\.\d+)? ([+-]\d{4})")
+_DOCKER_SIZE = re.compile(r"([\d.]+)\s*([kMGT]?)B")
+
+
+def _docker_time(value):
+    match = _DOCKER_TIME.match(str(value or ""))
+    if not match:
+        return None
+    return datetime.strptime(f"{match.group(1)} {match.group(2)}", "%Y-%m-%d %H:%M:%S %z")
+
+
+def _docker_size_bytes(value):
+    match = _DOCKER_SIZE.fullmatch(str(value or "").strip())
+    if not match:
+        return 0
+    return int(float(match.group(1)) * 1000 ** " kMGT".index(match.group(2) or " "))
+
+
+def _human_bytes(count):
+    for unit in ("B", "kB", "MB", "GB"):
+        if count < 1000:
+            return f"{count:.3g}{unit}"
+        count /= 1000
+    return f"{count:.3g}TB"
+
+
+def _docker_in_use_image_ids():
+    """(image IDs of all containers, running or stopped, or None; problem)."""
+    out, err, code = run_capture_ok(["docker", "ps", "-aq", "--no-trunc"], timeout=60)
+    if code != 0:
+        return None, f"docker ps failed: {(err or out).strip()[-200:]}"
+    containers = out.split()
+    if not containers:
+        return set(), ""
+    out, err, code = run_capture_ok(
+        ["docker", "inspect", "--format", "{{.Image}}", *containers], timeout=60)
+    if code != 0:
+        return None, f"docker inspect failed: {(err or out).strip()[-200:]}"
+    return set(out.split()), ""
+
+
+def _docker_remove_images(refs, in_use):
+    """Remove each image unless a container uses it: (removed, kept, errors)."""
+    removed, kept, errors = [], [], []
+    for ref in refs:
+        out, _, code = run_capture_ok(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", ref], timeout=60)
+        image_id = out.strip()
+        if code != 0 or not image_id:
+            continue   # already gone
+        if image_id in in_use:
+            kept.append(ref)
+            continue
+        # By ID and never --force: a tag@digest ref is not accepted by
+        # `image rm`, and an image a container gained meanwhile is refused.
+        out, err, code = run_capture_ok(["docker", "image", "rm", image_id], timeout=120)
+        if code == 0:
+            removed.append(ref)
+        else:
+            errors.append(f"{ref}: {(err or out).strip()[-200:]}")
+    return removed, kept, errors
+
+
+def _build_cache_prunable(records, now, keep_days=BUILD_CACHE_KEEP_DAYS):
+    """IDs of stale build-cache chains, every child before its parent."""
+    cutoff = now - timedelta(days=keep_days)
+    nodes, children = {}, {}
+    for record in records:
+        record_id = str(record.get("ID") or "").rstrip("*")
+        if record_id:
+            nodes[record_id] = record
+            if record.get("Parent"):
+                children.setdefault(record["Parent"], []).append(record_id)
+    prunable, order = {}, []
+
+    def visit(record_id):
+        if record_id not in prunable:
+            prunable[record_id] = False
+            kids = [visit(kid) for kid in children.get(record_id, ())]
+            record = nodes[record_id]
+            used = _docker_time(record.get("LastUsedAt"))
+            prunable[record_id] = (
+                all(kids) and str(record.get("InUse")).lower() != "true"
+                and used is not None and used < cutoff)
+            if prunable[record_id]:
+                order.append(record_id)
+        return prunable[record_id]
+
+    for record_id in nodes:
+        visit(record_id)
+    return order
+
+
+def _prune_stale_build_cache(now=None):
+    """Prune build cache chains unused for BUILD_CACHE_KEEP_DAYS, one record per call."""
+    out, err, code = run_capture_ok(
+        ["docker", "system", "df", "-v", "--format", "{{json .BuildCache}}"], timeout=300)
+    if code != 0:
+        return {"error": f"build cache listing failed: {(err or out).strip()[-200:]}"}
+    try:
+        records = json.loads(out or "null") or []
+    except ValueError as exc:
+        return {"error": f"build cache listing unparseable: {exc}"}
+    sizes = {str(r.get("ID") or "").rstrip("*"): _docker_size_bytes(r.get("Size"))
+             for r in records}
+    candidates = _build_cache_prunable(records, now or datetime.now(timezone.utc))
+    pruned, errors = [], []
+    for record_id in candidates:
+        # The API accepts one id per filter; a record with any live child
+        # (e.g. a second parent) is refused by BuildKit and simply stays.
+        out, err, code = run_capture_ok(
+            ["docker", "builder", "prune", "--all", "--force", "--filter", f"id={record_id}"],
+            timeout=120)
+        if code != 0:
+            errors.append(f"{record_id}: {(err or out).strip()[-200:]}")
+            if len(errors) >= 3:
+                break
+        elif record_id in out:
+            pruned.append(record_id)
+    result = {"keep_days": BUILD_CACHE_KEEP_DAYS, "records": len(records),
+              "candidates": len(candidates), "pruned": len(pruned),
+              "reclaimed": _human_bytes(sum(sizes.get(r, 0) for r in pruned))}
+    if errors:
+        result["error"] = "build cache prune failed: " + "; ".join(errors)
+    return result
+
+
+def _p1_docker_cleanup(steps, now=None):
+    """Remove superseded/dangling images and stale build cache; problems only warn."""
+    print("  [1l] docker cleanup")
+    superseded = list(dict.fromkeys(
+        step["pre_image"] for step in steps
+        if _SUPERSEDED_IMAGE_STEPS.get(step.get("step")) == step.get("status")
+        and step.get("pre_image") and step.get("pre_image") != step.get("post_image")))
+    problems = []
+    removed, kept = [], []
+    in_use, problem = _docker_in_use_image_ids()
+    if in_use is None:
+        problems.append(f"images not cleaned: {problem}")
+    else:
+        out, err, code = run_capture_ok(
+            ["docker", "images", "--quiet", "--no-trunc", "--filter", "dangling=true"],
+            timeout=60)
+        if code != 0:
+            problems.append(f"dangling image listing failed: {(err or out).strip()[-200:]}")
+        dangling = list(dict.fromkeys(out.split())) if code == 0 else []
+        removed, kept, errors = _docker_remove_images(superseded + dangling, in_use)
+        problems.extend(f"image removal failed: {error}" for error in errors)
+    cache = _prune_stale_build_cache(now)
+    if cache.get("error"):
+        problems.append(cache["error"])
+    result = {"step": "docker_cleanup", "superseded_images": superseded,
+              "removed_images": removed, "kept_in_use": kept, "build_cache": cache}
+    summary = (f"removed {len(removed)} image(s); pruned {cache.get('pruned', 0)} "
+               f"build cache record(s), {cache.get('reclaimed', '0B')}")
+    if problems:
+        # warning = degraded P1, reported in the email but never retried/fatal.
+        return {**result, "status": "warning",
+                "reason": ("; ".join(problems) + f" ({summary})")[:1000]}
+    if removed or cache.get("pruned"):
+        return {**result, "status": "ok", "reason": summary}
+    return {**result, "status": "skipped", "reason": "nothing to clean"}
+
+
 def phase_1_apply(run_dir, dry_run=False, *, progress=None):
     """Phase 1: apply safe updates, checkpointing each substep atomically."""
     if progress is None:
@@ -2921,6 +3098,9 @@ def phase_1_apply(run_dir, dry_run=False, *, progress=None):
         _p1_run_step(steps, "app_deploy",
                      lambda service=service, spec=spec: _p1_app_deploy(service, spec),
                      persist, service=service)
+    # Docker hygiene last: it sees every superseded image of this run, and app
+    # deploys have already used (and so kept warm) the build cache they need.
+    _p1_run_step(steps, "docker_cleanup", lambda: _p1_docker_cleanup(steps), persist)
 
     data = _finish_p1(run_dir, {"steps": steps}, progress)
     n_ok = sum(1 for s in steps if s.get("status") == "ok")

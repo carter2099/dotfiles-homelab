@@ -50,12 +50,12 @@ ENDPOINTS = {
 STEWARD_MODEL = "opencode-go/deepseek-v4.1-flash"
 STEWARD_PATH = "/home/carter/.rbenv/shims:/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# Resolve fnm default node bin for PATH (if available)
-_FNM_NODE_DIRS = sorted(
-    (d for d in (HOME / ".local/share/fnm/node-versions").glob("*/installation/bin")
-     if (d / "node").exists()),
-    key=lambda d: d.stat().st_mtime if d.exists() else 0,
-    reverse=True)
+# fnm's default Node (the version interactive shells use), if one is set. Picking
+# the newest-modified version directory instead ran an older Node than the default.
+_FNM_NODE_DIRS = [
+    d.resolve() for d in (HOME / ".local/share/fnm/aliases/default/bin",)
+    if (d / "node").exists()
+]
 if _FNM_NODE_DIRS:
     STEWARD_PATH = f"{_FNM_NODE_DIRS[0]}:{STEWARD_PATH}"
 PROXY_HEALTH = "http://localhost:8082/health"

@@ -1,8 +1,8 @@
-"""P9c public showcase: publish policy and nightly snapshot publisher.
+"""P9c public dotfiles: publish policy and nightly snapshot publisher.
 
 The private dotfiles repo (carter2099/dotfiles-homelab-private) is the source
 of truth.  Every night the publisher builds a squashed snapshot of the tracked
-paths whose publish scope is ``public`` and pushes it to the public showcase
+paths whose publish scope is ``public`` and pushes it to the public dotfiles
 repo (carter2099/dotfiles-homelab).  No private history ever leaves the host:
 the public repo only receives snapshot commits built in a local bare mirror.
 
@@ -42,24 +42,30 @@ from .runtime import atomic_write_json
 POLICY_REL = "system-config/dotfiles-publish.toml"
 POLICY_PATH = HOME / POLICY_REL
 DECISIONS_PATH = HOME / "system-config" / "dotfiles-publish-decisions.json"
-STATE_DIR = HOME / ".local" / "state" / "dotfiles-showcase"
+STATE_DIR = HOME / ".local" / "state" / "dotfiles-public"
 PUBLIC_REPO = "carter2099/dotfiles-homelab"
 PUBLIC_URL = f"https://github.com/{PUBLIC_REPO}.git"
 PUBLIC_REF = "refs/heads/main"
-ARTIFACT = "09c-showcase.json"
+ARTIFACT = "09c-public-dotfiles.json"
 
 JEV_BUDGET_SECONDS = 120.0
 MAX_JEV_CHARS = 60_000
+MAX_JEV_CHUNKS = 8  # a veto larger than this many Jev-sized chunks is held for manual review
 HUNK_CONTEXT = 20
+RENAME_SIMILARITY = 0.5  # a first publication this similar to a dropped public path is vetted as its diff
 
 # Scope of an ambiguous path (J032 thresholds; publishing is irreversible).
 SCOPE_PUBLISH = {"credential": 0.05, "personal": 0.15}
 SCOPE_HOMELAB_PUBLISH = 0.85
 SCOPE_PRIVATE = 0.5
 SCOPE_HOMELAB_PRIVATE = 0.15
-# Veto on changed hunks of an already-public file.
-VETO_PUBLISH = {"credential": 0.05, "personal": 0.15}
-VETO_BLOCK = 0.5
+# Veto on changed hunks of an already-public file (and whole content of a first publication).
+# 2026-09-29 calibration on jev-1.13.0 with these exact questions: 7 real held diffs scored
+# personal 0.10-0.38 / credential 0.01-0.05 (a fake-credential test fixture 0.35-0.54);
+# injected fake phone/address/balance/health/API key/password lines scored 0.94-0.99.
+# Every probability < 0.5 publishes, any >= 0.8 blocks, in between is held.
+VETO_PUBLISH = 0.5
+VETO_BLOCK = 0.8
 
 _CREDENTIAL_Q = (
     "Does `{field}` contain the actual value of a password, API key, access token, "
@@ -314,7 +320,7 @@ def _ask(client: Any, purpose: str, state: dict[str, Any],
 def _jev_scope(path: str, text: str, client: Any, today: str, blob: str) -> Decision:
     if len(text) > MAX_JEV_CHARS:
         return Decision("held", "jev", f"too large for Jev ({len(text)} chars); decide manually")
-    probs, why = _ask(client, "dotfiles-showcase-scope", {"path": path, "content": text},
+    probs, why = _ask(client, "dotfiles-public-scope", {"path": path, "content": text},
                       SCOPE_QUESTIONS)
     if probs is None:
         return Decision("held", "jev", why)
@@ -365,28 +371,86 @@ def decide(path: str, content: bytes, *, policy: Policy,
                       today or datetime.now(timezone.utc).strftime("%Y-%m-%d"), blob)
 
 
-def veto(path: str, old: bytes, new: bytes, client: Any) -> tuple[str, str]:
-    """Jev credential/personal veto on the changed hunks: ('publish'|'held'|'blocked', reason)."""
+def _chunks(text: str, limit: int) -> list[str]:
+    """Split a unified diff into pieces <= ``limit`` chars, at hunk boundaries where possible,
+    else at line boundaries (a single over-long line is cut)."""
+    segments: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("@@") or not segments:
+            segments.append(line)
+        else:
+            segments[-1] += line
+    pieces: list[str] = []
+    for segment in segments:
+        if len(segment) <= limit:
+            pieces.append(segment)
+            continue
+        for line in segment.splitlines(keepends=True):
+            pieces.extend(line[i:i + limit] for i in range(0, len(line), limit))
+    chunks: list[str] = []
+    for piece in pieces:
+        if chunks and len(chunks[-1]) + len(piece) <= limit:
+            chunks[-1] += piece
+        else:
+            chunks.append(piece)
+    return chunks
+
+
+def _rename_source(content: bytes, candidates: dict[str, str]) -> tuple[str | None, float]:
+    """The dropped public path ``content`` most resembles (line similarity >=
+    ``RENAME_SIMILARITY``), else (None, 0.0).  Ties go to the lexically first path."""
+    try:
+        new_lines = content.decode("utf-8").splitlines(keepends=True)
+    except UnicodeDecodeError:
+        return None, 0.0
+    best: tuple[str | None, float] = (None, 0.0)
+    for old_path in sorted(candidates):
+        matcher = difflib.SequenceMatcher(
+            None, candidates[old_path].splitlines(keepends=True), new_lines, autojunk=False)
+        if matcher.real_quick_ratio() < RENAME_SIMILARITY or matcher.quick_ratio() < RENAME_SIMILARITY:
+            continue
+        ratio = matcher.ratio()
+        if ratio >= RENAME_SIMILARITY and ratio > best[1]:
+            best = (old_path, ratio)
+    return best
+
+
+def veto(path: str, old: bytes, new: bytes, client: Any,
+         old_path: str | None = None) -> tuple[str, str]:
+    """Jev credential/personal veto on the changed hunks: ('publish'|'held'|'blocked', reason).
+
+    Changes larger than one Jev request are asked in chunks; the highest probability per
+    question across chunks decides.  ``old_path`` names the source of a rename."""
     try:
         old_text, new_text = old.decode("utf-8"), new.decode("utf-8")
     except UnicodeDecodeError:
         return "held", "non-UTF-8 change requires manual review"
     changes = "".join(difflib.unified_diff(
         old_text.splitlines(keepends=True), new_text.splitlines(keepends=True),
-        f"a/{path}", f"b/{path}", n=HUNK_CONTEXT,
+        f"a/{old_path or path}", f"b/{path}", n=HUNK_CONTEXT,
     ))
     if not changes:
         return "publish", "no textual change"
-    if len(changes) > MAX_JEV_CHARS:
-        return "held", f"change too large for Jev ({len(changes)} chars); previous version kept"
-    probs, why = _ask(client, "dotfiles-showcase-change-veto",
-                      {"path": path, "changes": changes}, VETO_QUESTIONS)
-    if probs is None:
-        return "held", f"{why}; previous version kept"
+    chunks = _chunks(changes, MAX_JEV_CHARS)
+    if len(chunks) > MAX_JEV_CHUNKS:
+        return "held", (f"change too large for Jev ({len(changes)} chars, {len(chunks)} chunks "
+                        f"> {MAX_JEV_CHUNKS}); previous version kept")
+    probs: dict[str, float] = {}
+    for number, chunk in enumerate(chunks, 1):
+        answer, why = _ask(client, "dotfiles-public-change-veto",
+                           {"path": path, "changes": chunk}, VETO_QUESTIONS)
+        if answer is None:
+            where = f" (chunk {number}/{len(chunks)})" if len(chunks) > 1 else ""
+            return "held", f"{why}{where}; previous version kept"
+        probs = {k: max(v, probs.get(k, 0.0)) for k, v in answer.items()}
+        if any(v >= VETO_BLOCK for v in probs.values()):
+            break  # one blocking chunk decides; spend no more of the shared Jev budget
     shown = ", ".join(f"{k}={v:.2f}" for k, v in probs.items())
+    if len(chunks) > 1:
+        shown += f"; max over {len(chunks)} chunks"
     if any(v >= VETO_BLOCK for v in probs.values()):
         return "blocked", f"Jev veto ({shown}); previous version kept"
-    if all(probs[k] < limit for k, limit in VETO_PUBLISH.items()):
+    if all(v < VETO_PUBLISH for v in probs.values()):
         return "publish", f"Jev: change safe ({shown})"
     return "held", f"Jev not confident ({shown}); previous version kept"
 
@@ -427,7 +491,7 @@ def _load_state(path: Path) -> dict[str, Any]:
     except FileNotFoundError:
         return {"published": {}}
     if not isinstance(data, dict) or not isinstance(data.get("published"), dict):
-        raise ValueError(f"{path}: malformed showcase state")
+        raise ValueError(f"{path}: malformed public dotfiles state")
     return data
 
 
@@ -494,9 +558,27 @@ def publish(*, dry_run: bool = False, push: bool = True, client: Any = _load_jev
             jev_client.append(client() if callable(client) and not hasattr(client, "ask") else client)
         return jev_client[0]
 
+    rows = _tracked(git_dir, ref)
+    tracked = {row[3] for row in rows}
+    dropped_texts: list[dict[str, str]] = []
+
+    def dropped() -> dict[str, str]:
+        """Previously published paths gone from this snapshot: rename/copy sources."""
+        if not dropped_texts:
+            texts = {}
+            for p, e in previous.items():
+                if p in tracked:
+                    continue
+                try:
+                    texts[p] = _git(git_dir, "cat-file", "blob", e["blob"]).decode("utf-8")
+                except (RuntimeError, UnicodeDecodeError):
+                    continue
+            dropped_texts.append(texts)
+        return dropped_texts[0]
+
     final: dict[str, dict[str, str]] = {}
     added, updated, removed, held, blocked, private, recorded = [], [], [], [], [], [], {}
-    for mode, kind, oid, path in _tracked(git_dir, ref):
+    for mode, kind, oid, path in rows:
         prev = previous.get(path)
         if kind != "blob":
             private.append({"path": path, "reason": f"{kind} entries are never published"})
@@ -525,8 +607,15 @@ def publish(*, dry_run: bool = False, push: bool = True, client: Any = _load_jev
         if not prev:
             reason = d.reason
             if not d.vetted:
-                # First publication: Jev must clear the whole content, not just the regex scan.
-                verdict, why = veto(path, b"", content, get_client())
+                # First publication: Jev must clear the whole content, not just the regex
+                # scan -- or, for a rename/copy of a dropped public path, the diff from it.
+                source_path, similarity = _rename_source(content, dropped())
+                if source_path:
+                    old = _git(git_dir, "cat-file", "blob", previous[source_path]["blob"])
+                    verdict, why = veto(path, old, content, get_client(), old_path=source_path)
+                    why = f"renamed from {source_path} ({similarity:.0%} similar); {why}"
+                else:
+                    verdict, why = veto(path, b"", content, get_client())
                 why = why.replace("; previous version kept", "; not published")
                 if verdict != "publish":
                     (blocked if verdict == "blocked" else held).append({"path": path, "reason": why})
@@ -627,13 +716,13 @@ def commit_decisions(*, decisions_path: Path = DECISIONS_PATH,
     )
 
 
-def phase_9c_showcase(run_dir: Path, dry_run: bool = False) -> dict[str, Any]:
+def phase_9c_public_dotfiles(run_dir: Path, dry_run: bool = False) -> dict[str, Any]:
     """Nightly P9c: publish the public subset of the dotfiles repo."""
-    print("[P9c] public showcase")
+    print("[P9c] public dotfiles")
     result = publish(dry_run=dry_run)
     if result["decisions_recorded"] and not dry_run:
         result["decisions_commit"] = commit_decisions()
     atomic_write_json(Path(run_dir) / ARTIFACT, result)
-    print(f"  showcase {result['status']}: {result['published_count']} published, "
+    print(f"  public dotfiles {result['status']}: {result['published_count']} published, "
           f"{len(result['held'])} held, {len(result['blocked'])} blocked")
     return result

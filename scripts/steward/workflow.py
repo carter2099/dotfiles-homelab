@@ -29,7 +29,7 @@ except ModuleNotFoundError as error:
         file_sha256,
     )
 
-from . import audit, dotfiles, fixes, health, queue, report, setup, showcase, updates
+from . import audit, dotfiles, fixes, health, public_dotfiles, queue, report, setup, updates
 from .config import (
     DEPENDABOT_UNIT,
     DIGEST_SCRIPT,
@@ -203,7 +203,7 @@ _PHASE_ARTIFACTS = {
     "render": "08-email.html",
     "archive": "summary.md",
     "dotfiles": "09b-dotfiles.json",
-    "showcase": showcase.ARTIFACT,
+    "public-dotfiles": public_dotfiles.ARTIFACT,
 }
 
 
@@ -727,11 +727,11 @@ def _finish_after_fixes(
     )
     _run_phase(
         state,
-        phase="showcase",
-        artifact=run_dir / _PHASE_ARTIFACTS["showcase"],
-        inputs=_phase_inputs("showcase", args, run_dir, ["09b-dotfiles.json"]),
+        phase="public-dotfiles",
+        artifact=run_dir / _PHASE_ARTIFACTS["public-dotfiles"],
+        inputs=_phase_inputs("public-dotfiles", args, run_dir, ["09b-dotfiles.json"]),
         args=args,
-        operation=lambda: showcase.phase_9c_showcase(
+        operation=lambda: public_dotfiles.phase_9c_public_dotfiles(
             run_dir, dry_run=args.dry_run
         ),
     )

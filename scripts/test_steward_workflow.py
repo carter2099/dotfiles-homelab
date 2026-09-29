@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from steward import dotfiles, report, showcase, workflow
+from steward import dotfiles, public_dotfiles, report, workflow
 from workflow_state import WorkflowState
 
 
@@ -477,7 +477,7 @@ class StewardWorkflowArgumentTests(unittest.TestCase):
                 mock.patch.object(report, "phase_8_render_send", side_effect=render),
                 mock.patch.object(report, "phase_9_archive", side_effect=archive),
                 mock.patch.object(dotfiles, "phase_9b_dotfiles", return_value={"status": "skipped", "reason": "dry run"}),
-                mock.patch.object(showcase, "phase_9c_showcase", return_value={"status": "dry_run"}),
+                mock.patch.object(public_dotfiles, "phase_9c_public_dotfiles", return_value={"status": "dry_run"}),
             ):
                 exit_code = workflow._finish_after_fixes(
                     state, args, run_dir, {}, workflow.time.time()
@@ -485,7 +485,7 @@ class StewardWorkflowArgumentTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 1)
             self.assertEqual(state.phase_record("apply")["status"], "failed")
-            for phase in ("render", "archive", "dotfiles", "showcase"):
+            for phase in ("render", "archive", "dotfiles", "public-dotfiles"):
                 self.assertEqual(state.phase_record(phase)["status"], "succeeded")
 
 if __name__ == "__main__":

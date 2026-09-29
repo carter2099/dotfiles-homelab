@@ -166,11 +166,19 @@ For selected `bundler` entries:
    `bundle update` against the real Gemfile: it can bypass Dependabot's cooldown
    and select a newer, unsoaked release.
 3. Build `.dependabot.Gemfile` beside the real Gemfile:
-   - Preserve the real source and `gemspec`.
+   - Preserve the real source, `gemspec`, and the pinned
+     `gem 'rbsecp256k1', github: 'carter2099/rbsecp256k1', ref: '<sha>'`
+     declaration verbatim (dropping it would re-resolve rubygems rbsecp256k1
+     6.0.0 and drag rubyzip back to the vulnerable 2.x line).
    - For selected gems declared directly in `Gemfile`, copy their declarations
      with `= <target_version>`, preserving any options.
    - Append exact declarations for selected runtime dependencies supplied by
      the gemspec.
+   - Never select, pin, or `--update` `rbsecp256k1` or `rubyzip`, and never
+     edit the git source/ref: it is Carter's deliberate fork pin. A selected
+     entry targeting either gem, or a resolve that changes the `GIT` block or
+     puts rubyzip below 3.4, fails this step: take the failure path below but
+     mark that entry 🔴 needs_approval instead of 🟡.
 4. Resolve and normalize:
    ```bash
    cd ~/dev/hyperliquid

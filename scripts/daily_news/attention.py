@@ -494,6 +494,8 @@ def measured_attention(
             "measures": measures,
             "recent": recent,
             "adjudication": evidence.get("adjudication") or {},
+            # Jev-"same" publisher articles; Phase 3 swaps one in for a hard-paywalled URL.
+            "same_event_urls": evidence.get("same_event_urls") or [],
         },
     }
     if not measured:

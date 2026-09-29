@@ -1,5 +1,5 @@
 ---
-description: Release the Hyperliquid Ruby SDK — merges dev into main, bumps version, updates CHANGELOG, runs full test suite + integration tests, creates a git tag (triggers GitHub Release), pushes the gem to RubyGems, and verifies GitHub Actions workflows succeed.
+description: Release the Hyperliquid Ruby SDK — merges dev into main, bumps version, updates CHANGELOG, runs full test suite + integration tests, pushes main and waits for green CI, builds the gem, then (atomically, with Carter's OTP) pushes the gem to RubyGems and only then pushes the tag that creates the GitHub Release.
 ---
 
 # hyperliquid-release
@@ -12,7 +12,8 @@ Ruby: always use `RBENV_VERSION=3.4.10`
 - **All tests run.** Unit + rubocop + integration. Don't skip any step.
 - **Never write off a test failure silently.** If anything fails — unit, integration, or CI — stop, investigate (read error, check git log for whether the affected code changed in this release window, check `~/agent-state/hyperliquid-sdk.md` "Known Pre-existing Integration Test Failures"), then present the diagnosis to Carter and ask before proceeding. Do not assume "environmental" or "flaky" without evidence.
 - **Recommend the version bump — don't ask for it cold.** Before anything else, gather the change summary from git log and pitch major/minor/patch with reasoning. Let Carter confirm or override.
-- **Verify CI, don't just trigger it.** After pushing tag + main, watch the `Ruby` and `GitHub Release` workflows to completion. Green on both is a release requirement.
+- **Verify CI, don't just trigger it.** Watch the `Ruby` workflow on main to completion before asking for the OTP, and the `GitHub Release` workflow after the tag push. Green on both is a release requirement.
+- **Releases are atomic.** RubyGems and the GitHub Release ship together or not at all. The tag (which triggers the `GitHub Release` workflow) is pushed only after `gem push` succeeds. Never push a `v*` tag, create a GitHub Release, or push the gem before Carter supplies the OTP.
 
 ## Step 1: Gather changes and recommend a version bump
 
@@ -135,77 +136,77 @@ RBENV_VERSION=3.4.10 bundle exec rake
 
 Must pass. If anything broke in the merge, fix it now.
 
-## Step 11: Push main and create tag
+## Step 11: Push main and verify the `Ruby` workflow
 
 ```bash
 cd ~/dev/hyperliquid
 git push origin main
-git tag vX.Y.Z
-git push origin vX.Y.Z
-```
-
-The tag triggers the `GitHub Release` workflow; the main push triggers the `Ruby` workflow.
-
-## Step 12: Verify GitHub Actions workflows succeed
-
-```bash
-cd ~/dev/hyperliquid
-gh run list --branch main --limit 3
-gh run list --workflow "GitHub Release" --limit 3
-```
-
-Identify the two new runs (one `Ruby` on main, one `GitHub Release` on vX.Y.Z). Watch each to completion:
-
-```bash
+gh run list --workflow Ruby --branch main --limit 3
 gh run watch <run-id> --exit-status
 ```
 
-**Both must finish `success`.** If either fails:
+Do **not** create or push the tag here. Identify the `Ruby` run for the release commit (`headSha` = `git rev-parse main`) and watch it to completion; it must finish `success`. If it fails:
 - Read the failure log: `gh run view <run-id> --log-failed | tail -80`
 - Diagnose the root cause (don't retry blindly — Endler: never blame the computer).
-- Fix it in a follow-up commit on dev, merge to main, push. The tag stays as-is (re-tagging is destructive); the fix commit sits on top of the release commit. Re-verify the `Ruby` workflow.
-- If `GitHub Release` failed, the tag will need deleting and recreating after the fix — flag to Carter before doing that.
+- Fix it in a follow-up commit on dev, merge to main, push, and re-verify. No tag exists yet, so nothing needs deleting.
 
-Do not proceed to Step 13 until both workflows are green.
+## Step 12: Sync dev with main
 
-## Step 13: Push gem to RubyGems (requires MFA)
+```bash
+cd ~/dev/hyperliquid
+git checkout dev
+git merge --ff-only main
+git push origin dev
+git checkout main
+```
+
+## Step 13: Build the gem
 
 ```bash
 cd ~/dev/hyperliquid
 RBENV_VERSION=3.4.10 bundle exec rake build
+sha256sum pkg/hyperliquid-X.Y.Z.gem
 ```
 
-Then tell Carter: "Gem built at `pkg/hyperliquid-X.Y.Z.gem`. Paste your RubyGems OTP and I'll push, or run `gem push` yourself."
+## Step 14: Ask Carter for the OTP (last step before publishing)
 
-If Carter provides the OTP, run:
+RubyGems OTPs expire in ~30 s, so the OTP request must be the very last thing before `gem push` — everything above (CI green, gem built) is already done. Tell Carter: "Main is at `<sha>`, `Ruby` CI is green, gem built at `pkg/hyperliquid-X.Y.Z.gem` (sha256 `<sum>`). Paste a fresh RubyGems OTP and I'll push the gem, then the tag." If Carter prefers, he can run the push himself; wait for his confirmation that it succeeded before Step 16.
+
+## Step 15: Push the gem to RubyGems
 
 ```bash
 cd ~/dev/hyperliquid
 RBENV_VERSION=3.4.10 gem push pkg/hyperliquid-X.Y.Z.gem --otp <OTP>
 ```
 
-If credentials are missing (`Invalid credentials / 401`), tell Carter: "No RubyGems credentials on this host. Either push from another machine or run `gem signin` here first, then give me a fresh OTP." OTPs expire in ~30s — always ask for a new one after a setup detour.
+Confirm success (`Successfully registered gem: hyperliquid (X.Y.Z)`). If the push fails, **stop**: do not tag and do not create a GitHub Release. Report the error. If credentials are missing (`Invalid credentials / 401`), tell Carter: "No RubyGems credentials on this host. Either push from another machine or run `gem signin` here first, then give me a fresh OTP." For an expired/invalid OTP, ask for a new one — always a fresh OTP after any detour.
 
-## Step 14: Sync dev with main
+## Step 16: Push the tag (creates the GitHub Release) and verify
+
+Only after Step 15 succeeded:
 
 ```bash
 cd ~/dev/hyperliquid
-git checkout dev
-git merge main
-git push origin dev
+git tag vX.Y.Z main
+git push origin vX.Y.Z
+gh run list --workflow "GitHub Release" --limit 3
+gh run watch <run-id> --exit-status
+gh release view vX.Y.Z
 ```
 
-## Step 15: Update state file
+The `GitHub Release` run for `vX.Y.Z` must finish `success` and the release must exist with the CHANGELOG section as its body. If the workflow fails, diagnose from `gh run view <run-id> --log-failed | tail -80` and flag to Carter before re-running it or touching the tag (the gem is already on RubyGems, so fix forward: never delete the published version).
+
+## Step 17: Update state file
 
 Edit `~/agent-state/hyperliquid-sdk.md`:
 - Update **SDK version** to the new version.
-- Add a row to **Run History** noting: date, scope, unit test count + rubocop status, integration pass/fail counts (and which were waived), CI status, gem push status.
+- Add a row to **Run History** noting: date, scope, unit test count + rubocop status, integration pass/fail counts (and which were waived), CI status, gem push status, tag/GitHub Release status.
 
-## Step 16: Confirm to Carter
+## Step 18: Confirm to Carter
 
 Report in this shape:
 - Released `hyperliquid vX.Y.Z`.
-- GitHub Release: ✅ published.
 - Ruby CI on main: ✅ green.
-- RubyGems: ✅ pushed (or note if deferred).
+- RubyGems: ✅ pushed.
+- GitHub Release: ✅ published (tag pushed after the gem).
 - State file updated.
