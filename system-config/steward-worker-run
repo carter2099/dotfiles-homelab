@@ -27,7 +27,9 @@ from typing import Any, Mapping
 # The installed module is root-owned; share the exact path/configuration
 # policy with the parent publisher rather than maintaining a second policy.
 sys.path.insert(0, "/usr/local/libexec/steward-worker")
-from worker import _check_repo_config, _safe_relpath, _INFRA_REPOSITORIES
+from worker import (
+    REPO_KIND_STEWARD_CODE, _check_repo_config, _safe_relpath, _INFRA_REPOSITORIES, repo_kind,
+)
 
 PROTOCOL_VERSION = "steward-worker-v1"
 WORKER_USER = "steward-worker"
@@ -186,7 +188,11 @@ def source_files(source: Path, owner: int, base: str) -> list[str]:
         if not row:
             continue
         metadata, separator, path = row.partition("\t")
-        if not separator or metadata.split(" ", 1)[0] not in {"100644", "100755"}:
+        mode = metadata.split(" ", 1)[0]
+        if separator and mode == "120000" and repo_kind(source) == REPO_KIND_STEWARD_CODE:
+            # The dotfiles clone tracks systemd wants/ links; never stage them.
+            continue
+        if not separator or mode not in {"100644", "100755"}:
             fail(f"symlinked or submodule source tree is not repairable: {source}")
         try:
             _safe_relpath(path, source_listing=True)
@@ -247,7 +253,7 @@ def validate_source(repository: Mapping[str, Any], owner: int) -> tuple[Path, st
     if not isinstance(allowed, list) or not allowed:
         fail(f"repository has no allowed paths: {root}")
     for path in allowed:
-        rel = Path(_safe_relpath(path))
+        rel = Path(_safe_relpath(path, kind=repo_kind(root)))
         candidate = root / rel
         if candidate.is_symlink():
             fail(f"symlink allowed path: {path}")
@@ -437,6 +443,13 @@ def stop_worker_unit(unit: str) -> None:
     active = run(["/usr/bin/systemctl", "is-active", unit], timeout=15)
     if active.stdout.strip() in {"active", "activating", "deactivating", "reloading"}:
         fail(f"worker unit did not stop before lease release: {unit}")
+    # A failed repair is already reported through the result packet and the
+    # journal; a lingering "failed" instance would otherwise stay in
+    # `systemctl --failed` and turn the host monitor critical indefinitely.
+    try:
+        run(["/usr/bin/systemctl", "reset-failed", unit], timeout=15)
+    except Exception:
+        pass
 
 
 

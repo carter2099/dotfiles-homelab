@@ -56,8 +56,9 @@ MAX_VALIDATION_SECONDS = 900
 MAX_REPAIR_SECONDS = 2700
 
 # Source repositories are intentionally narrower than the rest of Carter's
-# home.  App code lives in ~/dev; scripts/system-config are maintained by a
-# human-reviewed source handoff and are never model-published by P7b.
+# home.  App code lives in ~/dev; ~/scripts is repaired only through a
+# disposable clone of the private dotfiles repository under STEWARD_CODE_ROOT
+# (never the live checkout), and system-config is never model-published.
 _ALLOWED_REPO_ROOT = DEV_ROOT.resolve()
 _PROTECTED_COMPONENTS = {
     ".git",
@@ -98,6 +99,106 @@ _LONG_TOKEN_RE = re.compile(r"(?i)\b(?:sk-[a-z0-9_-]{20,}|gh[pousr]_[a-z0-9_]{20
 _PATH_RE = re.compile(
     r"(?P<path>(?:~/|/home/carter/)?dev/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.@+:-]+)*)"
 )
+
+# Steward/dotfiles code repairs (routing's steward-code route) use a
+# disposable clone of the private dotfiles repository, created by the parent
+# directly under this root.  Only such a clone may name ``scripts/**`` paths
+# (including the otherwise-infrastructure ``steward`` component).
+STEWARD_CODE_ROOT = DEV_ROOT / ".steward-code"
+REPO_KIND_APP = "app"
+REPO_KIND_STEWARD_CODE = "steward-code"
+# Never model-repaired: routing/allowlist and autonomy-gate code (router,
+# worker policy, steward-code PR/merge/pickup, the P7c resolver and its
+# approve CLI, the workflow's fingerprint/abort boundary, the runtime's model
+# tool allowlist and no-new-privs wrapper), publication and secret-scanning
+# policy, Jev thresholds, the verification gates, and the tests that pin them.
+# These stay needs-Carter (no self-widening of autonomy).  The one list is
+# used by routing, the worker, the root helper, the publisher and the pre-PR gate.
+STEWARD_CODE_PROTECTED = frozenset({
+    "scripts/jev.py",
+    "scripts/dotfiles_commit.py",
+    "scripts/steward_runner.py",
+    "scripts/steward_approve.py",
+    ".local/bin/steward-approve",
+    "scripts/steward/config.py",
+    "scripts/steward/routing.py",
+    "scripts/steward/worker.py",
+    "scripts/steward/runtime.py",
+    "scripts/steward/workflow.py",
+    "scripts/steward/resolver.py",
+    "scripts/steward/code_prs.py",
+    "scripts/steward/code_pickup.py",
+    "scripts/steward/dotfiles.py",
+    "scripts/steward/public_dotfiles.py",
+    "scripts/test_steward_routing.py",
+    "scripts/test_steward_worker.py",
+    "scripts/test_steward_workflow.py",
+    "scripts/test_steward_resolver.py",
+    "scripts/test_steward_code_prs.py",
+    "scripts/test_steward_dotfiles.py",
+    "scripts/test_steward_public_dotfiles.py",
+})
+_STEWARD_CODE_PROTECTED_RE = re.compile(r"^scripts/verify-[^/]*\.sh$")
+# verify-<name>.sh full runs for a steward-code patch: ``steward`` always, the
+# others when a changed path is in their area (prefix match).
+STEWARD_CODE_VERIFIERS = (
+    ("steward", ("",)),
+    ("daily-news", (
+        "scripts/daily_news/", "scripts/digest_runner.py", "scripts/news_",
+        "scripts/send_digest.py", "scripts/run_all_digests.sh", "scripts/test_digest_",
+        "scripts/test_news_", "scripts/digest-omp-sandbox.ts",
+        "scripts/analyze_daily_news_attention.py", "scripts/workflow_state.py",
+        "scripts/requirements-daily-news.txt",
+    )),
+    ("dependabot-intake", (
+        "scripts/hyperliquid_dependabot_intake.py",
+        "scripts/test_hyperliquid_dependabot_intake.py",
+    )),
+    ("hyperliquid-guard", (
+        "scripts/run_hyperliquid_sdk.sh", "scripts/cleanup-rig-requests.sh",
+        "scripts/smoke-test-llm.sh", "scripts/update_llama_cpp_remote.sh",
+        "scripts/test_hyperliquid_dependabot_guard.ts", "scripts/send_digest.py",
+        "scripts/hyperliquid_dependabot_intake.py",
+    )),
+)
+
+
+def repo_kind(root: Path | str) -> str:
+    """Lexical: a direct child of STEWARD_CODE_ROOT is a steward-code clone."""
+    path = Path(os.path.normpath(str(root)))
+    return REPO_KIND_STEWARD_CODE if path.parent == Path(os.path.normpath(str(STEWARD_CODE_ROOT))) else REPO_KIND_APP
+
+
+def steward_code_verifiers(paths: Iterable[str]) -> list[str]:
+    """verify-<name>.sh names that must pass for a change to ``paths``."""
+    paths = list(paths)
+    return [
+        name for name, prefixes in STEWARD_CODE_VERIFIERS
+        if name == "steward" or any(p.startswith(prefix) for p in paths for prefix in prefixes)
+    ]
+
+
+def steward_code_validation_commands(paths: Iterable[str]) -> list[list[str]]:
+    return [["bash", f"scripts/verify-{name}.sh", "full"] for name in steward_code_verifiers(paths)]
+
+
+def steward_code_path_reason(path: str) -> str | None:
+    """Why a repository-relative path may not be model-repaired; None if it may."""
+    p = Path(path)
+    if path in STEWARD_CODE_PROTECTED or _STEWARD_CODE_PROTECTED_RE.fullmatch(path):
+        return f"{path} is routing/allowlist, secret-scanning, publication, or gate code"
+    if not path.startswith("scripts/") or len(p.parts) < 2:
+        return f"only ~/scripts/** is auto-repairable: {path}"
+    lowered = [part.lower() for part in p.parts]
+    if any(part in _PROTECTED_COMPONENTS for part in lowered) or any(
+        part in _PROTECTED_FILE_NAMES for part in lowered
+    ):
+        return f"{path} is Git metadata or a credential location"
+    if any(part in _INFRA_COMPONENTS - {"steward"} for part in lowered) or _INFRA_FILE_RE.fullmatch(p.name):
+        return f"{path} is deployment/systemd/security/backup infrastructure"
+    if _SECRET_NAME_RE.search(path) or _SECRET_NAME_RE.search(p.name):
+        return f"{path} looks like a secret"
+    return None
 
 # Commands are argv vectors, never shell strings.  The parent may only pass
 # these fixed validation families; the worker does not execute a model-
@@ -146,7 +247,7 @@ def _redact(value: Any) -> Any:
     return _LONG_TOKEN_RE.sub("[REDACTED]", value)
 
 
-def _safe_relpath(path: str, *, source_listing: bool = False) -> str:
+def _safe_relpath(path: str, *, source_listing: bool = False, kind: str = REPO_KIND_APP) -> str:
     if not isinstance(path, str):
         raise WorkerPolicyError("relative path is not text")
     raw = path
@@ -157,6 +258,11 @@ def _safe_relpath(path: str, *, source_listing: bool = False) -> str:
         or "\\" in raw or any(ord(char) < 32 or ord(char) == 127 for char in raw)
     ):
         raise WorkerPolicyError(f"unsafe relative path: {path!r}")
+    if kind == REPO_KIND_STEWARD_CODE and not source_listing:
+        reason = steward_code_path_reason(raw)
+        if reason:
+            raise WorkerPolicyError(f"steward-code path is not repairable: {reason}")
+        return p.as_posix()
     protected_components = _PROTECTED_COMPONENTS
     protected_files = _PROTECTED_FILE_NAMES
     if source_listing:
@@ -322,16 +428,21 @@ def _tracked_paths(root: Path) -> list[str]:
         paths.append(path)
     # A tracked symlink could point back into Carter's hidden home after a
     # snapshot. Refuse it rather than attempting to dereference selectively.
+    # A steward-code clone (the dotfiles repo tracks systemd wants/ links)
+    # never stages symlinks, so they are left out instead.
     tree = _run(_git_args(root, "ls-files", "-s", "-z"), timeout=30)
     if tree.returncode != 0:
         raise WorkerPolicyError(f"could not inspect repository modes: {root}")
+    linked = set()
     for row in tree.stdout.split("\0"):
         if not row:
             continue
         mode = row.split(" ", 1)[0]
         if mode in {"120000", "160000"}:
-            raise WorkerPolicyError(f"symlinked or submodule source is not repairable: {root}")
-    return paths
+            if repo_kind(root) != REPO_KIND_STEWARD_CODE or mode == "160000":
+                raise WorkerPolicyError(f"symlinked or submodule source is not repairable: {root}")
+            linked.add(row.partition("\t")[2])
+    return [path for path in paths if path not in linked]
 
 
 def _base_sha(root: Path) -> str:
@@ -362,7 +473,7 @@ def _normalise_target(repo: Path, path: str | None) -> str:
         absolute = Path(raw)
         if _under(absolute, repo):
             raw = str(absolute.resolve().relative_to(repo))
-    return _safe_relpath(raw)
+    return _safe_relpath(raw, kind=repo_kind(repo))
 
 
 def _find_repo_for_path(value: str, repos: Sequence[Path]) -> tuple[Path, str] | None:
@@ -562,6 +673,10 @@ def _target_plans(findings: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str,
 def _validation_plan(root: Path, allowed_paths: Sequence[str]) -> list[list[str]]:
     """Select trusted argv checks from project files, never from audit prose."""
     commands = [["git", "diff", "--no-ext-diff", "--no-textconv", "--check", "HEAD", "--", *allowed_paths]]
+    if repo_kind(root) == REPO_KIND_STEWARD_CODE:
+        # The full offline gate for every touched area, run inside the
+        # isolated snapshot of the dotfiles clone (fix and judge copies).
+        return commands + steward_code_validation_commands(allowed_paths)
     suffixes = {Path(path).suffix.lower() for path in allowed_paths}
     if ".py" in suffixes:
         commands.append(["python3", "-m", "compileall", "-q", *[p for p in allowed_paths if p.endswith(".py")]])
@@ -799,11 +914,12 @@ def _validate_result_paths(
     root = _repo_root(source)
     if root != source.resolve() or str(root) != source_text:
         raise WorkerPolicyError(f"result repository root changed: {source}")
-    allowed = [_safe_relpath(path) for path in repository.get("allowed_paths") or []]
+    kind = repo_kind(root)
+    allowed = [_safe_relpath(path, kind=kind) for path in repository.get("allowed_paths") or []]
     expected_allowed = sorted(str(path) for path in expected.get("allowed_paths") or [])
     if sorted(allowed) != expected_allowed:
         raise WorkerPolicyError("worker result allowed paths differ from the trusted request")
-    changed = [_safe_relpath(path) for path in repository.get("changed_paths") or []]
+    changed = [_safe_relpath(path, kind=kind) for path in repository.get("changed_paths") or []]
     if len(set(changed)) != len(changed):
         raise WorkerPolicyError("worker result contains duplicate changed paths")
     if not set(changed).issubset(set(allowed)):
@@ -846,7 +962,7 @@ def _actual_diff_paths(root: Path, diff: str) -> list[str]:
         path = fields[2]
         if " => " in path:
             raise WorkerPolicyError("worker rename/copy diffs are not permitted")
-        paths.add(_safe_relpath(path))
+        paths.add(_safe_relpath(path, kind=repo_kind(root)))
     for line in diff.splitlines():
         if line.startswith(("rename from ", "rename to ", "copy from ", "copy to ", "similarity index ")):
             raise WorkerPolicyError("worker rename/copy metadata is not permitted")
@@ -932,7 +1048,7 @@ def _publish_validated_result_unlocked(
                 raise WorkerPolicyError("trusted repository binding is not an object")
             source = str(raw.get("source") or "")
             base = str(raw.get("base_sha") or "")
-            allowed = sorted(_safe_relpath(path) for path in raw.get("allowed_paths") or [])
+            allowed = sorted(_safe_relpath(path, kind=repo_kind(source)) for path in raw.get("allowed_paths") or [])
             if not source.startswith("/") or not re.fullmatch(r"[0-9a-f]{40}", base) or not allowed or source in trusted:
                 raise WorkerPolicyError("invalid or duplicate trusted repository binding")
             trusted[source] = {
@@ -1441,7 +1557,10 @@ def _run_validations(root: Path, commands: Sequence[Sequence[str]]) -> list[dict
         if not isinstance(raw, (list, tuple)) or not raw:
             raise WorkerPolicyError("validation plan contains an invalid command")
         argv = [str(item) for item in raw]
-        if argv[0] not in _VALIDATION_PROGRAMS and argv[0] != "git":
+        verifier = argv[0] == "bash" and argv in [
+            ["bash", f"scripts/verify-{name}.sh", "full"] for name, _ in STEWARD_CODE_VERIFIERS
+        ]
+        if argv[0] not in _VALIDATION_PROGRAMS and argv[0] != "git" and not verifier:
             raise WorkerPolicyError(f"validation program is not allowed: {argv[0]}")
         if any("\x00" in item or item.startswith("/") for item in argv):
             raise WorkerPolicyError("validation command contains an absolute/unsafe argument")
@@ -1540,7 +1659,8 @@ def _worker_repository(request: Mapping[str, Any], repository: Mapping[str, Any]
     workspace = Path(str(repository.get("workspace") or ""))
     if not workspace.is_absolute() or not _under(workspace, WORKER_RUN_ROOT):
         raise WorkerPolicyError(f"workspace outside worker run root: {workspace}")
-    allowed = [_safe_relpath(path) for path in repository.get("allowed_paths") or []]
+    kind = repo_kind(str(repository.get("source") or ""))
+    allowed = [_safe_relpath(path, kind=kind) for path in repository.get("allowed_paths") or []]
     if not allowed:
         raise WorkerPolicyError("worker repository has no allowed paths")
     if not workspace.exists():

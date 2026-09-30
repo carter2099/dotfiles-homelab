@@ -12,6 +12,7 @@
     "max_buffer_bytes": 1048576
   },
   "source_root": "/home/carter/dev",
+  "steward_code_root": "/home/carter/dev/.steward-code/<clone> (private dotfiles origin/main; scripts/** minus protected routing/policy/gate files; symlinks never staged; validation: verify-*.sh full)",
   "writable_roots": [
     "/var/lib/steward-worker/runs/<request-id>"
   ],

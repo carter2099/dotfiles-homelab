@@ -29,7 +29,7 @@ except ModuleNotFoundError as error:
         file_sha256,
     )
 
-from . import audit, dotfiles, fixes, health, public_dotfiles, queue, report, setup, updates
+from . import audit, dotfiles, fixes, health, public_dotfiles, queue, report, resolver, setup, updates
 from .config import (
     DEPENDABOT_UNIT,
     DIGEST_SCRIPT,
@@ -200,6 +200,7 @@ _PHASE_ARTIFACTS = {
     "queue": "05-queue.json",
     "audit": "07-audit.json",
     "fixes": "07b-fixes.json",
+    "resolve": resolver.ARTIFACT,
     "render": "08-email.html",
     "archive": "summary.md",
     "dotfiles": "09b-dotfiles.json",
@@ -222,11 +223,12 @@ def _phase_inputs(
             upstream_hashes[name] = file_sha256(path)
         except OSError:
             upstream_hashes[name] = "missing"
-    if phase == "dotfiles":
+    if phase in ("dotfiles", "resolve"):
         dot_status, dot_error = dotfiles._snapshot(dotfiles.DOTFILES_GIT, dotfiles.HOME)
         upstream_hashes["dotfiles-status"] = canonical_fingerprint(
             {"status": dot_status, "error": dot_error}
         )
+    if phase == "dotfiles":
         upstream_hashes["active-sessions"] = canonical_fingerprint(
             dotfiles.collect_active_session_evidence()
         )
@@ -670,7 +672,28 @@ def _finish_after_fixes(
     setup_data: dict[str, Any],
     started: float,
 ) -> int:
-    """Render, archive, commit, and clean up after P7b is stable."""
+    """Resolve Needs You items, then render, archive, commit, and clean up.
+
+    P7c runs here so both the normal path and the post-P7b clean-process
+    continuation reach it; it never changes fingerprinted steward source.
+    """
+    _run_phase(
+        state,
+        phase="resolve",
+        artifact=run_dir / _PHASE_ARTIFACTS["resolve"],
+        inputs=_phase_inputs(
+            "resolve",
+            args,
+            run_dir,
+            ["01-applied.json", "07-audit.json", "07b-fixes.json"],
+        ),
+        args=args,
+        operation=lambda: resolver.phase_7c_resolve(
+            run_dir,
+            dry_run=args.dry_run,
+            protected_paths=frozenset(_phase_code_fingerprint(args)),
+        ),
+    )
     _run_phase(
         state,
         phase="render",
@@ -685,6 +708,7 @@ def _finish_after_fixes(
                 "05-queue.json",
                 "07-audit.json",
                 "07b-fixes.json",
+                resolver.ARTIFACT,
             ],
         ),
         args=args,
@@ -709,6 +733,7 @@ def _finish_after_fixes(
                 "05-queue.json",
                 "07-audit.json",
                 "07b-fixes.json",
+                resolver.ARTIFACT,
             ],
         ),
         args=args,

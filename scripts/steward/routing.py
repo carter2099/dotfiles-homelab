@@ -14,13 +14,18 @@ Executors and their boundaries:
 - ``code_fix``: the existing isolated worker fix/judge loop (injected by
   ``fixes.phase_7b_fix``), then a PR for a published review commit, with
   auto-merge only when live repository checks allow it (never ``--admin``).
+  A finding on steward/dotfiles code (``~/scripts/**``) is repaired in a
+  scratch clone of the private dotfiles repository and proposed as a
+  ``steward-auto`` PR there (``code_prs``); protected paths stay needs_carter.
 """
 from __future__ import annotations
 
 import difflib
 import json
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -45,8 +50,8 @@ from .config import (
     STEWARD_MODEL,
     VERSION_REGISTRY,
 )
-from . import runtime
-from .worker import _INFRA_REPOSITORIES
+from . import code_prs, runtime
+from .worker import STEWARD_CODE_ROOT, _INFRA_REPOSITORIES, steward_code_path_reason
 
 ROUTE_KEYS = (
     "section", "finding_id", "claim", "severity", "action", "status",
@@ -113,6 +118,10 @@ class RouteContext:
     gh: Callable[..., subprocess.CompletedProcess] = _gh_cmd
     fix_section: Callable[..., Mapping[str, Any]] | None = None
     max_workers: int = MAX_WORKERS
+    # Steward-code route: scratch clones of the private dotfiles repository
+    # live here; ``dotfiles_remote`` overrides its origin URL (tests).
+    steward_code_root: Path = STEWARD_CODE_ROOT
+    dotfiles_remote: str | None = None
 
     def call_model(self, prompt):
         call = self.omp_call or runtime._call_omp_p
@@ -581,6 +590,64 @@ def execute_p1_route(section, finding, ctx, applied):
 
 # ── code_fix ─────────────────────────────────────────────────────────
 
+_DOTFILES_REPO_NAMES = {".dotfiles-homelab", "dotfiles-homelab-private",
+                        "carter2099/dotfiles-homelab-private", "~", "~/", "$HOME"}
+
+
+def _steward_code_target(ctx, finding, raw_repo, repo):
+    """Flatten a finding on steward/dotfiles code; None when it targets elsewhere.
+
+    Only tracked ``~/scripts/**`` files outside the protected set qualify;
+    everything else in the dotfiles tree raises (needs Carter)."""
+    home = Path(os.path.normpath(Path(ctx.home)))
+    dot_git = Path(os.path.normpath(Path(ctx.dotfiles_git_dir)))
+    if raw_repo in _DOTFILES_REPO_NAMES or repo == home.resolve() or _under(repo, dot_git.resolve()):
+        anchor = home
+    elif _under(repo, (home / "scripts").resolve()):
+        anchor = home / "scripts" / repo.relative_to((home / "scripts").resolve())
+    elif _under(repo, (home / "system-config").resolve()):
+        raise RouteRejected("steward-code protected: ~/system-config is host policy "
+                            "(publication, systemd, sudo, network); needs Carter")
+    else:
+        return None
+    paths = finding["target"].get("paths")
+    if isinstance(paths, str):
+        paths = [paths]
+    if not isinstance(paths, list) or not paths:
+        raise RouteRejected("no automatic route: the finding names no repairable file")
+    rels = []
+    for raw in paths:
+        value = str(raw or "").strip()
+        if not value or ".." in Path(value).parts:
+            raise RouteRejected(f"path {raw!r} is not a safe repository-relative path")
+        if value.startswith("~/"):
+            candidate = home / value[2:]
+        elif value.startswith("/"):
+            candidate = Path(value)
+        elif anchor != home and value.startswith("scripts/") and not (anchor / value).exists():
+            candidate = home / value  # audits often name repo ~/scripts with home-relative paths
+        else:
+            candidate = anchor / value
+        candidate = Path(os.path.normpath(candidate))
+        if not _under(candidate, home) or candidate == home:
+            raise RouteRejected(f"path {raw} is outside the dotfiles work tree")
+        rel = candidate.relative_to(home).as_posix()
+        reason = steward_code_path_reason(rel)
+        if reason:
+            raise RouteRejected(f"steward-code protected: {reason}; needs Carter")
+        if candidate.is_symlink() or not candidate.is_file():
+            raise RouteRejected(f"~/{rel} does not exist as a regular file")
+        tracked = ctx.run(["git", "--git-dir", str(dot_git), "--work-tree", str(home),
+                           "ls-files", "--error-unmatch", "--", rel], cwd=home, timeout=30)
+        if tracked.returncode != 0:
+            raise RouteRejected(f"~/{rel} is not tracked in the private dotfiles repository")
+        if rel not in rels:
+            rels.append(rel)
+    return {
+        "id": finding["id"], "claim": finding["claim"], "evidence": finding["evidence"],
+        "fix": finding["fix"], "paths": rels, "steward_code": True,
+    }
+
 
 def _code_fix_target(ctx, finding):
     """Validate and flatten a code_fix finding to the worker's keys."""
@@ -596,6 +663,9 @@ def _code_fix_target(ctx, finding):
     else:
         repo = Path(ctx.dev_root) / raw_repo
     repo = repo.resolve()
+    steward = _steward_code_target(ctx, finding, raw_repo, repo)
+    if steward is not None:
+        return steward
     dev_root = Path(ctx.dev_root).resolve()
     if not _under(repo, dev_root) or repo == dev_root:
         raise RouteRejected(f"repository {raw_repo} is not an app repository under ~/dev")
@@ -680,16 +750,29 @@ def auto_merge_eligibility(ctx, repo_name, nwo, branch, cwd=None):
     if not required:
         return False, f"{branch} does not require a status check"
     # Only push runs on the default branch are CI evidence; Dependabot "dynamic"
-    # and scheduled runs would otherwise stand in for the test suite.
+    # and scheduled runs would otherwise stand in for the test suite.  A run
+    # cancelled because a newer run of the same workflow superseded it
+    # (concurrency groups when several merges land together) is not evidence
+    # either way; counting it as a failure blocked every later auto-merge, and
+    # with no merges there are no new push runs to clear the window.
     runs = _gh_json(ctx, [
         "api",
         f"repos/{nwo}/actions/runs?branch={quoted}&event=push&status=completed"
-        f"&per_page={AUTO_MERGE_RECENT_RUNS}",
+        f"&per_page={AUTO_MERGE_RECENT_RUNS * 4}",
     ], cwd)
     rows = runs.get("workflow_runs") if isinstance(runs, Mapping) else None
     if not isinstance(rows, list):
         return False, "could not read recent workflow runs"
-    rows = rows[:AUTO_MERGE_RECENT_RUNS]
+    evidence, newer_workflows = [], set()
+    for row in rows:  # newest first
+        workflow = row.get("workflow_id") if isinstance(row, Mapping) else None
+        superseded = (isinstance(row, Mapping) and row.get("conclusion") == "cancelled"
+                      and workflow is not None and workflow in newer_workflows)
+        if workflow is not None:
+            newer_workflows.add(workflow)
+        if not superseded:
+            evidence.append(row)
+    rows = evidence[:AUTO_MERGE_RECENT_RUNS]
     if len(rows) < AUTO_MERGE_RECENT_RUNS:
         return False, f"fewer than {AUTO_MERGE_RECENT_RUNS} completed push runs on {branch}"
     bad = [r for r in rows if not isinstance(r, Mapping) or r.get("conclusion") != "success"]
@@ -796,8 +879,9 @@ def _matching_fix_row(section_result, flat):
     return {}
 
 
-def _code_fix_rows(ctx, section, items, section_result):
+def _code_fix_rows(ctx, section, items, section_result, opener=None):
     """items: list of (normalized finding, flattened worker finding)."""
+    opener = opener or open_pull_request
     rows = []
     status = str(section_result.get("status") or "")
     iterations = section_result.get("iteration_count") or None
@@ -815,7 +899,7 @@ def _code_fix_rows(ctx, section, items, section_result):
     pr_results = {}
     for repo_path, commit in commits.items():
         repo_findings = [f for f, flat in items if flat["repo"] == repo_path]
-        pr_results[repo_path] = open_pull_request(
+        pr_results[repo_path] = opener(
             ctx, section, repo_path, str(commit["commit"]), repo_findings, section_result)
     judge = _text(section_result.get("judge_summary") or section_result.get("error"), 500)
     stop = str(section_result.get("stop_reason") or "")
@@ -845,6 +929,63 @@ def _code_fix_rows(ctx, section, items, section_result):
     return rows
 
 
+def _execute_steward_code_fix(ctx, name, finding, flat):
+    """Repair steward code in a scratch clone; returns (row, section result | None)."""
+    paths = ", ".join(f"~/{p}" for p in flat["paths"])
+    if ctx.dry_run:
+        return _row(name, finding, "report_only",
+                    "Dry run: would repair this steward code in a scratch clone of the private "
+                    "dotfiles repository and open a PR there.", paths), None
+    if ctx.fix_section is None:
+        raise RuntimeError("route_findings needs ctx.fix_section for code_fix findings")
+    blocker = code_prs.blocking_pr(ctx, flat["paths"])
+    if blocker:
+        url, why = blocker
+        return _row(name, finding, "report_only", f"Deferred: {why}.", url), None
+    scratch, base = code_prs.prepare_scratch(ctx, flat["paths"])
+    try:
+        work = {key: flat[key] for key in ("id", "claim", "evidence", "fix", "paths")}
+        work["repo"] = str(scratch.resolve())
+        result = dict(ctx.fix_section(name, [work], False, ctx.run_dir))
+        result["steward_code"] = True
+
+        def opener(ctx_, section, repo, commit, findings, section_result):
+            return code_prs.open_steward_code_pr(
+                ctx_, section, repo, base, commit, findings, section_result)
+
+        return _code_fix_rows(ctx, name, [(finding, work)], result, opener=opener)[0], result
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+        try:  # leave no ~/dev/.steward-code entry for the ~/dev audits to see
+            Path(ctx.steward_code_root).rmdir()
+        except OSError:
+            pass
+
+
+def _route_steward_code(ctx, items):
+    """At most one steward-code repair attempt (so at most one PR) per night."""
+    rows, results = [], []
+    for index, (order, name, finding, flat) in enumerate(items):
+        if index >= code_prs.MAX_PRS_PER_NIGHT:
+            rows.append((order, _row(
+                name, finding, "report_only",
+                "Deferred: the steward proposes at most one steward-code PR per night.",
+                "the audit raises this finding again on a later night")))
+            continue
+        result = None
+        try:
+            row, result = _execute_steward_code_fix(ctx, name, finding, flat)
+        except (RouteRejected, code_prs.StewardCodeRejected) as exc:
+            row = _needs_carter(name, finding, str(exc))
+        except Exception as exc:  # one bad finding never blocks the rest
+            row = _row(name, finding, "failed", "The steward-code route failed unexpectedly.",
+                       f"{type(exc).__name__}: {exc}")
+        rows.append((order, row))
+        if result is not None:
+            results.append(result)
+    return rows, results
+
+
 # ── router ───────────────────────────────────────────────────────────
 
 
@@ -859,6 +1000,7 @@ def route_findings(sections, applied=None, ctx: RouteContext | None = None):
     code_fix: dict[str, list] = {}
     order = 0
     slots: dict[str, list[int]] = {}
+    steward: list[tuple[int, str, dict, dict]] = []
     for section in sections or []:
         if not isinstance(section, Mapping):
             continue
@@ -897,6 +1039,9 @@ def route_findings(sections, applied=None, ctx: RouteContext | None = None):
                     row = execute_p1_route(name, finding, ctx, applied)
                 else:  # code_fix
                     flat = _code_fix_target(ctx, finding)
+                    if flat.get("steward_code"):
+                        steward.append((order, name, finding, flat))
+                        continue
                     code_fix.setdefault(name, []).append((finding, flat))
                     slots.setdefault(name, []).append(order)
                     continue
@@ -919,10 +1064,12 @@ def route_findings(sections, applied=None, ctx: RouteContext | None = None):
                 for f, _ in items
             ]
         routes.extend(zip(slots[name], rows))
+    steward_rows, steward_results = _route_steward_code(ctx, steward)
+    routes.extend(steward_rows)
     routes.sort(key=lambda pair: pair[0])
     return {
         "routes": [row for _, row in routes],
-        "sections": list(section_results.values()),
+        "sections": list(section_results.values()) + steward_results,
     }
 
 

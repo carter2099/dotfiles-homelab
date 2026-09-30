@@ -23,7 +23,7 @@ UMask=0077
 NoNewPrivileges=yes
 PrivateUsers=yes
 PrivateNetwork=yes
-TemporaryFileSystem=/tmp:rw,size=256M,nosuid,nodev /var/tmp:rw,size=256M,nosuid,nodev
+TemporaryFileSystem=/tmp:rw,mode=1777,size=256M,nosuid,nodev /var/tmp:rw,mode=1777,size=256M,nosuid,nodev
 PrivateDevices=yes
 ProtectHome=tmpfs
 ProtectSystem=strict

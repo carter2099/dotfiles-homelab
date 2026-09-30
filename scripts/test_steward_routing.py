@@ -423,7 +423,8 @@ class FakeGh:
             if "/rules/branches/" in path:
                 return cp(0, json.dumps(self.rules))
             if "/actions/runs" in path:
-                return cp(0, json.dumps({"workflow_runs": [{"conclusion": c} for c in self.runs]}))
+                return cp(0, json.dumps({"workflow_runs": [
+                    c if isinstance(c, dict) else {"conclusion": c} for c in self.runs]}))
             return cp(0, json.dumps({"allow_auto_merge": self.allow, "default_branch": "main",
                                      **self.methods}))
         return cp(1, "", f"unexpected gh call {args}")
@@ -460,6 +461,26 @@ class AutoMergeTests(unittest.TestCase):
     def test_red_or_too_few_recent_runs(self):
         self.assertFalse(self.check(FakeGh(protection=CLASSIC, runs=["success"] * 4 + ["failure"]))[0])
         self.assertFalse(self.check(FakeGh(protection=CLASSIC, runs=["success"] * 3))[0])
+
+    def test_cancelled_run_superseded_by_newer_run_is_not_evidence(self):
+        def run(conclusion, workflow=7):
+            return {"conclusion": conclusion, "workflow_id": workflow}
+        # herdr-web-client 2026-09-25: two merges landed together; concurrency
+        # cancelled the older runs, the newest run of the same workflow passed.
+        superseded = [run("success"), run("success"), run("cancelled"), run("cancelled"),
+                      run("success"), run("success"), run("success")]
+        self.assertTrue(self.check(FakeGh(protection=CLASSIC, runs=superseded))[0])
+        # The newest run cancelled (nothing newer of that workflow) still counts against.
+        newest = [run("cancelled")] + [run("success")] * 6
+        ok, reason = self.check(FakeGh(protection=CLASSIC, runs=newest))
+        self.assertFalse(ok)
+        self.assertIn("1 of the last 5", reason)
+        # A cancelled run of a different workflow is not superseded by this one.
+        other = [run("success"), run("cancelled", workflow=8)] + [run("success")] * 5
+        self.assertFalse(self.check(FakeGh(protection=CLASSIC, runs=other))[0])
+        # Superseded runs do not stretch a short history into five.
+        short = [run("success"), run("cancelled"), run("success"), run("success"), run("success")]
+        self.assertFalse(self.check(FakeGh(protection=CLASSIC, runs=short))[0])
 
     def test_excluded_and_non_candidate_repos(self):
         for name in ("llm-proxy", "homelab-backup", "random-app"):

@@ -928,6 +928,7 @@ def _commit_exact_paths(
     push: bool = True,
     pre_push_check: Callable[[], bool] | None = None,
     new_paths: Iterable[str] = (),
+    message: str = "chore: steward dotfiles hygiene",
 ) -> dict[str, Any]:
     """Commit only staged bytes identical to the diffs reviewed by the gate.
 
@@ -1046,7 +1047,7 @@ def _commit_exact_paths(
                 home,
                 "commit",
                 "-m",
-                "chore: steward dotfiles hygiene",
+                message,
             ),
             capture_output=True,
             text=True,

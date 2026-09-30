@@ -960,6 +960,108 @@ def _route_rows(audit, fixes):
     ))
 
 
+_RESOLVE_ARTIFACT = "07c-resolve.json"
+
+
+def _merge_resolution(row, res):
+    """Overlay one P7c record on a needs_carter route row."""
+    status = res.get("status")
+    action = res.get("action") or ""
+    reason = str(res.get("reason") or "")
+    if status == "done":
+        row.update(
+            status="done",
+            summary=_clip(res.get("summary") or f"Resolver: {action}", 300),
+            revert=str(res.get("undo") or ""),
+            commit=str(res.get("commit") or ""),
+            detail=f"P7c resolver acted autonomously ({res.get('tier') or 'act'})",
+        )
+    elif status == "resolved":
+        row.update(
+            status="done",
+            summary=_clip(f"No action needed: already resolved since the audit ({reason})", 300),
+            revert="",
+            detail="P7c resolver found the item already resolved",
+        )
+    elif status in ("recommended", "dry_run"):
+        certainty = res.get("certainty")
+        conf = f" (Jev certainty {certainty:.2f})" if isinstance(certainty, (int, float)) else ""
+        rationale = _clip(res.get("rationale"), 180)
+        row["decision"] = f"resolver recommends {action}{conf}" + (f": {rationale}" if rationale else "")
+        row["approve"] = str(res.get("approve_command") or "")
+        row["resolver_note"] = reason
+    elif status == "failed":
+        commit = str(res.get("commit") or "")
+        row.update(
+            status="failed",
+            detail=_clip(f"P7c {action or 'action'}"
+                         + (f" (commit {commit[:12]})" if commit else "") + f": {reason}", 300),
+            revert=str(res.get("undo") or ""),
+            commit=commit,
+        )
+    else:
+        rationale = _clip(res.get("rationale"), 200) if status == "held" else ""
+        note = f"resolver {status or 'unknown'}: {reason}" if reason else ""
+        row["resolver_note"] = f"{note} — {rationale}" if note and rationale else note
+
+
+def _apply_resolutions(fixes, resolve):
+    """07b routes with the P7c outcomes applied (07b itself is never rewritten).
+
+    Route rows left needs_carter take the resolver's result; tracked dotfiles
+    edits outside P9b's allowlist appear only when P7c acted or recommends.
+    """
+    items = [r for r in (resolve or {}).get("items") or [] if isinstance(r, dict)]
+    routes = (fixes or {}).get("routes")
+    degraded = (resolve or {}).get("phase_status") in ("degraded", "failed")
+    if not (items or degraded) or not isinstance(routes, list):
+        return fixes
+    by_key = {
+        (r.get("section"), r.get("finding_id")): r
+        for r in items if r.get("source") == "route"
+    }
+    merged = []
+    for route in routes:
+        row = dict(route) if isinstance(route, dict) else route
+        if isinstance(row, dict) and row.get("status") == "needs_carter":
+            res = by_key.get((row.get("section"), row.get("finding_id")))
+            if res:
+                _merge_resolution(row, res)
+        merged.append(row)
+    for res in items:
+        if res.get("source") != "dotfiles" or res.get("status") not in (
+                "done", "recommended", "dry_run", "failed"):
+            continue
+        row = {
+            "section": "dotfiles", "finding_id": res.get("id"), "claim": res.get("claim"),
+            "severity": "low", "action": res.get("action") or "", "status": "needs_carter",
+            "summary": "", "detail": "", "decision": "", "revert": "", "pr_url": "",
+            "commit": "", "iteration": None,
+        }
+        _merge_resolution(row, res)
+        merged.append(row)
+    reason = str((resolve or {}).get("reason") or "")
+    if degraded and not reason.startswith("P7c action(s) failed"):
+        merged.append({
+            "section": "steward-resolver", "finding_id": "p7c", "severity": "low",
+            "claim": f"The Needs You resolver (P7c) did not finish: {_clip(reason, 240)}",
+            "action": "", "status": "failed", "summary": "", "detail": "items it did not reach "
+            "are listed unchanged", "decision": "", "revert": "", "pr_url": "", "commit": "",
+            "iteration": None,
+        })
+    return {**fixes, "routes": merged}
+
+
+def _load_fixes_with_resolutions(run_dir):
+    fixes = read_json(run_dir / "07b-fixes.json") if (run_dir / "07b-fixes.json").exists() else {"sections": []}
+    path = run_dir / _RESOLVE_ARTIFACT
+    try:
+        resolve = read_json(path) if path.exists() else {}
+    except (OSError, ValueError):
+        resolve = {}
+    return _apply_resolutions(fixes, resolve if isinstance(resolve, dict) else {})
+
+
 def _route_needs_carter(row):
     """Whether a route leaves Carter something to do.
 
@@ -988,14 +1090,23 @@ def _route_outcome_text(row):
     if status == "needs_carter":
         decision = _clip(row.get("decision"), 200)
         if decision:
-            return f"needs Carter: {decision}"
-        return "needs Carter: no automatic fix route" + (f" ({detail})" if detail else "")
+            text = f"needs Carter: {decision}"
+        else:
+            text = "needs Carter: no automatic fix route" + (f" ({detail})" if detail else "")
+        if row.get("approve"):
+            return f"{text} — approve with: {row['approve']}"
+        if row.get("resolver_note"):
+            return f"{text} ({_clip(row['resolver_note'], 360)})"
+        return text
     if status == "failed":
-        return "the automatic fix failed" + (f": {detail}" if detail else "")
+        return ("the automatic fix failed" + (f": {detail}" if detail else "")
+                + (f" — undo: {row['revert']}" if row.get("revert") else ""))
     if status == "pr_opened":
         return "a fix PR is waiting for Carter's review" + (
             f": {row['pr_url']}" if row.get("pr_url") else "")
     if status == "pr_auto_merge":
+        if "dotfiles-homelab-private" in str(row.get("pr_url") or "") and row.get("summary"):
+            return _clip(row["summary"], 200)
         return "a fix PR will merge automatically once its checks pass"
     if status == "handled_by_p1":
         return "nightly maintenance handles this" + (f" ({detail})" if detail else "")
@@ -1688,7 +1799,7 @@ def _tldr_audit_end_state(audit, fixes):
     }
 
 
-def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None):
+def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None, steward_code=None):
     """Typed end-state facts for the TL;DR (model input and deterministic fallback)."""
     updates, n_failed_apply = _tldr_collect_updates(applied)
     apply_failures = _tldr_collect_apply_failures(applied)
@@ -1724,6 +1835,7 @@ def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None):
                 f"{pr.get('title')} {pr.get('url') or ''}".strip()
                 for pr in step.get("needs_carter") or []
             )
+    carter_items.extend(f"steward code — {text}" for text in _steward_code_needs(steward_code))
     for item in plans.get("approved", []) or []:
         carter_items.append(f"approved plan: {item.get('heading') or item.get('file') or '?'}")
     for item in plans.get("implementing", []) or []:
@@ -1878,14 +1990,14 @@ def _tldr_prompt(date_str, payload, session_memory):
 
 
 def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str, session_memory="",
-                validation=None):
+                validation=None, steward_code=None):
     """Model-written end-state TL;DR, checked against the facts it was given.
 
     The model gets typed lists: problems for Carter, incomplete audits, and
     changes. Its declared structure is validated; a contradiction gets one
     corrected rewrite, then the deterministic summary. Returns HTML-safe text.
     """
-    facts = _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation)
+    facts = _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation, steward_code)
     payload, problems = _tldr_payload(facts, date_str)
     rules = {
         "action_needed": bool(problems or facts["carter_items"] or facts["health_issues"]),
@@ -2041,18 +2153,111 @@ def _html_public_dotfiles(public):
         '<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>'
     )
 
+def _steward_code_lines(steward_code):
+    """[(text, color)] for the startup steward-code merge + live-tree pickup packet."""
+    if not isinstance(steward_code, dict):
+        return []
+    lines = []
+    merge = steward_code.get("merge") if isinstance(steward_code.get("merge"), dict) else {}
+    for pr in merge.get("merged") or []:
+        text = (f"steward-code PR #{pr.get('number')} merged ({str(pr.get('merge_commit') or '')[:8]}): "
+                f"{str(pr.get('title') or '')[:120]} — undo: {pr.get('undo') or ''}")
+        color = "#2a2a36"
+        if pr.get("reverted_by"):
+            text += (f" — REVERTED by {str(pr['reverted_by'])[:8]} "
+                     f"({pr.get('revert_reason') or 'live pickup failed'})")
+            color = "#c62828"
+        lines.append((text, color))
+    for pr in merge.get("pending") or []:
+        due = f" (merges after {pr['due']})" if pr.get("due") else ""
+        lines.append((f"steward-code PR #{pr.get('number')} pending: {pr.get('reason') or ''}{due}", "#7b7b8a"))
+    for pr in merge.get("held") or []:
+        lines.append((f"steward-code PR #{pr.get('number')} held: {pr.get('reason') or ''}", "#7b7b8a"))
+    for error in merge.get("errors") or []:
+        lines.append((f"steward-code merge: {str(error)[:200]}", "#c62828"))
+    if merge.get("status") in ("warning", "failed") and not merge.get("errors"):
+        lines.append((f"steward-code merge {merge.get('status')}: {merge.get('reason') or ''}", "#c62828"))
+    pickup = steward_code.get("pickup") if isinstance(steward_code.get("pickup"), dict) else {}
+    status = pickup.get("status")
+    reason = pickup.get("reason") or ""
+    if status == "fast_forwarded":
+        commits = [c for c in pickup.get("commits") or [] if isinstance(c, dict)]
+        paths = [str(p) for p in pickup.get("paths") or []]
+        lines.append((
+            f"live tree picked up {str(pickup.get('old') or '')[:8]}..{str(pickup.get('new') or '')[:8]}: "
+            f"{len(commits)} commit(s) — {'; '.join(str(c.get('subject') or '') for c in commits[:5])}; "
+            f"paths: {', '.join(paths[:10])}{' …' if len(paths) > 10 else ''}", "#2a2a36"))
+    elif status in ("up_to_date", "would_fast_forward"):
+        lines.append((f"{status}: {reason}", "#7b7b8a"))
+    elif status == "skipped":
+        lines.append((f"live tree pickup skipped: {reason}", "#e65100"))
+    elif status == "rolled_back":
+        text = f"live tree pickup rolled back: {reason}"
+        verify = [v for v in pickup.get("verify") or [] if isinstance(v, dict)]
+        if verify:
+            last = verify[-1]
+            text += (f" — {' '.join(str(a) for a in last.get('argv') or [])} exit "
+                     f"{last.get('returncode')}: {str(last.get('output_tail') or '')[-300:]}")
+        lines.append((text, "#c62828"))
+    elif status == "failed":
+        text = f"live tree pickup FAILED: {reason}"
+        if pickup.get("manual_recovery"):
+            text += f" — {pickup['manual_recovery']}"
+        lines.append((text, "#c62828"))
+    return lines
 
-def _html_actions(audit, fixes, applied):
+
+def _steward_code_needs(steward_code):
+    """Steward-code packet lines that need Carter (Needs You / TL;DR)."""
+    if not isinstance(steward_code, dict):
+        return []
+    merge = steward_code.get("merge") if isinstance(steward_code.get("merge"), dict) else {}
+    pickup = steward_code.get("pickup") if isinstance(steward_code.get("pickup"), dict) else {}
+    needs = []
+    for text, _color in _steward_code_lines({"pickup": pickup}):
+        if pickup.get("status") in ("skipped", "rolled_back", "failed"):
+            needs.append(text)
+    if merge.get("status") in ("warning", "failed"):
+        errors = [str(e)[:200] for e in merge.get("errors") or []]
+        needs.append(f"steward-code merge {merge.get('status')}: "
+                     + ("; ".join(errors) or str(merge.get("reason") or "")))
+    for pr in merge.get("pending") or []:
+        if pr.get("needs_carter") or "CONFLICTING" in str(pr.get("reason") or ""):
+            needs.append(f"steward-code PR #{pr.get('number')} pending: {pr.get('reason')}")
+    return needs
+
+
+def _html_steward_code(steward_code):
+    lines = _steward_code_lines(steward_code)
+    if not lines:
+        return ""
+    li = "".join(
+        f'<li style="color:{color};">{html.escape(text)}</li>' for text, color in lines
+    )
+    return (
+        '<tr><td style="padding:16px 32px 8px;">'
+        '<h2 style="margin:0; color:#1565c0; font-size:15px; font-weight:700;">'
+        'Steward code</h2></td></tr>'
+        '<tr><td style="padding:8px 32px 16px;">'
+        f'<ul style="margin:0; padding-left:20px; font-size:12px;">{li}</ul>'
+        '</td></tr>'
+        '<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>'
+    )
+
+
+
+def _html_actions(audit, fixes, applied, steward_code=None):
     """Top-of-email "Needs You" and "Done Automatically" rows ("" when both are empty)."""
     rows = _route_rows(audit, fixes)
     needs = [r for r in rows if _route_needs_carter(r)]
+    code_needs = _steward_code_needs(steward_code)
     done = [r for r in rows if r.get("status") == "done"]
     in_progress = [r for r in rows if r.get("status") in _IN_PROGRESS_ROUTES]
     p1_done = [
         s for s in (applied or {}).get("steps", []) or []
         if isinstance(s, dict) and s.get("revert") and s.get("status") == "ok"
     ]
-    if not (needs or done or in_progress or p1_done):
+    if not (needs or code_needs or done or in_progress or p1_done):
         return ""
 
     def block(title, color, items):
@@ -2075,8 +2280,10 @@ def _html_actions(audit, fixes, applied):
         )
 
     out = []
-    if needs:
-        items = []
+    if needs or code_needs:
+        items = [
+            item(f'{_chip("steward", "#c62828")} {html.escape(text)}') for text in code_needs
+        ]
         for r in needs[:10]:
             color = {"high": "#c62828", "medium": "#e65100"}.get(r["severity"], "#7b7b8a")
             items.append(item(
@@ -2132,7 +2339,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     troubleshoot = read_json(run_dir / "03-troubleshoot.json") if (run_dir / "03-troubleshoot.json").exists() else None
     heartbeat = read_json(run_dir / "04-heartbeat.json") if (run_dir / "04-heartbeat.json").exists() else {}
     queue = read_json(run_dir / "05-queue.json") if (run_dir / "05-queue.json").exists() else {}
-    fixes = read_json(run_dir / "07b-fixes.json") if (run_dir / "07b-fixes.json").exists() else {"sections": []}
+    fixes = _load_fixes_with_resolutions(run_dir)
     audit = read_json(run_dir / "07-audit.json") if (run_dir / "07-audit.json").exists() else {"sections": []}
 
     # Phase failures anywhere in the pipeline (each artifact records phase_failed)
@@ -2149,6 +2356,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         applied, audit, queue, fixes, heartbeat, date_str,
         session_memory=_session_memory_context(),
         validation=validation,
+        steward_code=setup_data.get("steward_code"),
     )
 
     # Troubleshoot section
@@ -2223,6 +2431,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
     except ValueError:
         prev_public = {}
     troubleshoot_html += _html_public_dotfiles(prev_public)
+    troubleshoot_html += _html_steward_code(setup_data.get("steward_code"))
     p0b_path = run_dir / "00b-session-memory.json"
     troubleshoot_html += _html_session_memory(read_json(p0b_path) if p0b_path.exists() else {})
 
@@ -2236,7 +2445,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         atomic_write_text(TEMPLATE_PATH, DEFAULT_TEMPLATE)
     template = TEMPLATE_PATH.read_text()
 
-    actions_html = _html_actions(audit, fixes, applied)
+    actions_html = _html_actions(audit, fixes, applied, setup_data.get("steward_code"))
     if "{{ACTIONS}}" not in template:
         template = template.replace("{{TROUBLESHOOT}}", "{{ACTIONS}}{{TROUBLESHOOT}}", 1)
 
@@ -2294,7 +2503,7 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
     validation = read_json(run_dir / "02-validation.json") if (run_dir / "02-validation.json").exists() else {}
     audit = read_json(run_dir / "07-audit.json") if (run_dir / "07-audit.json").exists() else {}
     queue = read_json(run_dir / "05-queue.json") if (run_dir / "05-queue.json").exists() else {}
-    fixes = read_json(run_dir / "07b-fixes.json") if (run_dir / "07b-fixes.json").exists() else {"sections": []}
+    fixes = _load_fixes_with_resolutions(run_dir)
 
 
     # Build summary.md

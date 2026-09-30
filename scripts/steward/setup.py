@@ -65,6 +65,7 @@ from .config import (
     timezone,
     urllib,
 )
+from .code_pickup import startup_packet
 from .runtime import (
     NO_TOOLS,
     READ_ONLY_TOOLS,
@@ -164,6 +165,8 @@ def phase_0_setup(args, run_dir=None):
         "resume": args.resume,
         "usage": usage,
         "dependabot": dep,
+        # Startup steward-code merge + live-tree pickup (steward_runner.py).
+        "steward_code": startup_packet(),
     }
     artifact = run_dir / "00-setup.json"
     write_json(artifact, data)

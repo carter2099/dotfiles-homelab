@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from steward import dotfiles, public_dotfiles, report, workflow
+from steward import dotfiles, public_dotfiles, report, resolver, workflow
 from workflow_state import WorkflowState
 
 
@@ -474,6 +474,11 @@ class StewardWorkflowArgumentTests(unittest.TestCase):
 
             with (
                 mock.patch.object(workflow, "_phase_inputs", return_value={"code_hash": "stable"}),
+                mock.patch.object(
+                    resolver,
+                    "phase_7c_resolve",
+                    return_value={"phase_status": "degraded", "reason": "P7c failed: boom", "items": []},
+                ),
                 mock.patch.object(report, "phase_8_render_send", side_effect=render),
                 mock.patch.object(report, "phase_9_archive", side_effect=archive),
                 mock.patch.object(dotfiles, "phase_9b_dotfiles", return_value={"status": "skipped", "reason": "dry run"}),
@@ -485,6 +490,9 @@ class StewardWorkflowArgumentTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 1)
             self.assertEqual(state.phase_record("apply")["status"], "failed")
+            # A degraded P7c is reported but never fails the run or blocks reporting.
+            self.assertEqual(state.phase_record("resolve")["status"], "succeeded")
+            self.assertEqual(state.phase_record("resolve")["completion_outcome"], "degraded")
             for phase in ("render", "archive", "dotfiles", "public-dotfiles"):
                 self.assertEqual(state.phase_record(phase)["status"], "succeeded")
 

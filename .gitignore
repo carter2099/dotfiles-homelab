@@ -80,6 +80,7 @@ scripts/.claude-digests-backup/
 !/.local/bin/ocusage
 !/.local/bin/rigsleep
 !/.local/bin/rigwake
+!/.local/bin/steward-approve
 /.local/go/
 /.local/lib/
 /.local/nvim/
