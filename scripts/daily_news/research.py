@@ -385,6 +385,13 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         )
 
     # ── Step 2: Batch LLM calls ──
+    # Each finding carries a run-local id through the judge so Step 3 restores
+    # metadata from the finding itself, never from another finding that shares
+    # its URL (digest-quality audit 2026-09-29: two ai-hardware 09-28 findings
+    # shared a TechPowerUp archive URL and one's event metadata shipped on the
+    # other when the restore was keyed by URL alone).
+    for index, finding in enumerate(pre_tagged):
+        finding["finding_id"] = f"f{index}"
     rubric = editorial_significance_rubric_text(topic)
     batches = batch(pre_tagged, BATCH_SIZE)
     print(f"  Batched into {len(batches)} LLM call(s) ({BATCH_SIZE}/batch)")
@@ -397,7 +404,8 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         "rules. Be harsh — a false positive is worse than a false negative.\n\n"
         "You will receive a JSON array of research findings and a set of rules. "
         "For each finding, evaluate every rule. Preserve source fields, especially "
-        "`research_angle_id`, `develops_story_url`, `date_tag`, `event`, `event_terms`, "
+        "`finding_id`, `research_angle_id`, `develops_story_url`, `date_tag`, `event`, "
+        "`event_terms`, "
         "URL, and publication date. You may adjust `editorial_significance` based only "
         "on consequence. Every `high` finding must include structured "
         "`significance_evidence` with an allowed basis, broad/sector affected scope, and "
@@ -442,17 +450,32 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             all_approved.extend(batch_items)
 
     # ── Step 3: Restore source metadata, then enforce deterministic dedup ──
+    # A judged finding is matched to its source by finding_id (checked against
+    # the source URL); only a URL that exactly one source finding carries may
+    # stand in for a missing id. A finding sharing its URL with another source
+    # finding and lacking a valid id cannot be told apart, so it is dropped
+    # rather than given the other finding's event, terms, or follow-up link.
     seen_urls: set[str] = set()
     deduped_approved: list[dict] = []
     dedup_rejected: list[dict] = []
-    original_by_url = {
-        normalize_url(f.get("url", "")): f for f in pre_tagged
-        if normalize_url(f.get("url", ""))
-    }
+    original_by_id = {f["finding_id"]: f for f in pre_tagged}
+    originals_by_url: dict[str, list[dict]] = {}
+    for f in pre_tagged:
+        if normalize_url(f.get("url", "")):
+            originals_by_url.setdefault(normalize_url(f.get("url", "")), []).append(f)
 
     for f in all_approved:
         url = normalize_url(f.get("url", ""))
-        source = original_by_url.get(url)
+        finding_id = f.get("finding_id")
+        source = original_by_id.get(finding_id) if isinstance(finding_id, str) else None
+        if source is not None and normalize_url(source.get("url", "")) != url:
+            source = None
+        same_url = originals_by_url.get(url, [])
+        if source is None and len(same_url) == 1:
+            source = same_url[0]
+        if source is None and len(same_url) > 1:
+            dedup_rejected.append({"finding": f, "reason": "unidentified_shared_url"})
+            continue
         if source is not None:
             for field in (
                 "date_tag", "research_angle_id", "develops_story_url",
@@ -479,6 +502,12 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             if url:
                 seen_urls.add(url)
             deduped_approved.append(f)
+
+    for f in pre_tagged + all_approved + [
+        r.get("finding") for r in all_rejected if isinstance(r, dict)
+    ]:
+        if isinstance(f, dict):
+            f.pop("finding_id", None)
 
     dedup_rejected = ledger_rejected + dedup_rejected
     if dedup_rejected:

@@ -235,6 +235,29 @@ class PublicDotfilesTests(unittest.TestCase):
         self.assertEqual(client.calls[0][0], "dotfiles-public-change-veto")
         self.assertIn("clean by regex", client.calls[0][1]["changes"])
 
+    def test_carter_decision_replaces_the_veto_for_that_exact_content_only(self):
+        fixture = "fixture = 1  # stands in for content Jev would veto\n"
+        self.commit({"scripts/test_fixture.py": fixture})
+        blob = self.git("rev-parse", "HEAD:scripts/test_fixture.py").strip()
+        self.decisions_path.write_text(json.dumps({"scripts/test_fixture.py": {
+            "scope": "public", "by": "carter", "blob": blob, "date": "2026-09-30"}}))
+        # Jev would block it; Carter's exact-blob decision publishes without asking.
+        vetoing = FakeJev({"credential": 0.9})
+        first = self.publish(vetoing)
+        self.assertEqual([a["path"] for a in first["added"]], ["scripts/test_fixture.py"], first)
+        self.assertEqual(vetoing.calls, [])
+        # Any later edit is new content: the normal veto on the diff applies again.
+        self.commit({"scripts/test_fixture.py": fixture + "fixture = 2\n"})
+        blocked = self.publish(FakeJev({"personal": 0.9}))
+        self.assertEqual([b["path"] for b in blocked["blocked"]], ["scripts/test_fixture.py"])
+        self.assertEqual(self.git("show", "main:scripts/test_fixture.py", cwd=self.remote), fixture)
+        # The deterministic scan is never overruled by a decision.
+        leak = next(iter(LEAKS.values()))
+        d = public_dotfiles.decide("scripts/leak.py", leak.encode(), policy=self.policy, decisions={
+            "scripts/leak.py": {"scope": "public", "by": "carter",
+                                "blob": public_dotfiles.blob_oid(leak.encode())}}, client=FakeJev())
+        self.assertEqual((d.scope, d.by), ("held", "scan"))
+
     def test_scanner_catches_bearer_jwt_webhooks_url_credentials_and_hex_keys(self):
         seg = "abcdefghij" + "KLMNOPQRST"
         hexkey = "0123456789" + "abcdef0123456789abcdef"

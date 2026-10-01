@@ -1,7 +1,9 @@
 """Local and gaming-rig update operations."""
 from __future__ import annotations
 
+import contextlib
 import shutil
+import sqlite3
 
 from .config import (
     AUTO_PKGS,
@@ -1174,6 +1176,28 @@ def _dependabot_checks_green(rollup):
     return True, f"{len(rollup)} check(s) green"
 
 
+# GitHub computes `mergeable` lazily: the first read after a push or base change
+# says UNKNOWN and starts the computation.  Skipping on that first read left
+# herdr-web-client#11 unmerged on 2026-09-30 although it was MERGEABLE minutes later.
+MERGEABLE_RECHECKS = 4
+MERGEABLE_RECHECK_SECONDS = 5
+
+
+def _await_mergeable(ctx, nwo, number, *, sleep=time.sleep):
+    """Re-read an UNKNOWN mergeable state a few times; return the last value seen."""
+    state = "UNKNOWN"
+    for _ in range(MERGEABLE_RECHECKS):
+        sleep(MERGEABLE_RECHECK_SECONDS)
+        cp = ctx.gh(["pr", "view", str(number), "--repo", nwo, "--json", "mergeable"], None)
+        try:
+            state = (json.loads(cp.stdout or "{}") or {}).get("mergeable") if cp.returncode == 0 else state
+        except ValueError:
+            pass
+        if state != "UNKNOWN":
+            break
+    return state
+
+
 def _p1_dependabot_merge(dry_run=False, *, ctx=None):
     """Queue green, non-major Dependabot PRs in auto-merge candidate repos.
 
@@ -1232,8 +1256,11 @@ def _p1_dependabot_merge(dry_run=False, *, ctx=None):
             if not green:
                 skip(f"checks not green: {detail}")
                 continue
-            if pr.get("mergeable") != "MERGEABLE":
-                skip(f"not mergeable ({pr.get('mergeable') or 'unknown'})")
+            mergeable = pr.get("mergeable")
+            if mergeable == "UNKNOWN":
+                mergeable = _await_mergeable(ctx, nwo, pr.get("number"))
+            if mergeable != "MERGEABLE":
+                skip(f"not mergeable ({mergeable or 'unknown'})")
                 continue
             base = str(pr.get("baseRefName") or "")
             if base not in eligibility:
@@ -2971,6 +2998,290 @@ def _p1_docker_cleanup(steps, now=None):
         return {**result, "status": "ok", "reason": summary}
     return {**result, "status": "skipped", "reason": "nothing to clean"}
 
+# OMP SQLite self-repair.  agent.db's high-write b-trees (cache,
+# usage_history) were found corrupt on 2026-09-23 and 2026-09-30; cause
+# unknown.  One corrupt target makes homelab-backup reject the whole night, so
+# P1 repairs a corrupt OMP DB only when a rehearsal on a copy proves it lossless.
+OMP_DB_DIR = HOME / ".omp" / "agent"
+# DB file -> homelab-backup target name (~/homelab-backup/config.yaml).
+OMP_DB_BACKUP_TARGETS = {
+    "agent.db": "omp-agent-db",
+    "models.db": "omp-models-db",
+    "history.db": "omp-history-db",
+}
+OMP_DB_REPAIR_DIR = HOME / ".local" / "state" / "omp-dbrepair"
+OMP_DB_REPAIR_KEEP = 3
+OMP_DB_BUSY_MS = 10000
+BACKUP_UNIT = "homelab-backup.service"
+# The unit bounds itself (TimeoutStartSec=30min); this only covers a hung CLI.
+BACKUP_RERUN_TIMEOUT = 35 * 60
+# Only tonight's 03:00 run counts; P1 starts about an hour after it.
+BACKUP_FAILURE_MAX_AGE = timedelta(hours=20)
+_BACKUP_TARGET_FAILED = re.compile(r'msg="target failed" target=(\S+) error="([^"]{0,40})')
+OMP_DB_UNDO_NOTE = (
+    "REINDEX+VACUUM is only applied after a copy proved it lossless, so no undo is "
+    "needed. Restoring the pre-repair copy is NOT a safe undo while OMP runs (live "
+    "writers would race it) and it would reinstate the corruption; it is evidence "
+    "only — use it solely with every omp process stopped."
+)
+
+
+def _ompdb_connect(path, *, readonly):
+    if readonly:
+        conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True,
+                               timeout=OMP_DB_BUSY_MS / 1000, isolation_level=None)
+    else:
+        conn = sqlite3.connect(str(path), timeout=OMP_DB_BUSY_MS / 1000,
+                               isolation_level=None)
+    conn.execute(f"PRAGMA busy_timeout={OMP_DB_BUSY_MS}")
+    return conn
+
+
+def _ompdb_integrity(path):
+    """``PRAGMA integrity_check`` lines through a read-only handle (["ok"] = healthy).
+
+    Full integrity_check, not quick_check: it is the backup's gate and the only
+    one that sees index/table mismatches.  Its messages name pages, rowids and
+    indexes, never column values.
+    """
+    try:
+        with contextlib.closing(_ompdb_connect(path, readonly=True)) as conn:
+            return [str(row[0]) for row in conn.execute("PRAGMA integrity_check")]
+    except sqlite3.Error as error:
+        return [f"sqlite error: {error}"]
+
+
+def _ompdb_quote(name):
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _ompdb_snapshot(path):
+    """Per-table forced-table-scan row counts and auth_* content hashes.
+
+    Virtual tables are skipped; their shadow tables are ordinary tables and are
+    counted.  Hashes cover row content (not rowids) in sorted order so only the
+    digests ever leave this function.
+    """
+    counts, hashes = {}, {}
+    with contextlib.closing(_ompdb_connect(path, readonly=True)) as conn:
+        tables = [
+            name for name, sql in conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name")
+            if not str(sql or "").lstrip().upper().startswith("CREATE VIRTUAL")
+        ]
+        for table in tables:
+            quoted = _ompdb_quote(table)
+            counts[table] = conn.execute(
+                f"SELECT count(*) FROM {quoted} NOT INDEXED").fetchone()[0]
+            if table.startswith("auth_"):
+                rows = sorted(repr(tuple(row)) for row in conn.execute(
+                    f"SELECT * FROM {quoted} NOT INDEXED"))
+                hashes[table] = hashlib.sha256("\n".join(rows).encode()).hexdigest()
+    return counts, hashes
+
+
+def _ompdb_copy(live, dest):
+    """Page-for-page online-backup copy of ``live`` into a private file."""
+    with contextlib.closing(_ompdb_connect(live, readonly=True)) as src, \
+            contextlib.closing(sqlite3.connect(str(dest), isolation_level=None)) as dst:
+        src.backup(dst)
+        # The copy inherits WAL mode; a rollback journal lets read-only
+        # handles open it without creating -wal/-shm side files.
+        dst.execute("PRAGMA journal_mode=DELETE")
+    os.chmod(dest, 0o600)
+
+
+def _ompdb_rebuild(path):
+    """REINDEX then VACUUM ``path`` (a copy or, once gated, the live DB)."""
+    with contextlib.closing(_ompdb_connect(path, readonly=False)) as conn:
+        conn.execute("REINDEX")
+        conn.execute("VACUUM")
+
+
+def _ompdb_prune(state_dir, keep=OMP_DB_REPAIR_KEEP):
+    copies = sorted(state_dir.glob("*-corrupt-*.db"),
+                    key=lambda p: p.stat().st_mtime, reverse=True)
+    for stale in copies[keep:]:
+        stale.unlink(missing_ok=True)
+
+
+def _ompdb_repair_one(live, state_dir, stamp):
+    """Rehearse REINDEX+VACUUM on a copy; apply live only when it proved lossless."""
+    entry = {"db": live.name, "integrity": "corrupt"}
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(state_dir, 0o700)
+    evidence = state_dir / f"{live.stem}-corrupt-{stamp}.db"
+    work = state_dir / f".{live.stem}-repair-{stamp}.db"
+    try:
+        _ompdb_copy(live, evidence)
+        entry["evidence"] = str(evidence)
+        shutil.copyfile(evidence, work)
+        os.chmod(work, 0o600)
+        try:
+            before = _ompdb_snapshot(evidence)
+        except sqlite3.Error as error:
+            entry.update(action="blocked",
+                         reason=f"cannot table-scan the corrupt copy ({error}); "
+                                "losslessness unprovable")
+            return entry
+        _ompdb_rebuild(work)
+        copy_check = _ompdb_integrity(work)
+        after = _ompdb_snapshot(work) if copy_check == ["ok"] else ({}, {})
+        gates = {
+            "copy_integrity_ok": copy_check == ["ok"],
+            "row_counts_equal": before[0] == after[0],
+            "auth_hashes_equal": before[1] == after[1],
+        }
+        entry["gates"] = gates
+        if not all(gates.values()):
+            changed = sorted(t for t in set(before[0]) | set(after[0])
+                             if before[0].get(t) != after[0].get(t))
+            entry.update(
+                action="blocked",
+                reason=("repaired copy failed the lossless gates "
+                        f"({', '.join(k for k, ok in gates.items() if not ok)}"
+                        + (f"; row counts differ in {', '.join(changed[:8])}" if changed
+                           and copy_check == ["ok"] else "")
+                        + (f"; copy integrity: {'; '.join(copy_check[:3])}"
+                           if copy_check != ["ok"] else "")
+                        + "); live DB untouched"),
+            )
+            return entry
+        entry["tables_checked"] = len(before[0])
+        _ompdb_rebuild(live)
+        live_check = _ompdb_integrity(live)
+        entry["live_integrity"] = "ok" if live_check == ["ok"] else "; ".join(live_check[:8])[:600]
+        if live_check == ["ok"]:
+            entry["action"] = "repaired"
+        else:
+            entry.update(action="failed",
+                         reason="live DB still fails integrity_check after REINDEX+VACUUM")
+        return entry
+    except (sqlite3.Error, OSError) as error:
+        entry.update(action="failed", reason=f"repair error: {error}"[:400])
+        return entry
+    finally:
+        for leftover in (work, work.with_name(work.name + "-journal")):
+            leftover.unlink(missing_ok=True)
+        _ompdb_prune(state_dir)
+
+
+def _backup_failed_targets(now):
+    """Tonight's failed homelab-backup run: (failed?, {target: integrity?}, note)."""
+    out, err, code = run_capture_ok(
+        ["systemctl", "--user", "show", "--timestamp=unix", "-p",
+         "Result,ExecMainStatus,ExecMainStartTimestamp,ActiveState", BACKUP_UNIT],
+        timeout=30,
+    )
+    if code != 0:
+        return False, {}, f"systemctl show failed: {(err or out).strip()[:200]}"
+    props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    if props.get("ActiveState") == "activating":
+        return False, {}, "backup is running now"
+    if props.get("Result") == "success":
+        return False, {}, "last backup run succeeded"
+    started = props.get("ExecMainStartTimestamp", "").lstrip("@")
+    try:
+        start = datetime.fromtimestamp(int(started), tz=timezone.utc)
+    except ValueError:
+        return False, {}, "no backup run timestamp"
+    if now - start > BACKUP_FAILURE_MAX_AGE:
+        return False, {}, f"last failed backup run is stale ({start:%Y-%m-%d %H:%MZ})"
+    out, err, code = run_capture_ok(
+        ["journalctl", "--user", "-u", BACKUP_UNIT, "--since", f"@{started}",
+         "-o", "cat", "--no-pager"],
+        timeout=60,
+    )
+    if code != 0:
+        return True, {}, f"journalctl failed: {(err or out).strip()[:200]}"
+    targets = {
+        match.group(1): match.group(2).startswith("integrity check")
+        for match in _BACKUP_TARGET_FAILED.finditer(out)
+    }
+    return True, targets, f"backup run {start:%Y-%m-%d %H:%MZ} failed ({props.get('Result')})"
+
+
+def _ompdb_backup_rerun(repaired_targets, now):
+    """Re-run tonight's failed backup once, only if repaired DBs were its sole cause."""
+    failed, targets, note = _backup_failed_targets(now)
+    if not failed:
+        return {"status": "not_needed", "reason": note}
+    blamed = {t for t, integrity in targets.items() if integrity}
+    other = sorted(set(targets) - (blamed & set(repaired_targets)))
+    if not targets or other or not blamed & set(repaired_targets):
+        cause = (f"other failed target(s): {', '.join(other)}" if other
+                 else "no repaired OMP DB named in the failure")
+        return {"status": "not_run", "reason": f"{note}; {cause} — backup not re-run"}
+    out, err, code = run_capture_ok(
+        ["systemctl", "--user", "start", BACKUP_UNIT], timeout=BACKUP_RERUN_TIMEOUT)
+    if code == 0:
+        return {"status": "passed", "reason": f"{note}; re-run after repair passed"}
+    return {"status": "failed",
+            "reason": f"{note}; re-run after repair failed (exit {code}): "
+                      f"{(err or out).strip()[-300:]}"}
+
+
+def _p1_omp_db_repair(dry_run=False, *, db_dir=None, state_dir=None, now=None):
+    """Integrity-check OMP's SQLite DBs; losslessly repair a corrupt one.
+
+    Never fails P1: problems are ``warning`` rows carrying ``needs_carter``.
+    Dry runs stop after the read-only checks.
+    """
+    db_dir = Path(db_dir or OMP_DB_DIR)
+    state_dir = Path(state_dir or OMP_DB_REPAIR_DIR)
+    now = now or datetime.now(timezone.utc)
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+    print("  [1-] OMP SQLite integrity")
+    dbs, corrupt = [], []
+    for name in OMP_DB_BACKUP_TARGETS:
+        path = db_dir / name
+        if not path.exists():
+            dbs.append({"db": name, "integrity": "missing"})
+            continue
+        check = _ompdb_integrity(path)
+        if check == ["ok"]:
+            dbs.append({"db": name, "integrity": "ok"})
+        else:
+            entry = {"db": name, "integrity": "corrupt",
+                     "problems": "; ".join(check[:8])[:600]}
+            dbs.append(entry)
+            corrupt.append((path, entry))
+    result = {"step": "omp_db_repair", "dbs": dbs}
+    if not corrupt:
+        return {**result, "status": "skipped",
+                "reason": "integrity ok: " + ", ".join(
+                    d["db"] for d in dbs if d["integrity"] == "ok")}
+    names = ", ".join(entry["db"] for _, entry in corrupt)
+    if dry_run:
+        return {**result, "status": "warning", "needs_carter": True,
+                "reason": f"{names} corrupt; dry run — not repaired"}
+
+    for path, entry in corrupt:
+        entry.update(_ompdb_repair_one(path, state_dir, stamp))
+    result["undo"] = OMP_DB_UNDO_NOTE
+    repaired = [OMP_DB_BACKUP_TARGETS[e["db"]] for _, e in corrupt if e["action"] == "repaired"]
+    unresolved = [e for _, e in corrupt if e["action"] != "repaired"]
+    parts = []
+    if repaired:
+        parts.append("repaired losslessly (REINDEX+VACUUM): " + ", ".join(
+            e["db"] for _, e in corrupt if e["action"] == "repaired"))
+        result["backup_rerun"] = _ompdb_backup_rerun(repaired, now)
+        rerun = result["backup_rerun"]
+        if rerun["status"] != "not_needed":
+            parts.append(f"backup {rerun['status'].replace('_', ' ')}: {rerun['reason']}")
+    for entry in unresolved:
+        parts.append(f"{entry['db']} {entry['action']}: {entry.get('reason', '')} "
+                     f"(integrity: {entry['problems'][:200]})")
+    evidence = [e["evidence"] for _, e in corrupt if e.get("evidence")]
+    if evidence:
+        parts.append("pre-repair copy: " + ", ".join(evidence))
+    result["reason"] = "; ".join(parts)[:1500]
+    rerun_status = (result.get("backup_rerun") or {}).get("status")
+    if unresolved or rerun_status in ("failed", "not_run"):
+        return {**result, "status": "warning", "needs_carter": True}
+    return {**result, "status": "ok"}
+
+
 
 def phase_1_apply(run_dir, dry_run=False, *, progress=None):
     """Phase 1: apply safe updates, checkpointing each substep atomically."""
@@ -2995,6 +3306,10 @@ def phase_1_apply(run_dir, dry_run=False, *, progress=None):
         lambda: _p1_gamingrig_maintenance(dry_run=dry_run),
         persist,
     )
+    # OMP DB self-repair precedes every local mutation and every `omp -p`
+    # caller; a dry run only performs its read-only integrity checks.
+    _p1_run_step(steps, "omp_db_repair",
+                 lambda: _p1_omp_db_repair(dry_run=dry_run), persist)
     if dry_run:
         return _finish_p1(
             run_dir,

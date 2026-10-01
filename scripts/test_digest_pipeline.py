@@ -572,6 +572,116 @@ def test_recent_coverage_ledger_blocks_other_section_repeats() -> None:
         check(not ongoing, ongoing)
 
 
+def _shared_url_findings(today: str) -> tuple[str, list[dict]]:
+    """Two distinct raw findings the research model attributed to one URL."""
+    url = "https://www.techpowerup.com/350844/shared-roundup"
+
+    def finding(title: str, event: str, terms: list[str], basis: str) -> dict:
+        return {
+            "title": title,
+            "url": url,
+            "source_domain": "techpowerup.com",
+            "date_published": today,
+            "summary": f"{title} summary.",
+            "category": "Consumer & Edge",
+            "research_angle_id": "consumer-edge",
+            "editorial_significance": "medium",
+            "event": event,
+            "event_terms": terms,
+            "significance_evidence": {
+                "basis": basis, "affected_scope": "sector", "impact": f"{event} impact.",
+            },
+        }
+
+    return url, [
+        finding("Community Mod Brings DLSS 5 to AMD Radeon GPUs",
+                "Community developers ported DLSS 5 neural rendering to Radeon",
+                ["DLSS 5 on AMD", "DLSS-NR-on-AMD"], "major_product_or_platform_shift"),
+        finding("Thermal Grizzly and Noctua Launch WireView Pro II",
+                "Thermal Grizzly and Noctua released the WireView Pro II",
+                ["WireView Pro II", "Thermal Grizzly WireView"], "security_or_safety_incident"),
+    ]
+
+
+def _judge_batch_reply(approve_title: str, drop_ids: bool):
+    """Fake Phase 2 judge: echoes one finding as approved (event prose garbled,
+    as the model may), rejects the rest, optionally losing finding_id."""
+    def reply(system: str, user: str, model: str | None = None) -> str:
+        start = user.index("## Findings to evaluate")
+        batch_json = user[user.index("[", start):user.index("\n\nEvaluate each finding")]
+        items = json.loads(batch_json)
+        approved, rejected = [], []
+        for item in items:
+            if drop_ids:
+                item.pop("finding_id", None)
+            if item["title"] == approve_title:
+                item["event"] = "model-rewritten event"
+                approved.append(item)
+            else:
+                rejected.append({"finding": item, "reason": "low significance"})
+        return json.dumps({"approved": approved, "rejected": rejected})
+    return reply
+
+
+def test_phase_two_shared_url_findings_keep_their_own_metadata() -> None:
+    """Two raw findings sharing one URL must each keep their own event metadata.
+
+    Regression for ai-hardware 2026-09-28: the DLSS-on-AMD and WireView Pro II
+    findings shared a TechPowerUp URL; Phase 2 restored metadata keyed by URL
+    alone, so the approved DLSS story shipped WireView's event, event_terms,
+    and significance_evidence.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        today = datetime.now(timezone.utc).date().isoformat()
+        run_dir = Path(temporary) / catalog.TOPICS["ai-hardware"]["category"] / today
+        run_dir.mkdir(parents=True)
+        url, findings = _shared_url_findings(today)
+        dlss = findings[0]
+        with patch("daily_news.runtime._call_llm_proxy",
+                   side_effect=_judge_batch_reply(dlss["title"], drop_ids=False)):
+            fresh, ongoing = research.phase_2_judge_research(
+                catalog.TOPICS["ai-hardware"], copy.deepcopy(findings), run_dir, {"stories": []},
+            )
+        check(not ongoing, ongoing)
+        check([item["title"] for item in fresh] == [dlss["title"]], fresh)
+        story = fresh[0]
+        for field in ("event", "event_terms", "significance_evidence"):
+            check(story[field] == dlss[field],
+                  f"{field} restored from the other finding sharing {url}: {story[field]!r}")
+        check("finding_id" not in story, "run-local finding_id leaked into the artifact")
+
+
+def test_phase_two_drops_unidentified_shared_url_finding() -> None:
+    """A judged finding that lost its finding_id and shares its URL with another
+    source finding cannot be matched to its own metadata, so it is dropped;
+    a lost id on a URL only one finding carries still restores by URL."""
+    with tempfile.TemporaryDirectory() as temporary:
+        today = datetime.now(timezone.utc).date().isoformat()
+        run_dir = Path(temporary) / catalog.TOPICS["ai-hardware"]["category"] / today
+        run_dir.mkdir(parents=True)
+        _, findings = _shared_url_findings(today)
+        with patch("daily_news.runtime._call_llm_proxy",
+                   side_effect=_judge_batch_reply(findings[0]["title"], drop_ids=True)):
+            fresh, _ = research.phase_2_judge_research(
+                catalog.TOPICS["ai-hardware"], copy.deepcopy(findings), run_dir, {"stories": []},
+            )
+        check(fresh == [], f"unidentifiable shared-URL finding survived: {fresh!r}")
+        judged = json.loads((run_dir / "02-research-judged.json").read_text())
+        check(any(r.get("reason") == "unidentified_shared_url" for r in judged["rejected"]),
+              judged["rejected"])
+
+        unique = copy.deepcopy(findings[0])
+        unique["url"] = "https://www.techpowerup.com/350997/unique-story"
+        run_dir = Path(temporary) / "unique" / catalog.TOPICS["ai-hardware"]["category"] / today
+        run_dir.mkdir(parents=True)
+        with patch("daily_news.runtime._call_llm_proxy",
+                   side_effect=_judge_batch_reply(unique["title"], drop_ids=True)):
+            fresh, _ = research.phase_2_judge_research(
+                catalog.TOPICS["ai-hardware"], [copy.deepcopy(unique)], run_dir, {"stories": []},
+            )
+        check([item["event"] for item in fresh] == [unique["event"]], fresh)
+
+
 def test_ongoing_card_follows_latest_verified_development() -> None:
     """An evidence-backed update replaces the displayed headline/link together.
 
@@ -2957,6 +3067,31 @@ def test_editorial_floor_and_publication_artifact() -> None:
               publication["ongoing"][0])
 
 
+def test_archive_index_urls_rejected() -> None:
+    """Archive, pagination, and bare-date index pages are listings, not articles
+    (digest-quality audit 2026-09-29: ai-hardware 09-28 published the
+    TechPowerUp news archive index as a Fresh story). Every September URL the
+    rule flags is one of these indexes; real article URLs stay eligible."""
+    for listing in (
+        "https://www.techpowerup.com/news-archive?month=0927",
+        "https://github.blog/changelog/month/09-2026/",
+        "https://www.climate.gov/news-features/category/news?page=3",
+        "https://example.com/news/page/2/",
+        "https://example.com/news/2026/09/28/",
+        "https://www.theguardian.com/technology/2026/sep",
+    ):
+        check(contracts.is_listing_url(listing), f"index page not flagged: {listing}")
+    for article in (
+        "https://www.techpowerup.com/350844/nvidia-board-partners-receive-rtx-50-super-but-gddr7-pricing-holds-the-release-back",
+        "https://github.blog/changelog/2026-09-22-opentelemetry-in-the-github-copilot-app/",
+        "https://techcrunch.com/2026/09/28/spacexs-starship-rocket-reaches-orbit-for-the-first-time/",
+        "https://www.gematsu.com/?p=1035212",
+        "https://www.murata.com/en-us/news/event/other/2026/0928",
+        "https://example.com/internet-archive-wins-appeal",
+    ):
+        check(not contracts.is_listing_url(article), f"article flagged as listing: {article}")
+
+
 def test_listing_urls_rejected() -> None:
     """Section/date archive URLs (Guardian .../all) must never be selected into
     Fresh or Ongoing or enter the tracker (digest-quality audit 2026-08-21:
@@ -3228,6 +3363,8 @@ def main() -> None:
         test_phase_two_cross_day_dedup_window_contract,
         test_phase_two_rejects_unvalidated_legacy_followup,
         test_recent_coverage_ledger_blocks_other_section_repeats,
+        test_phase_two_shared_url_findings_keep_their_own_metadata,
+        test_phase_two_drops_unidentified_shared_url_finding,
         test_ongoing_card_follows_latest_verified_development,
         test_runtime_preflight_fails_closed_on_missing_symbol,
         test_phase_inputs_include_actual_code_hashes,
@@ -3266,6 +3403,7 @@ def main() -> None:
         test_ongoing_resurface_cap_cools_recurring_story,
         test_editorial_floor_and_publication_artifact,
         test_listing_urls_rejected,
+        test_archive_index_urls_rejected,
         test_stub_attempts_cleaned_after_success,
         test_asset_cdn_urls_rejected,
         test_proxy_5xx_retry_with_backoff,

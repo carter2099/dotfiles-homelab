@@ -1628,6 +1628,7 @@ def _apply_edit(ctx: ResolveContext, item_id: str, edit: Mapping[str, Any], *, c
     if hit:
         raise ApprovalRefused(f"the new text failed the secret scan ({hit})")
     top = None
+    tracked_dotfile = False
     if commit_doc:
         stdout, _, code = run_capture_ok(["git", "-C", str(path.parent), "rev-parse", "--show-toplevel"])
         if code != 0:
@@ -1636,6 +1637,15 @@ def _apply_edit(ctx: ResolveContext, item_id: str, edit: Mapping[str, Any], *, c
         rel = str(path.resolve().relative_to(top.resolve()))
         dirty, _, _ = run_capture_ok(["git", "-C", str(top), "status", "--porcelain", "--", rel])
         if dirty.strip():
+            raise ApprovalRefused(f"{edit['path']} has uncommitted changes")
+    else:
+        # An approved patch to a tracked private-dotfiles path is committed like any
+        # approved commit (exact path, reviewed diff hash, secret scan, push); left
+        # uncommitted it would only reappear as drift that P9b can never stage.
+        _, _, code = run_capture_ok(["git", f"--git-dir={ctx.git_dir}", f"--work-tree={ctx.home}",
+                                     "ls-files", "--error-unmatch", "--", edit["path"]])
+        tracked_dotfile = code == 0
+        if tracked_dotfile and edit["path"] in _snapshot(ctx):
             raise ApprovalRefused(f"{edit['path']} has uncommitted changes")
     saved = ctx.run_dir / SAVED_DIR / item_id / edit["path"]
     saved.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1649,6 +1659,15 @@ def _apply_edit(ctx: ResolveContext, item_id: str, edit: Mapping[str, Any], *, c
     os.chmod(tmp, mode)
     os.replace(tmp, path)
     undo = f"install -m {mode:o} {shlex.quote(str(saved))} {shlex.quote(str(path))}"
+    if tracked_dotfile:
+        try:
+            committed = execute_commit(ctx, item_id, _path_hashes(ctx, [edit["path"]]),
+                                       f"steward P7c (approved): patch {edit['path']}"[:200])
+        except (Unknown, RuntimeError) as exc:
+            path.write_bytes(data)
+            raise ApprovalRefused(f"commit failed: {_clip(exc, 300)}; the original text was restored") from None
+        return {**committed, "summary": f"Patched {edit['path']} and {committed['summary'][0].lower()}"
+                                        f"{committed['summary'][1:]}"}
     if top is None:
         return {"undo": undo, "summary": f"Patched {edit['path']} (not committed)."}
     msg = f"docs(steward P7c): approved fix in {rel}"

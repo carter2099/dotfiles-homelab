@@ -496,6 +496,21 @@ def _dependabot_merge_lines(step):
     return lines
 
 
+def _omp_db_repair_text(step):
+    """(text, color) for the OMP SQLite self-repair row; ("", "") when all DBs are ok."""
+    status = str(step.get("status") or "")
+    detail = str(step.get("error") or step.get("reason") or "")[:600]
+    if step.get("undo") and "pre-repair copy" in detail:
+        detail += " (restoring that copy is not a safe undo while OMP runs)"
+    if status == "ok":
+        return f"OMP DB: {detail}", "#2a2a36"
+    if status == "warning":
+        return f"OMP DB: needs Carter — {detail}", "#e65100"
+    if status in _P1_FAILURE_STATUSES:
+        return f"OMP DB check: {_p1_status_label(status)} — {detail}", "#c62828"
+    return "", ""
+
+
 def _omp_stale_note(step):
     """Suffix naming OMP sessions that still run a replaced binary."""
     stale = step.get("stale_processes") or {}
@@ -591,6 +606,11 @@ def _html_updates(applied_data):
 
         elif name == "dependabot_merge":
             lines.extend(_p1_line(text, color) for text, color in _dependabot_merge_lines(s))
+
+        elif name == "omp_db_repair":
+            text, color = _omp_db_repair_text(s)
+            if text:
+                lines.append(_p1_line(text, color))
 
         elif name == "worker_omp_refresh":
             if status == "ok":
@@ -1678,6 +1698,8 @@ def _tldr_collect_updates(applied):
         elif step == "dependabot_merge":
             updates.extend(
                 text for text, color in _dependabot_merge_lines(s) if color == "#2a2a36")
+        elif step == "omp_db_repair" and status in ("ok", "warning"):
+            updates.append(_omp_db_repair_text(s)[0])
         elif step == "worker_omp_refresh" and status == "ok":
             updates.append(
                 f"steward worker omp: {s.get('pre_version') or '?'} -> "
@@ -1829,6 +1851,8 @@ def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None, 
                 else _openwebui_update_text(step)
             )[0]
             carter_items.append(f"update rolled back — {text}")
+        if step.get("step") == "omp_db_repair" and step.get("needs_carter"):
+            carter_items.append(_omp_db_repair_text(step)[0])
         if step.get("step") == "dependabot_merge":
             carter_items.extend(
                 f"major Dependabot bump — {pr.get('repo')}#{pr.get('number')}: "
@@ -2556,6 +2580,10 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
                 lines.append(f"- {text}")
         elif name == "dependabot_merge":
             lines.extend(f"- {text}" for text, _ in _dependabot_merge_lines(s))
+        elif name == "omp_db_repair":
+            text, _ = _omp_db_repair_text(s)
+            if text:
+                lines.append(f"- {text}")
         elif name == "worker_omp_refresh" and status == "ok":
             lines.append(
                 f"- steward worker omp: {s.get('pre_version')} -> {s.get('post_version')}"

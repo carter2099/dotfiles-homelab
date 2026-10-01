@@ -1085,8 +1085,13 @@ target keys that apply; `repo` and `doc` are absolute /home/carter/... paths):
 - severity:
 {_SEVERITY_RUBRIC}
 - action (exactly one; the steward validates it and anything invalid goes to Carter):
-  - code_fix: an app-code defect in a ~/dev repo. target.repo = the repo,
-    target.paths = repo-relative files to change.
+  - code_fix: a code defect with a concrete fix in either (a) an app repo under ~/dev:
+    target.repo = the repo, target.paths = repo-relative files; or (b) the automation code
+    under ~/scripts (Daily News, the steward, helpers): target.repo = "/home/carter",
+    target.paths = home-relative files such as "scripts/daily_news/research.py". The fix
+    is made in an isolated sandbox, must pass the area's verify script and a judge, and
+    lands as a PR Carter can object to; the router itself sends steward gate/security
+    files and ~/system-config to Carter, so do not pre-empt that with needs_carter.
   - doc_fix: a statement in a maintained doc (~/notes/docs/**, ~/AGENTS.md) contradicted by
     live evidence. target.doc; target.old_text copied EXACTLY from the file (it must occur
     once); target.new_text grounded in the evidence.

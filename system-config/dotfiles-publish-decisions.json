@@ -22,5 +22,12 @@
       "personal": 0.02
     },
     "scope": "public"
+  },
+  "scripts/test_steward_updates.py": {
+    "blob": "240949dd549ff3e16f5296150089dc1caf437dd8",
+    "by": "carter",
+    "date": "2026-09-30",
+    "reason": "test fixtures build fake credentials at runtime; Jev credential 0.54 over 3 chunks; Carter approved publishing this exact content",
+    "scope": "public"
   }
 }

@@ -69,6 +69,35 @@ def normalize_url(url: str) -> str:
     suffix = f"?{urlencode(query, doseq=True)}" if query else ""
     return f"{host}{path}{suffix}"
 
+# Index-page markers derived from September 2026 research URLs. A path segment
+# naming an archive, a `month`/`page/<n>` pagination segment, a month/page
+# index query, or a path that ends at a bare date is a listing of many
+# articles, never one article (digest-quality audit 2026-09-29: ai-hardware
+# 09-28 published https://www.techpowerup.com/news-archive?month=0927 as a
+# Fresh story). `?p=` is deliberately absent: WordPress uses it for single
+# post IDs (gematsu.com/?p=1035212).
+_LISTING_PATH_SEGMENTS = frozenset({"archive", "archives", "news-archive", "news-archives"})
+_LISTING_QUERY_KEYS = frozenset({"month", "year", "page", "paged"})
+_YEAR_SEGMENT = re.compile(r"(?:19|20)\d{2}")
+_MONTH_SEGMENT = re.compile(
+    r"0?[1-9]|1[0-2]|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec"
+)
+_DAY_SEGMENT = re.compile(r"0?[1-9]|[12]\d|3[01]")
+
+def _ends_at_date(segments: list[str]) -> bool:
+    """True when the path ends with year/month[/day] and no article slug."""
+    for tail in (3, 2):
+        if len(segments) < tail:
+            continue
+        date_parts = segments[-tail:]
+        if (
+            _YEAR_SEGMENT.fullmatch(date_parts[0])
+            and _MONTH_SEGMENT.fullmatch(date_parts[1])
+            and (tail == 2 or _DAY_SEGMENT.fullmatch(date_parts[2]))
+        ):
+            return True
+    return False
+
 def is_listing_url(url: str) -> bool:
     """True when a URL points at a section/date archive listing, not an article.
 
@@ -79,9 +108,32 @@ def is_listing_url(url: str) -> bool:
     selected into Fresh or Ongoing or enter stories-in-flight (digest-quality
     audit 2026-08-21: world-digest ongoing entries on 08-20 and 08-21 were
     the same two Guardian .../all pages, canonicalizing to /us/technology).
+    Archive indexes (`/news-archive?month=0927`), pagination
+    (`?page=3`, `/page/2`, `/changelog/month/09-2026`), and bare-date paths
+    (`/2026/09/28`) are listings too.
     """
-    path = urlsplit((url or "").strip()).path.rstrip("/")
-    return path.lower().endswith("/all")
+    try:
+        parts = urlsplit((url or "").strip())
+    except ValueError:
+        return False
+    segments = [s.lower() for s in parts.path.split("/") if s]
+    if segments and segments[-1] == "all":
+        return True
+    if any(segment in _LISTING_PATH_SEGMENTS for segment in segments):
+        return True
+    if "month" in segments[:-1]:
+        return True
+    if any(
+        segment == "page" and following.isdigit()
+        for segment, following in zip(segments, segments[1:])
+    ):
+        return True
+    if any(
+        key.lower() in _LISTING_QUERY_KEYS
+        for key, _ in parse_qsl(parts.query, keep_blank_values=True)
+    ):
+        return True
+    return _ends_at_date(segments)
 
 _ASSET_CDN_URL_HOSTS = {
     "assets.theregister.com",

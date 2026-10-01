@@ -105,6 +105,7 @@ scripts/.claude-digests-backup/
 /.omp/agent/sessions-automated/
 /.omp/agent/terminal-sessions/
 /.omp/agent/tools/
+/.omp/agent/predict/
 /.omp/autoresearch/
 /.omp/cache/
 /.omp/gpu_cache.json

@@ -348,6 +348,12 @@ def _jev_scope(path: str, text: str, client: Any, today: str, blob: str) -> Deci
     return Decision("held", "jev", f"Jev not confident ({shown})")
 
 
+def _carter_approved(recorded: dict[str, Any] | None, content: bytes) -> bool:
+    """Carter recorded ``public`` for exactly this content (a later edit is vetted normally)."""
+    return (isinstance(recorded, dict) and recorded.get("by") == "carter"
+            and recorded.get("scope") == "public" and recorded.get("blob") == blob_oid(content))
+
+
 def decide(path: str, content: bytes, *, policy: Policy,
            decisions: dict[str, dict[str, Any]],
            client: Any | Callable[[], Any] = None, today: str | None = None) -> Decision:
@@ -358,6 +364,11 @@ def decide(path: str, content: bytes, *, policy: Policy,
     if hit:
         return Decision("held", "scan", hit)
     if policy.is_public(path):
+        if _carter_approved(decisions.get(path), content):
+            # Carter's call replaces the Jev veto for this exact blob only; the
+            # deterministic scan above and the outgoing-snapshot scan still apply.
+            return Decision("public", "decision", "public rule; this exact content approved by carter",
+                            vetted=True)
         return Decision("public", "rule", "public rule")
     recorded = decisions.get(path)
     blob = blob_oid(content)
@@ -625,6 +636,10 @@ def publish(*, dry_run: bool = False, push: bool = True, client: Any = _load_jev
             added.append({"path": path, "reason": reason})
             continue
         old = _git(git_dir, "cat-file", "blob", prev["blob"])
+        if d.vetted and d.by == "decision" and _carter_approved(decisions.get(path), content):
+            final[path] = entry
+            updated.append({"path": path, "reason": d.reason})
+            continue
         verdict, why = veto(path, old, content, get_client())
         if verdict == "publish":
             final[path] = entry
