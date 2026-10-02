@@ -258,6 +258,56 @@ class PublicDotfilesTests(unittest.TestCase):
                                 "blob": public_dotfiles.blob_oid(leak.encode())}}, client=FakeJev())
         self.assertEqual((d.scope, d.by), ("held", "scan"))
 
+    def test_binary_publishes_only_with_carters_exact_blob_decision(self):
+        font = b"wOF2\x00\x01" + bytes(range(256))
+        path = "scripts/fonts/body.woff2"
+        approval = {path: {"scope": "public", "by": "carter", "blob": public_dotfiles.blob_oid(font)}}
+        jev_client = FakeJev(SAFE_SCOPE)
+        d = public_dotfiles.decide(path, font, policy=self.policy, decisions={}, client=jev_client)
+        self.assertEqual((d.scope, d.by, d.reason), ("held", "scan", public_dotfiles.BINARY_REVIEW))
+        d = public_dotfiles.decide(path, font, policy=self.policy, decisions=approval, client=jev_client)
+        self.assertEqual((d.scope, d.by, d.vetted), ("public", "decision", True))
+        # Approval of other content does not carry over to a changed blob.
+        d = public_dotfiles.decide(path, font + b"\x00", policy=self.policy, decisions=approval,
+                                   client=jev_client)
+        self.assertEqual((d.scope, d.by), ("held", "scan"))
+        # Non-UTF-8 content is lifted the same way.
+        latin = "caf\xe9\n".encode("latin-1")
+        d = public_dotfiles.decide("scripts/notes.txt", latin, policy=self.policy, decisions={
+            "scripts/notes.txt": {"scope": "public", "by": "carter",
+                                  "blob": public_dotfiles.blob_oid(latin)}}, client=jev_client)
+        self.assertEqual((d.scope, d.by), ("public", "decision"))
+        # Every other scan hit still holds, approval or not.
+        d = public_dotfiles.decide("scripts/deploy.key", font, policy=self.policy, decisions={
+            "scripts/deploy.key": approval[path]}, client=jev_client)
+        self.assertEqual((d.scope, d.by), ("held", "scan"))
+        self.assertEqual(jev_client.calls, [])
+
+    def test_approved_binary_publishes_and_updates_without_jev(self):
+        font, other = b"wOF2\x00\x01" + bytes(range(256)), b"wOF2\x00\x02" + bytes(range(256))
+        for rel, body in (("scripts/fonts/body.woff2", font), ("scripts/fonts/other.woff2", other)):
+            (self.src / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.src / rel).write_bytes(body)
+        self.commit({})
+        self.decisions_path.write_text(json.dumps({"scripts/fonts/body.woff2": {
+            "scope": "public", "by": "carter", "blob": public_dotfiles.blob_oid(font)}}))
+        unavailable = FakeJev(error=jev.JevUnavailable("network"))
+        dry = self.publish(unavailable, dry_run=True)
+        self.assertEqual([a["path"] for a in dry["added"]], ["scripts/fonts/body.woff2"], dry)
+        self.assertEqual([h["path"] for h in dry["held"]], ["scripts/fonts/other.woff2"], dry)
+        self.assertEqual(self.publish(unavailable)["status"], "published")
+        # An approved new blob of an already-public binary replaces it, also without Jev.
+        newer = font + b"\x00\x03"
+        (self.src / "scripts/fonts/body.woff2").write_bytes(newer)
+        self.commit({})
+        self.decisions_path.write_text(json.dumps({"scripts/fonts/body.woff2": {
+            "scope": "public", "by": "carter", "blob": public_dotfiles.blob_oid(newer)}}))
+        result = self.publish(unavailable)
+        self.assertEqual([u["path"] for u in result["updated"]], ["scripts/fonts/body.woff2"], result)
+        self.assertEqual(unavailable.calls, [])
+        blob = self.git("rev-parse", "main:scripts/fonts/body.woff2", cwd=self.remote).strip()
+        self.assertEqual(blob, public_dotfiles.blob_oid(newer))
+
     def test_scanner_catches_bearer_jwt_webhooks_url_credentials_and_hex_keys(self):
         seg = "abcdefghij" + "KLMNOPQRST"
         hexkey = "0123456789" + "abcdef0123456789abcdef"

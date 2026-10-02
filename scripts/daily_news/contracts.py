@@ -1,4 +1,4 @@
-"""Source-backed Daily News contracts: URLs, dates, dedup, and tracking."""
+"""Source-backed Daily News contracts: URLs, dates, and dedup."""
 from __future__ import annotations
 
 import hashlib
@@ -17,18 +17,11 @@ from workflow_state import atomic_write_json
 from .attention import canonicalize_publisher_url, normalize_editorial_significance
 from .catalog import (
     CROSS_DAY_DEDUP_DAYS,
-    COOL_AFTER_DAYS,
     HTML_FETCH_HEADERS,
-    DEVELOPING_STORY_RULES,
-    DEVELOPMENT_HISTORY_CAP,
-    FOLLOWUP_STORY_CAP,
-    MIN_DEVELOPMENT_DAYS,
-    PRUNE_AFTER_DAYS,
     REFERENCED_URLS_SCHEMA_VERSION,
     REFERENCED_URL_SKIP_HOSTS,
     REFERENCED_URL_SKIP_SEGMENTS,
     REFERENCED_URL_TIMEOUT,
-    RESURFACE_CAP_DAYS,
     TOPICS,
 )
 
@@ -105,9 +98,9 @@ def is_listing_url(url: str) -> bool:
     article's title, e.g. https://www.theguardian.com/technology/2026/aug/18/all
     — fetching that page returns the section listing ("Technology | The
     Guardian") and the article URL never exists. Those listings must never be
-    selected into Fresh or Ongoing or enter stories-in-flight (digest-quality
-    audit 2026-08-21: world-digest ongoing entries on 08-20 and 08-21 were
-    the same two Guardian .../all pages, canonicalizing to /us/technology).
+    selected into Fresh (digest-quality audit 2026-08-21: world-digest entries
+    on 08-20 and 08-21 were the same two Guardian .../all pages, canonicalizing
+    to /us/technology).
     Archive indexes (`/news-archive?month=0927`), pagination
     (`?page=3`, `/page/2`, `/changelog/month/09-2026`), and bare-date paths
     (`/2026/09/28`) are listings too.
@@ -215,11 +208,10 @@ def load_cross_topic_urls(
             continue
         if not isinstance(data, dict):
             continue
-        for story in data.get("fresh", []) + data.get("ongoing", []):
-            for url in _curated_story_urls(story):
-                normalized = coverage_key(url)
-                if normalized:
-                    blocked.add(normalized)
+        for story in data.get("fresh", []):
+            normalized = coverage_key(story.get("url", ""))
+            if normalized:
+                blocked.add(normalized)
         # Same-event dedup: later topics also block the canonical/related links
         # recorded from earlier topics' selected stories, so the same event
         # under a different URL is not curated twice (digest-quality audit
@@ -315,7 +307,6 @@ def collect_referenced_urls(page_url: str) -> list[str]:
 def record_referenced_urls(
     topic: dict,
     fresh: list[dict],
-    ongoing: list[dict],
     run_dir: Path,
 ) -> None:
     """Record canonical/related links from each selected story for later topics.
@@ -328,8 +319,7 @@ def record_referenced_urls(
     contributes no links and never fails the run.
     """
     output_path = run_dir / "referenced-urls.json"
-    stories = fresh + ongoing
-    if not stories:
+    if not fresh:
         try:
             output_path.unlink()
         except OSError:
@@ -341,7 +331,7 @@ def record_referenced_urls(
                 "url": s.get("url", ""),
                 "referenced_urls": collect_referenced_urls(s.get("url", "")),
             },
-            stories,
+            fresh,
         ))
     data = {
         "schema_version": REFERENCED_URLS_SCHEMA_VERSION,
@@ -350,16 +340,12 @@ def record_referenced_urls(
     }
     atomic_write_json(output_path, data)
     total = sum(len(r["referenced_urls"]) for r in records)
-    print(f"  [dedup] recorded {total} referenced link(s) across {len(stories)} "
+    print(f"  [dedup] recorded {total} referenced link(s) across {len(fresh)} "
           "selected story(s) for cross-topic same-event blocking")
 
 def coverage_key(url: str) -> str:
     """Canonical dedup key: publisher canonicalization, then URL normalization."""
     return normalize_url(canonicalize_publisher_url(url or ""))
-
-def _curated_story_urls(story: dict) -> list[str]:
-    """URLs a curated story occupied: its displayed link and tracker identity."""
-    return [story.get("url", ""), story.get("tracker_url", "")]
 
 def load_recent_coverage_ledger(digests_root: Path, today: date, days: int) -> set[str]:
     """Collect canonical URLs any section covered in the previous `days` days.
@@ -367,7 +353,7 @@ def load_recent_coverage_ledger(digests_root: Path, today: date, days: int) -> s
     One ledger spans every category so a story cannot repeat under a different
     section the next day (2026-09-16/17: Salesforce AIforce ran in AI & Tech
     and then Agents). Per category and day it reads:
-      1. <category>/<date>/06-curated.json — structured fresh+ongoing URLs
+      1. <category>/<date>/06-curated.json — structured fresh URLs
          (authoritative; run dirs are auto-cleaned after 14 days);
       2. <category>/<date>/referenced-urls.json — canonical/source links the
          covered articles cited, so the same event under another URL is blocked;
@@ -390,10 +376,9 @@ def load_recent_coverage_ledger(digests_root: Path, today: date, days: int) -> s
             try:
                 data = json.loads(curated.read_text())
                 if isinstance(data, dict):
-                    for story in data.get("fresh", []) + data.get("ongoing", []):
+                    for story in data.get("fresh", []):
                         if isinstance(story, dict):
-                            for url in _curated_story_urls(story):
-                                add(url)
+                            add(story.get("url", ""))
                     structured = True
             except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
                 pass
@@ -414,100 +399,6 @@ def load_recent_coverage_ledger(digests_root: Path, today: date, days: int) -> s
                 for match in re.finditer(r"\[[^\]]*\]\((https?://[^)\s]+)\)", md_file.read_text()):
                     add(match.group(1))
     return covered
-
-def consecutive_surfaced_days(digest_dir: Path, url: str, today: date) -> int:
-    """How many consecutive prior digest days (ending yesterday) surfaced `url`.
-
-    Same per-day sources as load_recent_coverage_ledger, limited to this
-    section: the run dir's 06-curated.json (authoritative; an ongoing card
-    matches by its displayed link or tracker identity) and the archived
-    <date>.md fallback.
-    """
-    normalized = normalize_url(url)
-    days = 0
-    day = today - timedelta(days=1)
-    while True:
-        day_str = day.isoformat()
-        appeared = False
-        curated = digest_dir / day_str / "06-curated.json"
-        if curated.exists():
-            try:
-                data = json.loads(curated.read_text())
-                for story in data.get("fresh", []) + data.get("ongoing", []):
-                    if normalized in {
-                        normalize_url(candidate) for candidate in _curated_story_urls(story)
-                    }:
-                        appeared = True
-                        break
-            except (json.JSONDecodeError, ValueError):
-                appeared = False
-        else:
-            md_file = digest_dir / f"{day_str}.md"
-            if md_file.exists():
-                appeared = any(
-                    normalize_url(m.group(1)) == normalized
-                    for m in re.finditer(
-                        r"\[[^\]]*\]\((https?://[^)\s]+)\)", md_file.read_text()
-                    )
-                )
-        if not appeared:
-            break
-        days += 1
-        day -= timedelta(days=1)
-    return days
-
-def enforce_ongoing_resurface_cap(
-    proposal: dict,
-    stories_in_flight: dict,
-    digest_dir: Path,
-    today: date | None = None,
-) -> tuple[list[str], list[dict]]:
-    """Cool a qualified story after too many evidence-free resurfacings.
-
-    Displaying a story never advances evidence-backed activity. The cap still
-    bounds consecutive repetition before the five-day inactivity rule: after
-    RESURFACE_CAP_DAYS appearances, the next selection is dropped and receives
-    an administrative cooled status. Only a selected, source-linked material
-    development resets the counter.
-    """
-    warnings: list[str] = []
-    ops: list[dict] = []
-    today = today or datetime.now(timezone.utc).date()
-    story_by_url = {
-        normalize_url(story.get("url", "")): story
-        for story in stories_in_flight.get("stories", [])
-    }
-    # Evidence-backed update ops (validation already requires same-story
-    # evidence) count as genuine development and reset the cap.
-    evidenced_urls = {
-        normalize_url(op.get("story_url", ""))
-        for op in proposal.get("story_state_proposals", [])
-        if op.get("operation") == "update" and op.get("evidence_candidate_ids")
-    }
-    kept: list[dict] = []
-    for selection in proposal.get("selected_ongoing", []):
-        url = normalize_url(selection.get("story_url", ""))
-        prior_days = consecutive_surfaced_days(digest_dir, url, today)
-        if prior_days >= RESURFACE_CAP_DAYS and url not in evidenced_urls:
-            story = story_by_url.get(url)
-            warnings.append(
-                f"cooled recurring ongoing story surfaced {prior_days + 1} "
-                "consecutive days without an evidence-backed development"
-            )
-            if story is not None:
-                ops.append({
-                    "operation": "update",
-                    "story_url": story.get("url", ""),
-                    "evidence_candidate_ids": [],
-                    "latest_dev": story.get("latest_dev", ""),
-                    "editorial_significance": story.get("editorial_significance", "medium"),
-                    "status": "cooled",
-                })
-            continue
-        kept.append(selection)
-    if ops:
-        proposal["selected_ongoing"] = kept
-    return warnings, ops
 
 def parse_date(date_str: str | None) -> datetime | None:
     """Parse a date string into a UTC-aware datetime. Returns None on failure."""
@@ -550,8 +441,8 @@ def is_fresh_eligible(candidate: dict, yesterday: date, today: date | None = Non
     that date is within the last 24h (>= yesterday) and not in the future
     (<= today). A candidate with no parseable date is kept, mirroring Phase 5's
     pass-through for undetermined dates. This deterministic gate is the
-    backstop against the editorial model or critic placing ongoing-window
-    stories under Fresh (digest-quality audit 2026-08-12) and against
+    backstop against the editorial model or critic placing older stories
+    under Fresh (digest-quality audit 2026-08-12) and against
     future-dated candidates shipping under Fresh (digest-quality audit
     2026-08-14: a 2026-10-15-dated story rendered under "Fresh — Last 24 Hours"
     in the 2026-08-12 ai-tech digest).
@@ -562,206 +453,3 @@ def is_fresh_eligible(candidate: dict, yesterday: date, today: date | None = Non
     if fresh_date is None:
         return True
     return yesterday <= fresh_date.date() <= today
-
-def story_development_dates(story: dict) -> set[str]:
-    """Return distinct evidence-backed UTC dates for a tracked story.
-
-    Legacy tracker entries have no evidence history. Treat only first_seen as
-    evidence; last_updated may contain an old evidence-free display touch.
-    """
-    dates: set[str] = set()
-    developments = story.get("developments", [])
-    if isinstance(developments, list):
-        for development in developments:
-            if not isinstance(development, dict):
-                continue
-            parsed = parse_date(development.get("date"))
-            if parsed is not None:
-                dates.add(parsed.date().isoformat())
-    if dates:
-        return dates
-    initial = parse_date(story.get("first_seen") or story.get("last_updated"))
-    return {initial.date().isoformat()} if initial is not None else set()
-
-def has_validated_high_significance(story: dict) -> bool:
-    """True only when a high label carries accepted structured evidence."""
-    return (
-        story.get("editorial_significance") == "high"
-        and isinstance(story.get("significance_evidence"), dict)
-        and story.get("significance_validation", {}).get("status") == "accepted"
-    )
-
-def normalize_story_tracking(story: dict, today: date | None = None) -> dict:
-    """Migrate one tracker entry to auditable evidence and significance fields."""
-    if today is None:
-        today = datetime.now(timezone.utc).date()
-    normalize_editorial_significance(story)
-    if story.get("url"):
-        story["url"] = canonicalize_publisher_url(story["url"])
-    if not parse_date(story.get("first_seen")):
-        fallback = parse_date(story.get("last_updated"))
-        story["first_seen"] = (
-            fallback.date().isoformat() if fallback is not None else today.isoformat()
-        )
-
-    normalized: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    developments = story.get("developments", [])
-    if isinstance(developments, list):
-        for development in developments:
-            if not isinstance(development, dict):
-                continue
-            parsed = parse_date(development.get("date"))
-            url = str(development.get("url", "")).strip()
-            if parsed is None:
-                continue
-            item = (parsed.date().isoformat(), url)
-            if item in seen:
-                continue
-            seen.add(item)
-            normalized.append({"date": item[0], "url": item[1]})
-
-    if not normalized:
-        normalized.append({
-            "date": story["first_seen"],
-            "url": str(story.get("url", "")).strip(),
-        })
-    normalized.sort(key=lambda item: (item["date"], item["url"]))
-    story["developments"] = normalized[-DEVELOPMENT_HISTORY_CAP:]
-    story["last_updated"] = max(item["date"] for item in normalized)
-    return story
-
-def is_developing_story(story: dict) -> bool:
-    """True only for validated-high stories with evidence on multiple days."""
-    return (
-        has_validated_high_significance(story)
-        and len(story_development_dates(story)) >= MIN_DEVELOPMENT_DAYS
-    )
-
-def tracker_display_source(story: dict) -> dict | None:
-    """Return the headline, link, and date that supplied the latest summary.
-
-    A Developing and Ongoing card must show the source of its newest summary
-    (2026-09-21/22: "House approves Russia sanctions bill, sending it to
-    Trump" sat above a summary saying the bill had been signed). Evidence-backed
-    updates record `latest_source`; it is valid only while it matches a
-    development on the newest evidence date. A record whose newest evidence is
-    the tracked article itself displays that article. Anything else cannot
-    prove which source supplied its summary and returns None (withheld).
-    """
-    dated = [
-        (parsed.date().isoformat(), coverage_key(development.get("url", "")))
-        for development in story.get("developments", [])
-        if isinstance(development, dict)
-        and (parsed := parse_date(development.get("date"))) is not None
-    ]
-    root = coverage_key(story.get("url", ""))
-    if dated:
-        newest = max(day for day, _ in dated)
-        newest_urls = {url for day, url in dated if day == newest}
-    else:
-        newest_urls = {root}
-    source = story.get("latest_source")
-    if (
-        isinstance(source, dict)
-        and str(source.get("title", "")).strip()
-        and coverage_key(source.get("url", "")) in newest_urls
-    ):
-        return {
-            "title": str(source["title"]).strip(),
-            "url": str(source.get("url", "")).strip(),
-            "date": str(source.get("date", "")).strip(),
-        }
-    if root and newest_urls == {root} and str(story.get("title", "")).strip():
-        return {"title": str(story["title"]).strip(), "url": story.get("url", ""), "date": ""}
-    return None
-
-def recover_latest_source(story: dict, digest_dir: Path) -> bool:
-    """Backfill `latest_source` for a legacy record from its evidence run.
-
-    Records written before `latest_source` existed still name the article
-    behind their newest evidence in `developments`. When exactly one article
-    supplied that date's evidence and the section's run for that date selected
-    it under Fresh, the run's curated entry proves the headline, link, and
-    publication date. Anything less stays unproven. Returns True on recovery.
-    """
-    if tracker_display_source(story) is not None:
-        return False
-    dated: dict[str, set[str]] = {}
-    for development in story.get("developments", []):
-        if not isinstance(development, dict):
-            continue
-        parsed = parse_date(development.get("date"))
-        url = str(development.get("url", "")).strip()
-        if parsed is not None and url:
-            dated.setdefault(parsed.date().isoformat(), set()).add(url)
-    if not dated:
-        return False
-    newest = max(dated)
-    if len({coverage_key(url) for url in dated[newest]}) != 1:
-        return False
-    evidence_key = coverage_key(next(iter(dated[newest])))
-    try:
-        curated = json.loads((digest_dir / newest / "06-curated.json").read_text())
-        fresh = curated.get("fresh", [])
-    except (OSError, json.JSONDecodeError, ValueError, AttributeError):
-        return False
-    for entry in fresh if isinstance(fresh, list) else []:
-        if (
-            isinstance(entry, dict)
-            and coverage_key(entry.get("url", "")) == evidence_key
-            and str(entry.get("title", "")).strip()
-        ):
-            published = candidate_fresh_date(entry, date.fromisoformat(newest))
-            story["latest_source"] = {
-                "title": str(entry["title"]).strip(),
-                "url": str(entry.get("url", "")).strip(),
-                "date": published.date().isoformat() if published is not None else "",
-            }
-            return True
-    return False
-
-def build_developing_followup_angle(
-    stories_in_flight: dict | None,
-    today: date | None = None,
-) -> dict | None:
-    """Build one bounded research angle for material tracker follow-ups."""
-    if not stories_in_flight:
-        return None
-    if today is None:
-        today = datetime.now(timezone.utc).date()
-    tracked = [
-        story for story in stories_in_flight.get("stories", [])
-        if story.get("status", "active") in ("active", "cooled")
-        and has_validated_high_significance(story)
-        and story.get("first_seen") != today.isoformat()
-        and not is_listing_url(story.get("url", ""))
-        and not is_asset_cdn_url(story.get("url", ""))
-    ]
-    tracked = sorted(
-        tracked, key=lambda story: story.get("last_updated", ""), reverse=True
-    )[:FOLLOWUP_STORY_CAP]
-    if not tracked:
-        return None
-
-    context = [{
-        "title": story.get("title", ""),
-        "story_url": story.get("url", ""),
-        "latest_confirmed_development": story.get("latest_dev", ""),
-        "first_seen": story.get("first_seen", ""),
-        "last_evidence_date": story.get("last_updated", ""),
-        "status": story.get("status", "active"),
-    } for story in tracked]
-    prompt = (
-        "Search specifically for material developments from the last 24 hours in "
-        "the high-significance tracked stories below. Search each story; zero results "
-        "is a valid and preferable answer when nothing materially changed.\n\n"
-        f"{DEVELOPING_STORY_RULES}\n"
-        "Return only articles that report a new material fact after the supplied "
-        "last_evidence_date. Exclude recaps, explainers, opinions, reactions without "
-        "new action, and articles connected only by a broad theme. Each returned "
-        "finding must include `develops_story_url`, copied exactly from the matching "
-        "`story_url` below. Never invent a relationship or URL.\n\n"
-        f"Tracked stories:\n{json.dumps(context, indent=2)}"
-    )
-    return {"id": "developing-followups", "prompt": prompt, "optional": True}

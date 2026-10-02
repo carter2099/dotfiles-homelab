@@ -88,8 +88,7 @@ def validate_standfirst(standfirst: str, stories: list[dict]) -> tuple[bool, str
     ):
         return False, "standfirst uses digest-style meta language"
     source_text = " ".join(
-        f"{story.get('title', '')} {story.get('summary', '')} "
-        f"{story.get('why_still_relevant', '')}"
+        f"{story.get('title', '')} {story.get('summary', '')}"
         for story in stories
     )
     source_numbers = set(re.findall(r"\b\d[\d,.]*%?\b", source_text))
@@ -149,19 +148,18 @@ def first_complete_sentence(value: Any) -> str:
     return ""
 
 
-def fallback_standfirst(fresh: list[dict], ongoing: list[dict]) -> str:
+def fallback_standfirst(fresh: list[dict]) -> str:
     """Deterministic standfirst from complete summary sentences.
 
     The sentence-based output is re-validated against the source stories and
     degrades to a lead-title standfirst when it does not validate, so a
     truncated fragment like "...after the Aug." can never be published.
     """
-    stories = fresh or ongoing
-    if not stories:
+    if not fresh:
         return "No publishable stories were selected for this section."
     sentences = [
         first_complete_sentence(story.get("summary", ""))
-        for story in stories[:3]
+        for story in fresh[:3]
     ]
     sentences = [sentence for sentence in sentences if sentence]
     candidates: list[str] = []
@@ -170,10 +168,10 @@ def fallback_standfirst(fresh: list[dict], ongoing: list[dict]) -> str:
         if len(sentences) > 1 and len(f"{standfirst} {sentences[1]}") <= 850:
             standfirst = f"{standfirst} {sentences[1]}"
         candidates.append(standfirst)
-    title = " ".join(str(stories[0].get("title", "Lead story")).split())
+    title = " ".join(str(fresh[0].get("title", "Lead story")).split())
     candidates.append(title if re.search(r"[.!?…]$", title) else f"{title}.")
     for candidate in candidates:
-        valid, _ = validate_standfirst(candidate, stories)
+        valid, _ = validate_standfirst(candidate, fresh)
         if valid:
             return candidate
     # Neither candidate validated (usually a short title); keep the
@@ -217,16 +215,14 @@ def summarize_model_error(error: Exception) -> str:
 def generate_section_standfirst(
     topic: dict,
     fresh: list[dict],
-    ongoing: list[dict],
     run_dir: Path,
 ) -> str:
     """Generate newspaper copy only after selection and priority ranking."""
     artifact_path = run_dir / "07-standfirst.json"
-    stories = fresh + ongoing
-    story_fingerprint = standfirst_story_fingerprint(stories)
+    story_fingerprint = standfirst_story_fingerprint(fresh)
     phase_inputs = runtime.phase_inputs(
         "standfirst", topic=topic,
-        upstream={"stories": runtime.canonical_fingerprint(stories)},
+        upstream={"stories": runtime.canonical_fingerprint(fresh)},
         policy={"prompt_version": STANDFIRST_PROMPT_VERSION},
     )
     state, cached = runtime.begin_or_load_phase(
@@ -238,13 +234,13 @@ def generate_section_standfirst(
         validator=lambda value: (
             isinstance(value, dict)
             and value.get("story_fingerprint") == story_fingerprint
-            and validate_standfirst(value.get("standfirst", ""), stories)[0]
+            and validate_standfirst(value.get("standfirst", ""), fresh)[0]
         ),
     )
     if cached is not None:
         return str(cached["standfirst"])
-    if not stories:
-        standfirst = fallback_standfirst(fresh, ongoing)
+    if not fresh:
+        standfirst = fallback_standfirst(fresh)
         runtime.complete_phase_json(
             state,
             "standfirst",
@@ -282,7 +278,7 @@ def generate_section_standfirst(
     )
     user = (
         f"Newspaper section: {topic['web_title']}\n\n"
-        f"Approved stories in priority order:\n{json.dumps(stories, indent=2)}"
+        f"Approved stories in priority order:\n{json.dumps(fresh, indent=2)}"
     )
     errors: list[str] = []
     standfirst = ""
@@ -297,7 +293,7 @@ def generate_section_standfirst(
             if not isinstance(result, dict):
                 raise ValueError("standfirst output must be a JSON object")
             candidate = " ".join(str(result.get("standfirst", "")).split())
-            valid, reason = validate_standfirst(candidate, stories)
+            valid, reason = validate_standfirst(candidate, fresh)
             if not valid:
                 raise ValueError(reason)
             standfirst = candidate
@@ -311,7 +307,7 @@ def generate_section_standfirst(
                 f"{error_summary}"
             )
     if not standfirst:
-        standfirst = fallback_standfirst(fresh, ongoing)
+        standfirst = fallback_standfirst(fresh)
         status = "deterministic_fallback"
     runtime.complete_phase_json(
         state,

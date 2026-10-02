@@ -164,9 +164,17 @@ git checkout main
 
 ```bash
 cd ~/dev/hyperliquid
+git ls-files -z | xargs -0 chmod a+r
 RBENV_VERSION=3.4.10 bundle exec rake build
+tar -xOf pkg/hyperliquid-X.Y.Z.gem data.tar.gz | tar -tvz | grep -- '-rw-------'   # must print nothing
 sha256sum pkg/hyperliquid-X.Y.Z.gem
 ```
+
+RubyGems packages file modes verbatim, and files written by the scheduled
+service (UMask=0077) are `0600` (1.9.2 shipped `CHANGELOG.md`, `CLAUDE.md` and
+`lib/hyperliquid/version.rb` as `-rw-------`). `chmod a+r` changes no tracked
+content (`git status` stays clean). If the `grep` prints anything, stop: fix the
+mode, rebuild, and re-check before asking for the OTP.
 
 ## Step 14: Ask Carter for the OTP (last step before publishing)
 
@@ -200,6 +208,7 @@ The `GitHub Release` run for `vX.Y.Z` must finish `success` and the release must
 
 Edit `~/agent-state/hyperliquid-sdk.md`:
 - Update **SDK version** to the new version.
+- If the `📝 bug` gem-file-mode entry is open and Step 13's mode check printed nothing, mark it ✅ with the version.
 - Add a row to **Run History** noting: date, scope, unit test count + rubocop status, integration pass/fail counts (and which were waived), CI status, gem push status, tag/GitHub Release status.
 
 ## Step 18: Confirm to Carter

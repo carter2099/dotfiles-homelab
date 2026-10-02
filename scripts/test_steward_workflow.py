@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from steward import dotfiles, public_dotfiles, report, resolver, workflow
+from steward import dotfiles, public_dotfiles, report, resolver, runtime, workflow
 from workflow_state import WorkflowState
 
 
@@ -495,6 +497,69 @@ class StewardWorkflowArgumentTests(unittest.TestCase):
             self.assertEqual(state.phase_record("resolve")["completion_outcome"], "degraded")
             for phase in ("render", "archive", "dotfiles", "public-dotfiles"):
                 self.assertEqual(state.phase_record(phase)["status"], "succeeded")
+
+
+class HostRebootRecordTests(unittest.TestCase):
+    def _reboot(self, root, run_dir, dry_run=False, pkgs=True):
+        flag = root / "reboot-required"
+        flag.write_text("*** System restart required ***\n")
+        pkgs_path = root / "reboot-required.pkgs"
+        if pkgs:
+            pkgs_path.write_text("linux-image-6.8.0-146-generic\nlinux-base\n")
+        boot = root / "boot_id"
+        boot.write_text("boot-before\n")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((list(cmd), (run_dir / "reboot.json").exists()))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with (
+            mock.patch.multiple(runtime, REBOOT_REQUIRED_PATH=flag, REBOOT_PKGS_PATH=pkgs_path,
+                                BOOT_ID_PATH=boot, PENDING_PATH=root / "pending.md"),
+            mock.patch.object(runtime, "run", side_effect=fake_run),
+            mock.patch.object(runtime, "run_capture", side_effect=lambda cmd, **kw: (
+                "6.8.0-142-generic" if cmd == ["uname", "-r"] else "")),
+        ):
+            triggered = runtime._reboot_if_needed(run_dir, "P3", dry_run=dry_run)
+        return triggered, calls
+
+    def test_reboot_records_kernel_boot_id_and_packages_before_rebooting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "2026-10-01"
+            run_dir.mkdir()
+            triggered, calls = self._reboot(root, run_dir)
+            self.assertTrue(triggered)
+            # reboot.json is durable before the reboot command runs.
+            self.assertEqual(calls, [(["sudo", "systemctl", "reboot"], True)])
+            record = json.loads((run_dir / "reboot.json").read_text())
+            self.assertRegex(record.pop("requested_at"), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+            self.assertEqual(record, {
+                "phase": "P3", "kernel_before": "6.8.0-142-generic",
+                "boot_id_before": "boot-before",
+                "packages": ["linux-image-6.8.0-146-generic", "linux-base"],
+            })
+            self.assertTrue((root / "pending.md").exists())
+
+    def test_unreadable_package_list_records_empty_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "2026-10-01"
+            run_dir.mkdir()
+            self._reboot(root, run_dir, pkgs=False)
+            self.assertEqual(json.loads((run_dir / "reboot.json").read_text())["packages"], [])
+
+    def test_dry_run_neither_records_nor_reboots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "2026-10-01"
+            run_dir.mkdir()
+            triggered, calls = self._reboot(root, run_dir, dry_run=True)
+            self.assertFalse(triggered)
+            self.assertEqual(calls, [])
+            self.assertFalse((run_dir / "reboot.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

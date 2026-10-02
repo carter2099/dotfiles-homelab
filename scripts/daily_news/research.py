@@ -60,12 +60,8 @@ def batch(items: list[Any], size: int = BATCH_SIZE) -> list[list[Any]]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 @runtime.track_phase_failure("research")
-def phase_1_research(
-    topic: dict,
-    run_dir: Path,
-    stories_in_flight: dict | None = None,
-) -> list[dict]:
-    """Phase 1: Run broad discovery plus bounded tracked-story follow-ups.
+def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
+    """Phase 1: Run broad discovery across the topic's research angles.
 
     Each research angle gets its own omp call and uses web search. Returns the
     merged findings with their originating angle preserved.
@@ -78,7 +74,6 @@ def phase_1_research(
     output_path = run_dir / "01-research-raw.json"
     phase_inputs = runtime.phase_inputs(
         "research", topic=topic,
-        upstream={"stories_in_flight": runtime.canonical_fingerprint(stories_in_flight or {})},
         policy={"angles": topic.get("research_angles", []), "model": runtime._effective_model(runtime.MODEL)},
     )
     state, cached = runtime.begin_or_load_phase(
@@ -90,9 +85,6 @@ def phase_1_research(
 
     rubric = editorial_significance_rubric_text(topic)
     angles = list(topic["research_angles"])
-    followup_angle = build_developing_followup_angle(stories_in_flight)
-    if followup_angle is not None:
-        angles.append(followup_angle)
 
     system_prompt = (
         "You are a research assistant for a daily newspaper. Search the web for recent "
@@ -126,12 +118,9 @@ def phase_1_research(
         '"event_terms": ["2-4 distinctive English names or phrases that must all identify '
         'this event"]}\n'
         "Event terms are for deterministic coverage measurement. Generate terms and aliases, "
-        "but never estimate popularity, virality, audience interest, or an attention score. "
-        "A tracked-story follow-up must also include `develops_story_url` exactly "
-        "as supplied by that angle; otherwise omit that field.\n\n"
+        "but never estimate popularity, virality, audience interest, or an attention score.\n\n"
         "Never construct URLs — only use URLs that appeared in web_search results. "
-        "Target 5-8 findings for a broad angle. For a tracked-story follow-up, zero "
-        "is valid when nothing materially changed. Be quick — search, compile, output JSON.\n\n"
+        "Target 5-8 findings. Be quick — search, compile, output JSON.\n\n"
         f"{rubric}"
     )
 
@@ -172,13 +161,10 @@ def phase_1_research(
         if findings:
             print(f"  [done] {label} — {len(findings)} findings in {elapsed:.0f}s")
             _RESEARCH_SUCCESSES += 1
-        elif angle.get("optional") and failure_msg is None:
-            print(f"  [done] {label} — no material developments in {elapsed:.0f}s")
         else:
             if failure_msg is None:
-                # HTTP 200 but empty broad discovery is degraded rather than a
-                # trustworthy "nothing happened" result. The optional follow-up
-                # angle above is the exception: no material movement is expected.
+                # HTTP 200 but empty discovery is degraded rather than a
+                # trustworthy "nothing happened" result.
                 failure_msg = "empty research results (LLM returned no findings)"
             print(f"  [FAIL] {label} — {failure_msg} ({elapsed:.0f}s)")
             check_search_health(f"fail-{angle['id']}")
@@ -237,24 +223,20 @@ def phase_1_research(
     return findings
 
 @runtime.track_phase_failure("judge-research")
-def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
-                           stories_in_flight: dict | None = None) -> tuple[list[dict], list[dict]]:
+def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
     """Phase 2: Python date pre-tagging + batched LLM judge.
 
-    1. Python parses date_published → tags each finding as fresh, older, or too_old.
-       too_old findings are dropped without touching the LLM.
-    2. Exact tracked-story links from the dedicated follow-up angle are validated.
-       The judge admits only material new developments; unchanged recaps stay deduped.
-    3. Findings are split into batches of BATCH_SIZE.
-    4. Each batch gets one LLM call with topic rules and editorial-significance rubric.
-    5. Python restores source metadata and enforces cross-batch dedup.
+    1. Python parses date_published; findings published before yesterday (or
+       undated) are dropped as stale without touching the LLM.
+    2. Findings are split into batches of BATCH_SIZE.
+    3. Each batch gets one LLM call with topic rules and editorial-significance rubric.
+    4. Python restores source metadata and enforces cross-batch dedup.
 
     Before any judging, the shared recent-coverage ledger removes findings any
     section covered in the previous CROSS_DAY_DEDUP_DAYS days (canonical story
-    and referenced URLs). Tracked developments re-enter only through the
-    dedicated follow-up path with a new article URL.
+    and referenced URLs).
 
-    Returns (fresh_findings, ongoing_findings).
+    Returns the fresh findings.
     """
     output_path = run_dir / "02-research-judged.json"
     today = runtime.issue_date_for_run(run_dir)
@@ -266,7 +248,6 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         "judge-research", topic=topic,
         upstream={
             "findings": runtime.canonical_fingerprint(findings),
-            "stories_in_flight": runtime.canonical_fingerprint(stories_in_flight or {}),
             "covered_urls": sorted(recent_coverage),
         },
         policy={
@@ -280,14 +261,13 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         schema_version=1, validator=lambda value: isinstance(value, dict),
     )
     if cached is not None:
-        return cached.get("fresh", []), cached.get("ongoing", [])
+        return cached.get("fresh", [])
 
     print(f"  [run ] judge_research — {len(findings)} findings to evaluate")
     t0 = time.time()
 
     # ── Step 1: Python date pre-tagging ──
     yesterday = today - timedelta(days=1)
-    ongoing_cutoff_date = today - timedelta(days=5)
     for finding in findings:
         normalize_editorial_significance(finding)
         if finding.get("url"):
@@ -295,27 +275,9 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
 
     pre_tagged: list[dict] = []
     too_old_count = 0
-    tracker_by_url = {
-        normalize_url(story.get("url", "")): story
-        for story in (stories_in_flight or {}).get("stories", [])
-        if normalize_url(story.get("url", ""))
-    }
-    invalid_followup_count = 0
     ledger_rejected: list[dict] = []
 
     for f in findings:
-        if f.get("research_angle_id") == "developing-followups":
-            tracked_url = normalize_url(f.get("develops_story_url", ""))
-            tracked_story = tracker_by_url.get(tracked_url)
-            if tracked_story is None or not has_validated_high_significance(tracked_story):
-                invalid_followup_count += 1
-                continue
-            f["develops_story_url"] = tracked_story.get("url", "")
-        else:
-            # Only the bounded follow-up angle may assert a cross-day story link.
-            # This prevents a broad research result from inventing a relationship.
-            f.pop("develops_story_url", None)
-
         if coverage_key(f.get("url", "")) in recent_coverage:
             ledger_rejected.append({"finding": f, "reason": "already_covered_previous_day"})
             continue
@@ -327,21 +289,16 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         if pub_calendar_date >= yesterday:
             f["date_tag"] = "fresh"
             pre_tagged.append(f)
-        elif pub_calendar_date >= ongoing_cutoff_date:
-            f["date_tag"] = "ongoing"
-            pre_tagged.append(f)
         else:
             too_old_count += 1
 
-    print(f"  Date pre-tag: {sum(1 for f in pre_tagged if f['date_tag'] == 'fresh')} fresh, "
-          f"{sum(1 for f in pre_tagged if f['date_tag'] == 'ongoing')} older, "
-          f"{too_old_count} too_old, {invalid_followup_count} invalid follow-up (dropped), "
+    print(f"  Date pre-tag: {len(pre_tagged)} fresh, {too_old_count} too_old, "
           f"{len(ledger_rejected)} covered by a section in the previous "
           f"{CROSS_DAY_DEDUP_DAYS} days (dropped)")
 
     if not pre_tagged:
         print(f"  [done] judge_research — all findings too old or no date")
-        output = {"fresh": [], "ongoing": [], "rejected": ledger_rejected, "status": "empty",
+        output = {"fresh": [], "rejected": ledger_rejected, "status": "empty",
                   "reason": "no date-valid research findings"}
         runtime.complete_phase_json(
             state,
@@ -352,37 +309,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             reason=output["reason"],
         )
         runtime.write_phase_status(output_path, status="empty", reason=output["reason"], inputs=phase_inputs)
-        return [], []
-
-
-    # Build tracker context only from roots that still satisfy the full evidence
-    # contract. Legacy label-only highs must not suppress normal fresh research.
-    sif_context = ""
-    eligible_tracker_by_url = {
-        url: story
-        for url, story in tracker_by_url.items()
-        if has_validated_high_significance(story)
-    }
-    if eligible_tracker_by_url:
-        tracked_context = [{
-            "title": story.get("title", ""),
-            "story_url": story.get("url", ""),
-            "latest_confirmed_development": story.get("latest_dev", ""),
-            "editorial_significance": story.get("editorial_significance", "medium"),
-            "last_evidence_date": story.get("last_updated", ""),
-            "status": story.get("status", "active"),
-        } for story in eligible_tracker_by_url.values()]
-        sif_context = (
-            "## Tracked stories\n"
-            "A finding with `develops_story_url` came from the dedicated follow-up "
-            "search. Approve it only when it reports a material new fact after the "
-            "tracked story's last evidence date, and preserve `develops_story_url` "
-            "exactly. Reject recaps, commentary, or broad-theme connections. A finding "
-            "about a tracked topic without that exact field is not a vetted follow-up; "
-            "reject it as `already_tracked_in_sif` rather than re-adding it.\n\n"
-            f"{DEVELOPING_STORY_RULES}\n"
-            + json.dumps(tracked_context, indent=2) + "\n\n"
-        )
+        return []
 
     # ── Step 2: Batch LLM calls ──
     # Each finding carries a run-local id through the judge so Step 3 restores
@@ -404,8 +331,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
         "rules. Be harsh — a false positive is worse than a false negative.\n\n"
         "You will receive a JSON array of research findings and a set of rules. "
         "For each finding, evaluate every rule. Preserve source fields, especially "
-        "`finding_id`, `research_angle_id`, `develops_story_url`, `date_tag`, `event`, "
-        "`event_terms`, "
+        "`finding_id`, `research_angle_id`, `date_tag`, `event`, `event_terms`, "
         "URL, and publication date. You may adjust `editorial_significance` based only "
         "on consequence. Every `high` finding must include structured "
         "`significance_evidence` with an allowed basis, broad/sector affected scope, and "
@@ -423,7 +349,6 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
     for batch_idx, batch_items in enumerate(batches):
         batch_json = json.dumps(batch_items, indent=2)
         user = (
-            f"{sif_context}"
             f"## Rules\n\n{topic['judgment_rules']}\n\n"
             f"## Editorial Significance Rubric\n\n{rubric}\n\n"
             f"## Findings to evaluate (batch {batch_idx + 1}/{len(batches)})\n\n"
@@ -454,7 +379,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
     # the source URL); only a URL that exactly one source finding carries may
     # stand in for a missing id. A finding sharing its URL with another source
     # finding and lacking a valid id cannot be told apart, so it is dropped
-    # rather than given the other finding's event, terms, or follow-up link.
+    # rather than given the other finding's event or terms.
     seen_urls: set[str] = set()
     deduped_approved: list[dict] = []
     dedup_rejected: list[dict] = []
@@ -478,23 +403,14 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             continue
         if source is not None:
             for field in (
-                "date_tag", "research_angle_id", "develops_story_url",
+                "date_tag", "research_angle_id",
                 "event", "event_terms", "significance_evidence",
             ):
                 if field in source:
                     f[field] = source[field]
                 else:
                     f.pop(field, None)
-        tracked_url = normalize_url(f.get("develops_story_url", ""))
-        if (
-            f.get("research_angle_id") == "developing-followups"
-            and (
-                tracked_url not in tracker_by_url
-                or not has_validated_high_significance(tracker_by_url[tracked_url])
-            )
-        ):
-            dedup_rejected.append({"finding": f, "reason": "invalid_followup_link"})
-        elif url and url in seen_urls:
+        if url and url in seen_urls:
             dedup_rejected.append({"finding": f, "reason": "crossbatch_duplicate"})
         elif coverage_key(f.get("url", "")) in recent_coverage:
             dedup_rejected.append({"finding": f, "reason": "already_covered_previous_day"})
@@ -520,12 +436,10 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
             print(f"  Recent-coverage dedup: removed {n_cross_day} stories any section "
                   "covered on previous days")
 
-    # Split by date_tag
     fresh = [f for f in deduped_approved if f.get("date_tag") == "fresh"]
-    ongoing = [f for f in deduped_approved if f.get("date_tag") == "ongoing"]
 
     elapsed = time.time() - t0
-    print(f"  [done] judge_research — {len(fresh)} fresh, {len(ongoing)} ongoing, "
+    print(f"  [done] judge_research — {len(fresh)} fresh, "
           f"{len(all_rejected) + len(dedup_rejected)} rejected ({elapsed:.0f}s)")
     for r in all_rejected[:5]:
         finding = r.get("finding", {}) if isinstance(r, dict) else {}
@@ -535,20 +449,20 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path,
     if len(all_rejected) > 5:
         print(f"    ... and {len(all_rejected) - 5} more rejected")
 
-    output = {"fresh": fresh, "ongoing": ongoing, "rejected": all_rejected + dedup_rejected,
-              "status": "ok" if fresh or ongoing else "empty",
-              "reason": "" if fresh or ongoing else "no findings passed research judgment"}
+    output = {"fresh": fresh, "rejected": all_rejected + dedup_rejected,
+              "status": "ok" if fresh else "empty",
+              "reason": "" if fresh else "no findings passed research judgment"}
     runtime.complete_phase_json(
         state,
         "judge-research",
         output_path,
         output,
-        outcome="empty" if not fresh and not ongoing else "succeeded",
-        reason=output["reason"] if not fresh and not ongoing else None,
+        outcome="succeeded" if fresh else "empty",
+        reason=None if fresh else output["reason"],
     )
-    if not fresh and not ongoing:
+    if not fresh:
         runtime.write_phase_status(output_path, status="empty", reason=output["reason"], inputs=phase_inputs)
-    return fresh, ongoing
+    return fresh
 
 def _attention_snapshot(issue_date, offline: bool) -> dict:
     """The edition's shared inventory snapshot; offline runs and store failures stay explicit."""
@@ -568,12 +482,7 @@ def _attention_snapshot(issue_date, offline: bool) -> dict:
 
 
 @runtime.track_phase_failure("attention")
-def phase_2b_attention(
-    topic: dict,
-    fresh: list[dict],
-    ongoing: list[dict],
-    run_dir: Path,
-) -> tuple[list[dict], list[dict]]:
+def phase_2b_attention(topic: dict, fresh: list[dict], run_dir: Path) -> list[dict]:
     """Measure observed attention and Jev importance without asking an LLM for popularity."""
     output_path = run_dir / "02b-attention.json"
     issue_date = runtime.issue_date_for_run(run_dir)
@@ -586,7 +495,6 @@ def phase_2b_attention(
         "attention", topic=topic,
         upstream={
             "fresh": runtime.canonical_fingerprint(fresh),
-            "ongoing": runtime.canonical_fingerprint(ongoing),
             "snapshot": snapshot["id"],
         },
         policy={
@@ -601,7 +509,7 @@ def phase_2b_attention(
         schema_version=ATTENTION_SCHEMA_VERSION, validator=lambda value: isinstance(value, dict),
     )
     if cached is not None:
-        return cached.get("fresh", []), cached.get("ongoing", [])
+        return cached.get("fresh", [])
 
     print(
         f"  [run ] attention — {len(fresh)} fresh event(s); snapshot {snapshot['id']} "
@@ -642,13 +550,12 @@ def phase_2b_attention(
         attention.load_reference_history(runtime.ATTENTION_ARCHIVE_DIR, section, issue_date)
     )
     importance, importance_failures = attention.assess_importance(
-        fresh + ongoing, client, section_label=topic["web_title"],
+        fresh, client, section_label=topic["web_title"],
     )
     scored_fresh, observations = attention.score_attention(
-        fresh, section=section, evidence=evidence, importance=importance[:len(fresh)],
+        fresh, section=section, evidence=evidence, importance=importance,
         measured_sources=measured_sources, references=references, window_end=window_end,
     )
-    scored_ongoing = attention.score_ongoing(ongoing, section=section, importance=importance[len(fresh):])
 
     if client is None:
         jev = {"status": "unconfigured" if not offline else "offline"}
@@ -686,11 +593,10 @@ def phase_2b_attention(
     output = {
         **attention_artifact,
         "fresh": scored_fresh,
-        "ongoing": scored_ongoing,
     }
     attention_unavailable = int(output.get("unavailable") or 0)
     attention_outcome = (
-        "empty" if not fresh and not ongoing
+        "empty" if not fresh
         else "degraded" if attention_unavailable or jev.get("status") == "degraded"
         else "succeeded"
     )
@@ -709,7 +615,7 @@ def phase_2b_attention(
         outcome=attention_outcome,
         reason=attention_reason,
     )
-    if not fresh and not ongoing:
+    if not fresh:
         runtime.write_phase_status(output_path, status="empty", reason="no candidates for attention", inputs=phase_inputs)
 
     archive_path = runtime.ATTENTION_ARCHIVE_DIR / issue_date.isoformat() / f"{section}.json"
@@ -723,13 +629,18 @@ def phase_2b_attention(
         f"{f'; left out {sorted(excluded_sources)}' if excluded_sources else ''}; Jev {jev.get('status')} "
         f"({time.time() - started:.0f}s)"
     )
-    return scored_fresh, scored_ongoing
+    return scored_fresh
 
 # A research finding is the same story as a paywalled candidate when they share
 # a normalized event term and their title+event wording overlaps this much.
 # Calibrated on September 2026 01-research-raw.json pairs: at or above it every
 # pair sharing a term described one event; below it pairs diverged.
 PAYWALL_ALTERNATE_MIN_OVERLAP = 0.3
+
+# Another outlet's version of a queued story Phase 4 may fetch when the
+# primary URL fails (2026-10-01: AP and Axios 403'd on the day's top story
+# while Guardian/SiliconANGLE versions were fetchable).
+FETCH_ALTERNATE_LIMIT = 2
 
 def _story_terms(finding: dict) -> set[str]:
     return {
@@ -758,6 +669,72 @@ def _fetchable_alternate_url(url: str) -> str:
         return ""
     return url
 
+def _research_alternates(research_findings: list[dict]) -> list[dict]:
+    """Research findings whose canonical URL may stand in for another outlet's."""
+    alternates = []
+    for finding in research_findings:
+        url = _fetchable_alternate_url(finding.get("url", "")) if isinstance(finding, dict) else ""
+        if url:
+            alternates.append({**finding, "url": url})
+    return alternates
+
+def _alternate_candidates(item: dict, research_alternates: list[dict], blocked_keys: set[str]) -> list[dict]:
+    """Ordered other-outlet versions of ``item``'s story.
+
+    Research findings for the same story come first (best overlap first, ties
+    keep research order), then the item's Phase 2b ``same_event_urls`` in
+    order. Every entry is fetchable, on another registrable domain than the
+    item, outside ``blocked_keys`` and unique by coverage key.
+    """
+    own_domain = attention_match.registrable_domain(item.get("url", ""))
+    seen: set[str] = set()
+
+    def usable(url: str) -> bool:
+        if not url:
+            return False
+        key = coverage_key(url)
+        if key in blocked_keys or key in seen:
+            return False
+        if own_domain and attention_match.registrable_domain(url) == own_domain:
+            return False
+        seen.add(key)
+        return True
+
+    scored = [(_same_story_overlap(item, alternate), alternate) for alternate in research_alternates]
+    scored = sorted(
+        (pair for pair in scored if pair[0] >= PAYWALL_ALTERNATE_MIN_OVERLAP),
+        key=lambda pair: pair[0], reverse=True,
+    )
+    candidates: list[dict] = []
+    for overlap, alternate in scored:
+        url = alternate["url"]
+        if not usable(url):
+            continue
+        entry = {
+            "url": url,
+            "title": alternate.get("title") or item.get("title", ""),
+            "source_domain": alternate.get("source_domain") or attention_match.registrable_domain(url),
+            "origin": "research",
+            "overlap": round(overlap, 3),
+        }
+        for field in ("date_published", "summary"):
+            if alternate.get(field):
+                entry[field] = alternate[field]
+        candidates.append(entry)
+    same_event = ((item.get("attention") or {}).get("evidence") or {}).get("same_event_urls") or []
+    for entry in same_event:
+        url = _fetchable_alternate_url(entry.get("url", "")) if isinstance(entry, dict) else ""
+        if not usable(url):
+            continue
+        candidates.append({
+            "url": url,
+            "title": entry.get("title") or item.get("title", ""),
+            "source_domain": entry.get("domain") or attention_match.registrable_domain(url),
+            "origin": f"attention:{entry.get('source', '')}",
+            "overlap": None,
+        })
+    return candidates
+
 def resolve_hard_paywalls(
     candidates: list[dict],
     research_findings: list[dict],
@@ -774,11 +751,7 @@ def resolve_hard_paywalls(
     Returns (kept, substituted, dropped); the last two are audit records.
     """
     taken = {coverage_key(item.get("url", "")) for item in candidates} | set(blocked_keys)
-    alternates = []
-    for finding in research_findings:
-        url = _fetchable_alternate_url(finding.get("url", "")) if isinstance(finding, dict) else ""
-        if url:
-            alternates.append({**finding, "url": url})
+    alternates = _research_alternates(research_findings)
 
     kept: list[dict] = []
     substituted: list[dict] = []
@@ -788,45 +761,21 @@ def resolve_hard_paywalls(
         if domain is None:
             kept.append(item)
             continue
-        best, best_overlap = None, PAYWALL_ALTERNATE_MIN_OVERLAP
-        for alternate in alternates:
-            if coverage_key(alternate["url"]) in taken:
-                continue
-            overlap = _same_story_overlap(item, alternate)
-            if overlap >= best_overlap and (best is None or overlap > best_overlap):
-                best, best_overlap = alternate, overlap
-        if best is not None:
-            origin = "research"
-            replacement = {
-                "url": best["url"],
-                "title": best.get("title") or item.get("title", ""),
-                "source_domain": best.get("source_domain")
-                or attention_match.registrable_domain(best["url"]),
-                "date_published": best.get("date_published") or item.get("date_published", ""),
-                "summary": best.get("summary") or item.get("summary", ""),
-            }
-        else:
-            same_event = ((item.get("attention") or {}).get("evidence") or {}).get("same_event_urls") or []
-            for entry in same_event:
-                url = _fetchable_alternate_url(entry.get("url", "")) if isinstance(entry, dict) else ""
-                if url and coverage_key(url) not in taken:
-                    origin = f"attention:{entry.get('source', '')}"
-                    replacement = {
-                        "url": url,
-                        "title": entry.get("title") or item.get("title", ""),
-                        "source_domain": entry.get("domain")
-                        or attention_match.registrable_domain(url),
-                    }
-                    break
-            else:
-                dropped.append({
-                    **item,
-                    "rejection_reason": (
-                        f"hard-paywalled source ({domain}); no fetchable research "
-                        "finding or same-event attention URL for the story"
-                    ),
-                })
-                continue
+        options = _alternate_candidates(item, alternates, taken)
+        if not options:
+            dropped.append({
+                **item,
+                "rejection_reason": (
+                    f"hard-paywalled source ({domain}); no fetchable research "
+                    "finding or same-event attention URL for the story"
+                ),
+            })
+            continue
+        best = options[0]
+        replacement = {key: best[key] for key in ("url", "title", "source_domain")}
+        if best["origin"] == "research":
+            replacement["date_published"] = best.get("date_published") or item.get("date_published", "")
+            replacement["summary"] = best.get("summary") or item.get("summary", "")
         taken.add(coverage_key(replacement["url"]))
         kept.append({**item, **replacement, "paywall_substituted_from": item.get("url", "")})
         substituted.append({
@@ -835,42 +784,46 @@ def resolve_hard_paywalls(
             "original_title": item.get("title", ""),
             "alternate_url": replacement["url"],
             "alternate_title": replacement["title"],
-            "alternate_origin": origin,
-            "overlap": round(best_overlap, 3) if origin == "research" else None,
+            "alternate_origin": best["origin"],
+            "overlap": best["overlap"],
         })
     return kept, substituted, dropped
+
+def assign_fetch_alternates(
+    queue: list[dict],
+    research_findings: list[dict],
+    blocked_keys: set[str],
+) -> None:
+    """Give each queue item up to FETCH_ALTERNATE_LIMIT ordered ``fetch_alternates``.
+
+    Alternates follow the paywall-swap rules and never point at any queue
+    item's own URL; Phase 4 tries them only when the primary fetch fails.
+    """
+    alternates = _research_alternates(research_findings)
+    blocked = set(blocked_keys) | {coverage_key(item.get("url", "")) for item in queue}
+    for item in queue:
+        item["fetch_alternates"] = _alternate_candidates(item, alternates, blocked)[:FETCH_ALTERNATE_LIMIT]
 
 @runtime.track_phase_failure("rank")
 def phase_3_rank(
     topic: dict,
     fresh: list[dict],
-    ongoing: list[dict],
-    stories_in_flight: dict,
     run_dir: Path,
     research_findings: list[dict] | None = None,
-) -> tuple[list[dict], list[dict]]:
-    """Phase 3: Deterministic priority ranking with caps.
+) -> list[dict]:
+    """Phase 3: Deterministic priority ranking with a cap.
 
     Pool A: Fresh findings
       - Sort by final product priority (editorial significance + observed attention)
       - Cap: FRESH_CAP (12)
 
-    Pool B: Older articles (2-5 days old from Phase 2)
-      - Sort by editorial-only priority, then publication recency
-      - Cap: ONGOING_CAP (5)
-
-    Pool C: qualified developing stories — does NOT enter Phase 4
-      - Requires high editorial significance and evidence-backed movement on 2+ UTC dates
-      - Sort by last_updated descending and cap at SIF_CAP (3)
-      - Passed directly to Phase 6 with its evidence history and latest development
-
-    Before the caps, a candidate on a hard-paywalled domain takes the URL of a
+    Before the cap, a candidate on a hard-paywalled domain takes the URL of a
     fetchable ``research_findings`` entry for the same story, else one of its
     Jev-judged same-event attention URLs, or is dropped; both outcomes are
-    recorded in the artifact.
+    recorded in the artifact. After the cap, each queue item carries ordered
+    ``fetch_alternates`` (same sources and rules) for Phase 4 fetch failures.
 
-    Returns (phase_4_queue, sif_candidates).
-    Phase 4 queue = Pool A + Pool B, with fresh first.
+    Returns the Phase 4 queue (Pool A).
     """
     output_path = run_dir / "03-urls-ranked.json"
     other_topic_urls = load_cross_topic_urls(topic, run_dir)
@@ -884,8 +837,6 @@ def phase_3_rank(
         "rank", topic=topic,
         upstream={
             "fresh": runtime.canonical_fingerprint(fresh),
-            "ongoing": runtime.canonical_fingerprint(ongoing),
-            "stories_in_flight": runtime.canonical_fingerprint(stories_in_flight),
             "cross_topic_urls": sorted(other_topic_urls),
             "research_findings": runtime.canonical_fingerprint(research_findings),
             "covered_urls": sorted(recent_coverage),
@@ -893,6 +844,7 @@ def phase_3_rank(
         policy={
             "ranking_schema": RANKING_SCHEMA_VERSION,
             "hard_paywall_domains": sorted(HARD_PAYWALL_DOMAINS),
+            "fetch_alternate_limit": FETCH_ALTERNATE_LIMIT,
         },
     )
     state, cached = runtime.begin_or_load_phase(
@@ -900,47 +852,35 @@ def phase_3_rank(
         schema_version=RANKING_SCHEMA_VERSION, validator=lambda value: isinstance(value, dict),
     )
     if cached is not None:
-        return cached.get("phase_4_queue", []), cached.get("sif_candidates", [])
+        return cached.get("phase_4_queue", [])
 
     fresh = [normalize_editorial_significance(item) for item in fresh]
-    ongoing = [normalize_editorial_significance(item) for item in ongoing]
 
     # Tag each finding with source_verdict for downstream phases
     for f in fresh:
         f["source_verdict"] = "fresh"
-    for o in ongoing:
-        o["source_verdict"] = "ongoing"
 
     # Remove stories already selected by an earlier topic before any article fetch.
     # The exact blocked set is part of the phase input fingerprint above.
     cross_topic_rejected = [
         {**item, "rejection_reason": "already selected by another digest today"}
-        for item in fresh + ongoing
+        for item in fresh
         if coverage_key(item.get("url", "")) in other_topic_urls
     ]
     eligible_fresh = [
         item for item in fresh
         if coverage_key(item.get("url", "")) not in other_topic_urls
     ]
-    eligible_ongoing = [
-        item for item in ongoing
-        if coverage_key(item.get("url", "")) not in other_topic_urls
-    ]
     # URL-host validation: a candidate whose URL sits on a publisher asset CDN
     # (e.g. assets.theregister.com) is not an article and must never reach
     # fetch or curation (digest-quality audit 2026-08-24: research invented
-    # assets.theregister.com article links that 405'd; the tracker echoed them
-    # in the daily Ongoing email for five days).
+    # assets.theregister.com article links that 405'd).
     asset_cdn_rejected = [
-        item for item in eligible_fresh + eligible_ongoing
+        item for item in eligible_fresh
         if is_asset_cdn_url(item.get("url", ""))
     ]
     eligible_fresh = [
         item for item in eligible_fresh
-        if not is_asset_cdn_url(item.get("url", ""))
-    ]
-    eligible_ongoing = [
-        item for item in eligible_ongoing
         if not is_asset_cdn_url(item.get("url", ""))
     ]
     if asset_cdn_rejected:
@@ -948,15 +888,13 @@ def phase_3_rank(
               "asset-CDN URL(s) (not article hosts) before fetch")
 
     # Hard paywalls never reach Phase 4: swap in a fetchable same-story URL or
-    # drop the story before the caps, so it frees its slot
+    # drop the story before the cap, so it frees its slot
     # (September 2026: 11 of 12 washingtonpost.com fetches failed).
-    kept, paywall_substituted, paywall_dropped = resolve_hard_paywalls(
-        eligible_fresh + eligible_ongoing,
+    eligible_fresh, paywall_substituted, paywall_dropped = resolve_hard_paywalls(
+        eligible_fresh,
         research_findings,
         other_topic_urls | recent_coverage,
     )
-    eligible_fresh = [item for item in kept if item["source_verdict"] == "fresh"]
-    eligible_ongoing = [item for item in kept if item["source_verdict"] == "ongoing"]
     if paywall_substituted or paywall_dropped:
         print(f"  [Phase 3 paywall] {len(paywall_substituted)} story(s) moved to a "
               f"fetchable source, {len(paywall_dropped)} dropped before fetch")
@@ -968,81 +906,53 @@ def phase_3_rank(
         reverse=True,
     )[:FRESH_CAP]
 
-    pool_b = sorted(
-        eligible_ongoing,
-        key=priority_sort_key,
-        reverse=True,
-    )[:ONGOING_CAP]
-
-    # Pool C is the only source for the rendered Developing and Ongoing section.
-    # Every candidate must already have high editorial significance and
-    # evidence-backed movement on multiple dates, and must prove which source
-    # supplied its latest summary so the card's headline/link match it.
-    active_sif = []
-    for story in stories_in_flight.get("stories", []):
-        display = tracker_display_source(story)
-        if (
-            story.get("status") == "active"
-            and is_developing_story(story)
-            and display is not None
-            and coverage_key(story.get("url", "")) not in other_topic_urls
-            and coverage_key(display["url"]) not in other_topic_urls
-            and not is_listing_url(story.get("url", ""))
-            and not is_asset_cdn_url(story.get("url", ""))
-        ):
-            active_sif.append(story)
-    pool_c = sorted(
-        active_sif, key=lambda s: s.get("last_updated", ""), reverse=True
-    )[:SIF_CAP]
-    withheld = [
-        story.get("url", "")
-        for story in stories_in_flight.get("stories", [])
-        if story.get("status") == "active"
-        and is_developing_story(story)
-        and tracker_display_source(story) is None
-    ]
-    if withheld:
-        print(f"  [Phase 3 provenance] withheld {len(withheld)} tracked story(s) whose "
-              "latest summary has no recorded source headline")
-
-    phase_4_queue = pool_a + pool_b
+    phase_4_queue = pool_a
     for item in phase_4_queue:
         item["ranking_schema_version"] = RANKING_SCHEMA_VERSION
+    # Phase 4 falls back to these when a primary fetch fails; they clear the
+    # same blocked keys as the paywall swap.
+    assign_fetch_alternates(phase_4_queue, research_findings, other_topic_urls | recent_coverage)
 
     output = {
         "ranking_schema_version": RANKING_SCHEMA_VERSION,
         "phase_4_queue": phase_4_queue,
-        "sif_candidates": pool_c,
         "pool_a": pool_a,
-        "pool_b": pool_b,
         "cross_topic_rejected": cross_topic_rejected,
         "paywall_substituted": paywall_substituted,
         "paywall_dropped": paywall_dropped,
-        "status": "ok" if phase_4_queue or pool_c else "empty",
-        "reason": "" if phase_4_queue or pool_c else "no eligible URLs",
+        "status": "ok" if phase_4_queue else "empty",
+        "reason": "" if phase_4_queue else "no eligible URLs",
     }
     runtime.complete_phase_json(
         state,
         "rank",
         output_path,
         output,
-        outcome="empty" if not phase_4_queue and not pool_c else "succeeded",
-        reason=output["reason"] if not phase_4_queue and not pool_c else None,
+        outcome="succeeded" if phase_4_queue else "empty",
+        reason=None if phase_4_queue else output["reason"],
     )
-    if not phase_4_queue and not pool_c:
+    if not phase_4_queue:
         runtime.write_phase_status(output_path, status="empty", reason=output["reason"], inputs=phase_inputs)
-    print(f"  Phase 3 done: Pool A={len(pool_a)} fresh, Pool B={len(pool_b)} older, "
-          f"Pool C={len(pool_c)} developing SIF → {len(phase_4_queue)} total for fetch")
-    return phase_4_queue, pool_c
+    print(f"  Phase 3 done: Pool A={len(pool_a)} fresh → {len(phase_4_queue)} total for fetch")
+    return phase_4_queue
 
 @runtime.track_phase_failure("fetch-summaries")
 def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
-    """Fetch and summarize articles with a shared cache and two-worker bound."""
+    """Fetch and summarize articles with a shared cache and two-worker bound.
+
+    A failed primary fetch falls back to the item's ``fetch_alternates`` (one
+    attempt each, at most FETCH_ALTERNATE_LIMIT waves) unless another record
+    already fetched the same story.
+    """
     output_path = run_dir / "04-fetch-summaries.json"
     phase_inputs = runtime.phase_inputs(
         "fetch-summaries", topic=topic,
         upstream={"queue": runtime.canonical_fingerprint(findings)},
-        policy={"ranking_schema": RANKING_SCHEMA_VERSION, "model": runtime._effective_model(runtime.MODEL)},
+        policy={
+            "ranking_schema": RANKING_SCHEMA_VERSION,
+            "model": runtime._effective_model(runtime.MODEL),
+            "fetch_alternate_limit": FETCH_ALTERNATE_LIMIT,
+        },
     )
     state, cached = runtime.begin_or_load_phase(
         run_dir, "fetch-summaries", inputs=phase_inputs, artifact_path=output_path,
@@ -1082,6 +992,31 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
         "and explain briefly in the summary field."
     )
 
+    def _summarize(url: str, title: str, label: str, extra: str = "") -> dict:
+        prompt = (
+            f"Fetch this article: {url}\n\n"
+            f"Title from research: {title}\n\n"
+            "Use read to open the article. Then output your summary as JSON "
+            "wrapped in ```json fences."
+            f"{extra}"
+        )
+        raw = runtime._call_omp_p(
+            prompt, model=runtime.MODEL, timeout=runtime.FETCH_TIMEOUT,
+            append_system=system_prompt,
+        )
+        result = runtime._extract_json(raw, f"{label} output")
+        if not isinstance(result, dict):
+            raise ValueError(
+                f"fetch output is not a JSON object (got {type(result).__name__})")
+        result["url"] = url
+        return result
+
+    def _save_cache(url: str, result: dict, label: str) -> None:
+        try:
+            runtime._save_article_cache(url, result, model=runtime.MODEL)
+        except OSError as cache_error:
+            print(f"  [cache warn] {label} — {cache_error}")
+
     def _fetch_one(finding: dict) -> dict:
         url = finding.get("url", "")
         title = finding.get("title", "unknown")
@@ -1094,28 +1029,8 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
 
         print(f"  [run ] [{source}] {label}")
         started = time.time()
-
-        def _attempt(extra: str = "") -> dict:
-            prompt = (
-                f"Fetch this article: {url}\n\n"
-                f"Title from research: {title}\n\n"
-                "Use read to open the article. Then output your summary as JSON "
-                "wrapped in ```json fences."
-                f"{extra}"
-            )
-            raw = runtime._call_omp_p(
-                prompt, model=runtime.MODEL, timeout=runtime.FETCH_TIMEOUT,
-                append_system=system_prompt,
-            )
-            result = runtime._extract_json(raw, f"{label} output")
-            if not isinstance(result, dict):
-                raise ValueError(
-                    f"fetch output is not a JSON object (got {type(result).__name__})")
-            result["url"] = url
-            return result
-
         try:
-            result = _attempt()
+            result = _summarize(url, title, label)
         except Exception as first_error:
             # Retry once: model output sometimes truncates mid-JSON (no closing
             # fence) or comes back empty, which previously dropped the story
@@ -1123,7 +1038,8 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
             # instructions usually completes within the output limit.
             print(f"  [retry] {label} — attempt 1 failed: {first_error}; retrying once")
             try:
-                result = _attempt(
+                result = _summarize(
+                    url, title, label,
                     "\n\nIMPORTANT: your previous response was truncated or invalid. "
                     "Output ONLY the complete JSON object in ```json fences, closed "
                     "properly. Keep the summary to 2-3 sentences and key_details to "
@@ -1141,18 +1057,114 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
                     "author": "",
                     "cache_hit": False,
                 }
-        try:
-            runtime._save_article_cache(url, result, model=runtime.MODEL)
-        except OSError as cache_error:
-            print(f"  [cache warn] {label} — {cache_error}")
+        _save_cache(url, result, label)
         elapsed = time.time() - started
         status = "✓" if result.get("fetch_success", True) else "✗"
         print(f"  [done] {label} — {status} ({elapsed:.0f}s)")
         return {**finding, **result, "url": url, "cache_hit": False}
 
+    def _fetch_alternate(job: tuple[dict, dict]) -> tuple[dict | None, str]:
+        """One attempt at another outlet's version: (record, "") or (None, reason)."""
+        finding, alternate = job
+        url = alternate["url"]
+        label = f"fetch-alt:{alternate.get('title', '')[:50]}"
+        result = runtime._load_article_cache(url, model=runtime.MODEL)
+        cache_hit = result is not None
+        if not cache_hit:
+            try:
+                result = _summarize(url, alternate.get("title") or "unknown", label)
+            except Exception as error:
+                return None, str(error)[:200]
+            if not result.get("fetch_success", True):
+                return None, str(result.get("summary") or "fetch_success=false")[:200]
+            _save_cache(url, result, label)
+        replacement = {key: alternate[key] for key in ("url", "title", "source_domain")}
+        if alternate.get("date_published"):
+            replacement["date_published"] = alternate["date_published"]
+        return {
+            **finding,
+            **replacement,
+            **result,
+            "url": url,
+            "cache_hit": cache_hit,
+            "fetch_substituted_from": finding.get("url", ""),
+            "fetch_alternate_origin": alternate.get("origin", ""),
+        }, ""
+
+    def _fetched(record: dict) -> bool:
+        return bool(record.get("fetch_success", True))
+
+    def _covered_by(record: dict, others: list[dict]) -> bool:
+        return any(
+            _same_story_overlap(record, other) >= PAYWALL_ALTERNATE_MIN_OVERLAP for other in others
+        )
+
     workers = min(runtime.MAX_PARALLEL_FETCH, max(1, len(findings)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(_fetch_one, findings))
+
+        # Substitution pass: a failed primary tries another outlet's version of
+        # its story, in queue order, without fetching one story twice.
+        claimed = {coverage_key(finding.get("url", "")) for finding in findings}
+        claimed |= {coverage_key(record.get("url", "")) for record in results if _fetched(record)}
+        next_alternate = [0] * len(findings)
+        tried: dict[int, list[dict]] = {}
+        pending = [index for index, record in enumerate(results) if not _fetched(record)]
+
+        # Story matching uses the queued finding: a failed fetch's title is
+        # whatever the model echoed back.
+        def _skip_if_covered(index: int) -> bool:
+            if not _covered_by(findings[index], [other for other in results if _fetched(other)]):
+                return False
+            results[index]["fetch_alternate_skipped"] = "same story already fetched"
+            print(f"  [alt skip] {findings[index].get('title', '')[:50]} — same story already fetched")
+            return True
+
+        for _wave in range(FETCH_ALTERNATE_LIMIT):
+            jobs: list[tuple[int, dict]] = []
+            deferred: list[int] = []
+            for index in pending:
+                if _skip_if_covered(index):
+                    continue
+                if _covered_by(findings[index], [findings[other] for other, _ in jobs]):
+                    # A same-story item is trying an alternate this wave.
+                    deferred.append(index)
+                    continue
+                alternates = findings[index].get("fetch_alternates") or []
+                while next_alternate[index] < len(alternates):
+                    alternate = alternates[next_alternate[index]]
+                    next_alternate[index] += 1
+                    key = coverage_key(alternate["url"])
+                    if key not in claimed:
+                        claimed.add(key)
+                        jobs.append((index, alternate))
+                        break
+            if not jobs:
+                pending = []
+                break
+            outcomes = list(pool.map(
+                _fetch_alternate, [(findings[index], alternate) for index, alternate in jobs],
+            ))
+            pending = deferred
+            for (index, alternate), (record, reason) in zip(jobs, outcomes):
+                if record is not None:
+                    results[index] = record
+                    print(f"  [alt done] {findings[index].get('title', '')[:50]} — "
+                          f"{findings[index].get('url', '')} → {alternate['url']} ({alternate.get('origin', '')})")
+                else:
+                    tried.setdefault(index, []).append({"url": alternate["url"], "reason": reason})
+                    pending.append(index)
+            pending.sort()
+        # Items left after the last wave may now be covered by a substitution.
+        for index in pending:
+            _skip_if_covered(index)
+        for index, attempts in tried.items():
+            if not _fetched(results[index]):
+                results[index]["fetch_alternates_tried"] = attempts
+                print(f"  [alt FAIL] {findings[index].get('title', '')[:50]} — "
+                      f"{len(attempts)} alternate(s) failed; story dropped")
+    for record in results:
+        record.pop("fetch_alternates", None)
 
     successful = sum(1 for result in results if result.get("fetch_success", True))
     fetch_outcome = (
@@ -1186,12 +1198,10 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
 def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -> list[dict]:
     """Phase 5: Python date validation + batched LLM judge of summary accuracy.
 
-    1. Python validates date_confirmed against calendar thresholds,
-       cross-referencing with source_verdict (set by Phase 3):
+    1. Python validates date_confirmed against calendar thresholds:
        - date >= yesterday → ok (fresh, as expected)
-       - date 2-5 days old + source_verdict=ongoing → ok (legitimate Pool B)
-       - date 2-5 days old + source_verdict=fresh → drop (Phase 1/2 misclassified)
-       - date >5 days old → auto-drop regardless
+       - date 2-5 days old → drop (Phase 1/2 misclassified it as fresh)
+       - date >5 days old → auto-drop
        - date missing → targeted re-fetch for date extraction, then re-check
     2. Surviving summaries go through batched LLM judge for faithfulness
        and completeness (date already verified, not re-checked).
@@ -1231,9 +1241,8 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
 
     # ── Step 1: Python date validation ──
     # Uses date_confirmed from Phase 4's actual article fetch — an independent
-    # source from Phase 1's date_published. Cross-references with source_verdict
-    # (set by Phase 3) to avoid penalizing legitimate ongoing articles.
-    # Re-fetches only when date_confirmed is missing.
+    # source from Phase 1's date_published. Re-fetches only when
+    # date_confirmed is missing.
     now = datetime.now(timezone.utc)
     today = now.date()
     yesterday = today - timedelta(days=1)
@@ -1246,15 +1255,11 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
     for s in to_judge:
         dc = (s.get("date_confirmed") or "").strip()
         parsed = parse_date(dc)
-        source = s.get("source_verdict", "fresh")
         if parsed is not None:
             d = parsed.date()
             if d >= yesterday:
                 validated.append(s)
-            elif d >= stale_cutoff and source == "ongoing":
-                # Legitimate ongoing article — was intentionally included in Pool B
-                validated.append(s)
-            elif d >= stale_cutoff and source == "fresh":
+            elif d >= stale_cutoff:
                 # Phase 1/2 tagged as fresh but Phase 4's fetch shows it's 2-5d old
                 age = (today - d).days
                 s["judge_verdict"] = "drop"
@@ -1280,7 +1285,6 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
             try:
                 refetched = refetch_article_date(url, title)
                 elapsed = time.time() - t_refetch
-                source = s.get("source_verdict", "fresh")
                 if refetched:
                     s["date_confirmed"] = refetched
                     parsed = parse_date(refetched)
@@ -1289,10 +1293,7 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
                         if d >= yesterday:
                             validated.append(s)
                             print(f"  [done] {label} → {refetched} (fresh) ({elapsed:.0f}s)")
-                        elif d >= stale_cutoff and source == "ongoing":
-                            validated.append(s)
-                            print(f"  [done] {label} → {refetched} (ok, ongoing) ({elapsed:.0f}s)")
-                        elif d >= stale_cutoff and source == "fresh":
+                        elif d >= stale_cutoff:
                             age = (today - d).days
                             s["judge_verdict"] = "drop"
                             s["judge_issues"] = [f"date_mismatch: tagged fresh but confirmed {refetched} is {age}d old"]

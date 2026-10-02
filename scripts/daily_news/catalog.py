@@ -11,23 +11,6 @@ STANDFIRST_PROMPT_VERSION = 2
 BATCH_SIZE = 10  # findings/summaries per LLM call in phases 2 and 5
 
 FRESH_CAP = 12       # Pool A: max fresh findings passed to Phase 4
-
-ONGOING_CAP = 5      # Pool B: max older articles passed to Phase 4
-
-SIF_CAP = 3          # Pool C: max qualified developing stories passed to Phase 6
-
-FOLLOWUP_STORY_CAP = 8  # high-significance tracker stories checked for developments
-
-MIN_DEVELOPMENT_DAYS = 2  # evidence-backed developments on distinct UTC dates
-
-DEVELOPMENT_HISTORY_CAP = 30
-
-COOL_AFTER_DAYS = 5     # auto-cool after 5 days without evidence-backed movement
-
-PRUNE_AFTER_DAYS = 7    # remove cooled stories after 7 days without movement
-
-RESURFACE_CAP_DAYS = COOL_AFTER_DAYS - 1
-
 CROSS_DAY_DEDUP_DAYS = 5
 
 REFERENCED_URLS_SCHEMA_VERSION = 1
@@ -61,21 +44,6 @@ EDITORIAL_SIGNIFICANCE_RUBRIC_SHARED = (
     "- low — incremental, niche, minor, or speculative.\n"
     "Judge consequence only. Never infer popularity, virality, coverage volume, "
     "or audience interest; those are measured separately from observable signals.\n"
-)
-
-DEVELOPING_STORY_RULES = (
-    "DEVELOPING AND ONGOING CONTRACT:\n"
-    "- Only stories with high editorial significance qualify.\n"
-    "- A story must have material factual developments on at least two distinct "
-    "UTC dates. Age, continued relevance, or an unresolved possibility is not a "
-    "second development.\n"
-    "- Material development means the underlying event changed: a new official "
-    "action, decision, filing, vote, confirmed outcome, escalation, measurable "
-    "impact, or comparably substantive fact.\n"
-    "- Never qualify a single announcement, launch, release, patch, result, "
-    "one-off article, opinion, analysis, recap, or new commentary that merely "
-    "reframes the same facts. A different article about the same broad theme is "
-    "not a development.\n"
 )
 
 EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC: dict[str, str] = {

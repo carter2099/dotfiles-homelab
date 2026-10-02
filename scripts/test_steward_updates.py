@@ -2883,6 +2883,125 @@ class DependabotMergeTests(unittest.TestCase):
                 self.assertEqual(result["status"], "skipped")
                 self.assertIn(expected, next(i["reason"] for i in result["skipped"] if i.get("number") == 10))
 
+    def test_each_queued_merge_gets_its_own_done_row_with_real_undo_url(self):
+        prs = {"herdr-web-client": [self._pr(10, "Bump a from 1.0.0 to 1.0.1"),
+                                    self._pr(12, "Bump b from 2.0.0 to 2.1.0")]}
+        result, _ = self._run(prs)
+        self.assertIsNone(result["revert"])
+        self.assertEqual([i["revert"] for i in result["merged"]], [
+            "before GitHub merges: gh pr merge --disable-auto https://pr/10; after: "
+            "revert the merge commit on the default branch",
+            "before GitHub merges: gh pr merge --disable-auto https://pr/12; after: "
+            "revert the merge commit on the default branch",
+        ])
+        page = report.html.unescape(
+            report._html_actions({"sections": []}, {"routes": []}, {"steps": [result]}))
+        self.assertIn("herdr-web-client#10 Bump a from 1.0.0 to 1.0.1 — auto-merge queued "
+                      "(1.0.0 -> 1.0.1;", page)
+        self.assertIn("Undo: before GitHub merges: gh pr merge --disable-auto https://pr/12", page)
+        self.assertNotIn("<url>", page)
+        self.assertNotIn("?", page)
+
+    def test_recorded_step_with_placeholder_undo_renders_real_pr_url(self):
+        # Shape of the 2026-10-01 01-applied.json row (written before per-PR undo existed).
+        step = {"step": "dependabot_merge", "status": "ok", "local_mutation": False,
+                "merged": [{"number": 11, "reason": "6.36.0 -> 6.38.0; 6 check(s) green",
+                            "repo": "herdr-web-client", "title": "Bump knip from 6.36.0 to 6.38.0",
+                            "url": "https://github.com/carter2099/herdr-web-client/pull/11"}],
+                "needs_carter": [], "skipped": [],
+                "revert": "before GitHub merges: gh pr merge --disable-auto <url>; after: "
+                          "revert the merged commit on the default branch"}
+        page = report.html.unescape(
+            report._html_actions({"sections": []}, {"routes": []}, {"steps": [step]}))
+        self.assertIn("herdr-web-client#11 Bump knip from 6.36.0 to 6.38.0 — auto-merge queued "
+                      "(6.36.0 -> 6.38.0; 6 check(s) green)", page)
+        self.assertIn("gh pr merge --disable-auto "
+                      "https://github.com/carter2099/herdr-web-client/pull/11", page)
+        self.assertNotIn("<url>", page)
+        self.assertNotIn("updated ?", page)
+
+    def test_done_step_without_versions_renders_reason_not_question_marks(self):
+        step = {"step": "some_step", "status": "ok", "reason": "rotated the token",
+                "revert": "restore the old token"}
+        page = report._html_actions({"sections": []}, {"routes": []}, {"steps": [step]})
+        self.assertIn("rotated the token", page)
+        self.assertNotIn("?", page)
+        versioned = {**step, "pre_version": "1.0.0", "post_version": "1.1.0"}
+        page = report._html_actions({"sections": []}, {"routes": []}, {"steps": [versioned]})
+        self.assertIn("updated 1.0.0 -&gt; 1.1.0", page)
+
+
+class HostRebootReportTests(unittest.TestCase):
+    RECORD = {"requested_at": "2026-10-01T04:02:50Z", "phase": "P3",
+              "kernel_before": "6.8.0-142-generic", "boot_id_before": "boot-before",
+              "packages": ["linux-image-6.8.0-146-generic"]}
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.run_dir = self.root / "2026-10-01"
+        self.run_dir.mkdir()
+        (self.run_dir / "reboot.json").write_text(json.dumps(self.RECORD))
+
+    def _host(self, boot_id):
+        """Patches for the current boot id and `uname -r` after the reboot."""
+        return (
+            patch.object(report, "_current_boot_id", return_value=boot_id),
+            patch.object(report, "run_capture", side_effect=lambda cmd, **kw: (
+                "6.8.0-146-generic" if cmd == ["uname", "-r"] else "")),
+        )
+
+    def _status(self, boot_id):
+        boot, uname = self._host(boot_id)
+        with boot, uname:
+            return report._host_reboot_status(self.run_dir)
+
+    def test_changed_boot_id_renders_reboot_line_status_row_and_tldr_fact(self):
+        status = self._status("boot-after")
+        line = ("ThinkPad rebooted for kernel update: 6.8.0-142-generic -> 6.8.0-146-generic "
+                "(04:02 UTC, after P3); run resumed")
+        self.assertEqual(status["text"], line)
+        applied = {"steps": [], "host_reboot": status}
+        self.assertIn(report.html.escape(line), report._html_updates(applied))
+        health = report._html_health({"checks": []}, {"reboot": {"needed": False}}, applied)
+        self.assertIn("Rebooted 04:02 UTC — kernel 6.8.0-146-generic", health)
+        self.assertNotIn("Not needed", health)
+        again = report._html_health(
+            {"checks": []}, {"reboot": {"needed": True, "kernel": "6.8.0-147-generic"}}, applied)
+        self.assertIn("Needed — kernel 6.8.0-147-generic", again)
+        facts = report._build_tldr_facts(applied, {}, {}, {}, {})
+        self.assertEqual(facts["updates"][0], line)
+        self.assertEqual(report._tldr_payload(facts, "2026-10-01")[0]["updates"][0], line)
+
+    def test_unchanged_boot_id_warns_that_host_did_not_restart(self):
+        status = self._status("boot-before")
+        self.assertFalse(status["rebooted"])
+        self.assertEqual(status["text"], "ThinkPad reboot requested at 04:02 UTC (after P3) "
+                                         "but the host did not restart")
+        applied = {"steps": [], "host_reboot": status}
+        self.assertIn("did not restart", report._html_updates(applied))
+        health = report._html_health({"checks": []}, {}, applied)
+        self.assertIn("Requested 04:02 UTC — host did not restart", health)
+
+    def test_no_record_means_no_reboot_line(self):
+        (self.run_dir / "reboot.json").unlink()
+        self.assertIsNone(self._status("boot-after"))
+        self.assertIn("Not needed", report._html_health({"checks": []}, {}, {"steps": []}))
+
+    def test_summary_md_update_status_lists_the_reboot(self):
+        sessions = self.root / "sessions"
+        sessions.mkdir()
+        boot, uname = self._host("boot-after")
+        with boot, uname, patch.object(report, "RUNS_LOG", self.root / "runs.jsonl"), \
+                patch.object(report, "RUN_DIR_BASE", self.root), \
+                patch.object(report, "SESSION_DIR", sessions):
+            report.phase_9_archive(self.run_dir, {"date": "2026-10-01"}, 1.0)
+        summary = (self.run_dir / "summary.md").read_text()
+        update_status = summary.split("## Update Status\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("- ThinkPad rebooted for kernel update: 6.8.0-142-generic -> "
+                      "6.8.0-146-generic (04:02 UTC, after P3); run resumed", update_status)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

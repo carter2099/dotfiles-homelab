@@ -298,7 +298,6 @@ def test_cross_topic_dedup_precedes_fetch_queue() -> None:
         duplicate = "https://example.com/shared?utm_source=gaming"
         (other_dir / "06-curated.json").write_text(json.dumps({
             "fresh": [{"url": duplicate}],
-            "ongoing": [],
         }))
         fresh = [
             {
@@ -315,9 +314,7 @@ def test_cross_topic_dedup_precedes_fetch_queue() -> None:
             },
         ]
         with patch.object(runtime, "DIGESTS_DIR", root):
-            queue, _ = research.phase_3_rank(
-                catalog.TOPICS["ai-tech"], fresh, [], {"stories": []}, run_dir
-            )
+            queue = research.phase_3_rank(catalog.TOPICS["ai-tech"], fresh, run_dir)
         check([item["title"] for item in queue] == ["Unique"], f"queue={queue!r}")
         artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
         check(len(artifact["cross_topic_rejected"]) == 1, "skip was not audited")
@@ -334,7 +331,6 @@ def test_cross_topic_same_event_referenced_url_dedup() -> None:
             "fresh": [{
                 "url": "https://techcrunch.com/2026/08/25/openai-jalapeno-chip",
             }],
-            "ongoing": [],
         }))
         (other / "referenced-urls.json").write_text(json.dumps({
             "schema_version": catalog.REFERENCED_URLS_SCHEMA_VERSION,
@@ -361,9 +357,7 @@ def test_cross_topic_same_event_referenced_url_dedup() -> None:
             },
         ]
         with patch.object(runtime, "DIGESTS_DIR", root):
-            queue, _ = research.phase_3_rank(
-                catalog.TOPICS["ai-tech"], fresh, [], {"stories": []}, run_dir
-            )
+            queue = research.phase_3_rank(catalog.TOPICS["ai-tech"], fresh, run_dir)
         check(
             [item["title"] for item in queue] == ["Unique story"],
             f"queue={queue!r}",
@@ -387,12 +381,8 @@ def test_rank_resume_fingerprint_includes_cross_topic_urls() -> None:
             "date_published": "2026-08-26",
         }
         with patch.object(runtime, "DIGESTS_DIR", root):
-            first, _ = research.phase_3_rank(
-                catalog.TOPICS["ai-tech"],
-                [copy.deepcopy(candidate)],
-                [],
-                {"stories": []},
-                run_dir,
+            first = research.phase_3_rank(
+                catalog.TOPICS["ai-tech"], [copy.deepcopy(candidate)], run_dir,
             )
             check(len(first) == 1, first)
 
@@ -404,22 +394,23 @@ def test_rank_resume_fingerprint_includes_cross_topic_urls() -> None:
             other_dir.mkdir(parents=True)
             (other_dir / "06-curated.json").write_text(json.dumps({
                 "fresh": [{"url": candidate["url"]}],
-                "ongoing": [],
             }))
-            second, _ = research.phase_3_rank(
-                catalog.TOPICS["ai-tech"],
-                [copy.deepcopy(candidate)],
-                [],
-                {"stories": []},
-                run_dir,
+            second = research.phase_3_rank(
+                catalog.TOPICS["ai-tech"], [copy.deepcopy(candidate)], run_dir,
             )
         check(not second, "rank reused cache after cross-topic URL set changed")
 
 
 def test_phase_two_cross_day_dedup_window_contract() -> None:
+    """Fresh-window findings reach the judge; older findings are stale.
+
+    A finding published before yesterday (here three days ago) never reaches
+    the LLM judge and never comes back as a story.
+    """
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        today = datetime.now(timezone.utc).date().isoformat()
+        today_date = datetime.now(timezone.utc).date()
+        today = today_date.isoformat()
         run_dir = root / "ai-tech" / today
         run_dir.mkdir(parents=True)
         finding = {
@@ -433,6 +424,14 @@ def test_phase_two_cross_day_dedup_window_contract() -> None:
             "event": "Fresh verified event occurs",
             "event_terms": ["Fresh verified", "event occurs"],
         }
+        older = {
+            **finding,
+            "title": "Three-day-old event",
+            "url": "https://example.com/older-event",
+            "date_published": (today_date - timedelta(days=3)).isoformat(),
+            "event": "Three-day-old event occurs",
+            "event_terms": ["Three-day-old", "older event"],
+        }
         judged = {
             "approved": [finding],
             "rejected": [],
@@ -440,52 +439,30 @@ def test_phase_two_cross_day_dedup_window_contract() -> None:
         with patch(
             "daily_news.runtime._call_llm_proxy",
             return_value=json.dumps(judged),
-        ):
-            fresh, ongoing = research.phase_2_judge_research(
+        ) as call:
+            fresh = research.phase_2_judge_research(
                 catalog.TOPICS["ai-tech"],
-                [finding],
+                [copy.deepcopy(finding), copy.deepcopy(older)],
                 run_dir,
-                {"stories": []},
             )
         check(catalog.CROSS_DAY_DEDUP_DAYS == 5, catalog.CROSS_DAY_DEDUP_DAYS)
-        check(len(fresh) == 1 and not ongoing, (fresh, ongoing))
+        check([item["title"] for item in fresh] == ["Fresh verified event"], fresh)
+        check(
+            not any(older["url"] in str(args) for args in call.call_args_list),
+            "a finding published before the fresh window reached the judge",
+        )
 
-
-def test_phase_two_rejects_unvalidated_legacy_followup() -> None:
-    with tempfile.TemporaryDirectory() as temporary:
-        root = Path(temporary)
-        today = datetime.now(timezone.utc).date().isoformat()
-        run_dir = root / "world-digest" / today
-        run_dir.mkdir(parents=True)
-        root_url = "https://example.com/legacy-root"
-        tracker = {
-            "stories": [{
-                "title": "Legacy high without evidence",
-                "url": root_url,
-                "editorial_significance": "high",
-                "status": "active",
-                "first_seen": "2026-08-20",
-                "developments": [
-                    {"date": "2026-08-20", "url": root_url},
-                    {"date": "2026-08-21", "url": "https://example.com/update"},
-                ],
-            }]
-        }
-        finding = {
-            "title": "Claimed legacy follow-up",
-            "url": "https://example.com/new-update",
-            "date_published": today,
-            "summary": "A claimed update.",
-            "editorial_significance": "high",
-            "research_angle_id": "developing-followups",
-            "develops_story_url": root_url,
-        }
+        stale_dir = root / "stale" / "ai-tech" / today
+        stale_dir.mkdir(parents=True)
         with patch("daily_news.runtime._call_llm_proxy") as call:
-            fresh, ongoing = research.phase_2_judge_research(
-                catalog.TOPICS["world"], [finding], run_dir, tracker
+            stale_only = research.phase_2_judge_research(
+                catalog.TOPICS["ai-tech"], [copy.deepcopy(older)], stale_dir,
             )
-        check(not fresh and not ongoing, (fresh, ongoing))
-        check(not call.called, "unvalidated legacy root reached the LLM judge")
+        check(stale_only == [], stale_only)
+        check(not call.called, "a stale-only batch reached the LLM judge")
+        artifact = json.loads((stale_dir / "02-research-judged.json").read_text())
+        check(artifact["fresh"] == [] and artifact["status"] == "empty", artifact)
+
 
 def test_recent_coverage_ledger_blocks_other_section_repeats() -> None:
     """A story any section covered recently cannot re-enter another section.
@@ -507,7 +484,6 @@ def test_recent_coverage_ledger_blocks_other_section_repeats() -> None:
         )
         (prior / "06-curated.json").write_text(json.dumps({
             "fresh": [{"url": aiforce}],
-            "ongoing": [],
         }))
         (prior / "referenced-urls.json").write_text(json.dumps({
             "schema_version": catalog.REFERENCED_URLS_SCHEMA_VERSION,
@@ -529,7 +505,6 @@ def test_recent_coverage_ledger_blocks_other_section_repeats() -> None:
         stale.mkdir(parents=True)
         (stale / "06-curated.json").write_text(json.dumps({
             "fresh": [{"url": "https://example.net/outside-window"}],
-            "ongoing": [],
         }))
 
         def finding(title: str, url: str) -> dict:
@@ -560,16 +535,14 @@ def test_recent_coverage_ledger_blocks_other_section_repeats() -> None:
             "daily_news.runtime._call_llm_proxy",
             return_value=json.dumps({"approved": copy.deepcopy(findings), "rejected": []}),
         ):
-            fresh, ongoing = research.phase_2_judge_research(
+            fresh = research.phase_2_judge_research(
                 catalog.TOPICS["agentic-platform"], copy.deepcopy(findings), run_dir,
-                {"stories": []},
             )
         check(
             sorted(item["title"] for item in fresh)
             == ["Genuinely new agent story", "Outside window story"],
             f"recently covered stories re-entered another section: {fresh!r}",
         )
-        check(not ongoing, ongoing)
 
 
 def _shared_url_findings(today: str) -> tuple[str, list[dict]]:
@@ -639,10 +612,9 @@ def test_phase_two_shared_url_findings_keep_their_own_metadata() -> None:
         dlss = findings[0]
         with patch("daily_news.runtime._call_llm_proxy",
                    side_effect=_judge_batch_reply(dlss["title"], drop_ids=False)):
-            fresh, ongoing = research.phase_2_judge_research(
-                catalog.TOPICS["ai-hardware"], copy.deepcopy(findings), run_dir, {"stories": []},
+            fresh = research.phase_2_judge_research(
+                catalog.TOPICS["ai-hardware"], copy.deepcopy(findings), run_dir,
             )
-        check(not ongoing, ongoing)
         check([item["title"] for item in fresh] == [dlss["title"]], fresh)
         story = fresh[0]
         for field in ("event", "event_terms", "significance_evidence"):
@@ -662,8 +634,8 @@ def test_phase_two_drops_unidentified_shared_url_finding() -> None:
         _, findings = _shared_url_findings(today)
         with patch("daily_news.runtime._call_llm_proxy",
                    side_effect=_judge_batch_reply(findings[0]["title"], drop_ids=True)):
-            fresh, _ = research.phase_2_judge_research(
-                catalog.TOPICS["ai-hardware"], copy.deepcopy(findings), run_dir, {"stories": []},
+            fresh = research.phase_2_judge_research(
+                catalog.TOPICS["ai-hardware"], copy.deepcopy(findings), run_dir,
             )
         check(fresh == [], f"unidentifiable shared-URL finding survived: {fresh!r}")
         judged = json.loads((run_dir / "02-research-judged.json").read_text())
@@ -676,159 +648,10 @@ def test_phase_two_drops_unidentified_shared_url_finding() -> None:
         run_dir.mkdir(parents=True)
         with patch("daily_news.runtime._call_llm_proxy",
                    side_effect=_judge_batch_reply(unique["title"], drop_ids=True)):
-            fresh, _ = research.phase_2_judge_research(
-                catalog.TOPICS["ai-hardware"], [copy.deepcopy(unique)], run_dir, {"stories": []},
+            fresh = research.phase_2_judge_research(
+                catalog.TOPICS["ai-hardware"], [copy.deepcopy(unique)], run_dir,
             )
         check([item["event"] for item in fresh] == [unique["event"]], fresh)
-
-
-def test_ongoing_card_follows_latest_verified_development() -> None:
-    """An evidence-backed update replaces the displayed headline/link together.
-
-    Regression for 2026-09-21/22: the World card still read "House approves
-    Russia sanctions bill, sending it to Trump" above a summary saying Trump had
-    signed it. Unprovable legacy records are withheld, and a fresh follow-up
-    never ships beside its own stale ongoing card.
-    """
-    root_url = "https://apnews.com/article/house-russia-sanctions"
-    followup_url = "https://www.aljazeera.com/news/2026/9/19/trump-signs-russia-sanctions"
-    tracker = {"stories": [{
-        "title": "House approves Russia sanctions bill, sending it to Trump",
-        "url": root_url,
-        "category": "Policy",
-        "latest_dev": "The House approved the sanctions bill.",
-        "status": "active",
-        **validated_high_fields(),
-        "first_seen": "2026-09-17",
-        "developments": [
-            {"date": "2026-09-17", "url": root_url},
-            {"date": "2026-09-18", "url": root_url},
-        ],
-    }]}
-    candidates, _ = editorial.prepare_editorial_candidates([{
-        "title": "Trump signs Russia sanctions bill into law",
-        "url": followup_url,
-        "source_domain": "aljazeera.com",
-        "summary": "Trump signed the Russia sanctions bill into law on Sept. 19.",
-        "category": "Policy",
-        **validated_high_fields(),
-        "date_published": "2026-09-19",
-        "date_confirmed": "2026-09-19",
-        "develops_story_url": root_url,
-        "source_verdict": "fresh",
-        "judge_verdict": "keep",
-    }], set())
-    followup_id = candidates[0]["candidate_id"]
-    proposal = {
-        "selected_fresh": [{
-            "candidate_id": followup_id,
-            "editorial_summary": "Trump signed the Russia sanctions bill into law.",
-            "related_story_url": root_url,
-        }],
-        "selected_ongoing": [{
-            "story_url": root_url,
-            "summary": "The House approved the sanctions bill.",
-            "why_still_relevant": "Awaiting signature.",
-        }],
-        "story_state_proposals": [],
-    }
-    validated, _ = editorial.validate_editorial_proposal(
-        proposal, candidates, tracker["stories"], tracker,
-        issue_date=datetime(2026, 9, 20, tzinfo=timezone.utc).date(),
-    )
-    check(len(validated["selected_fresh"]) == 1, validated)
-    check(
-        validated["selected_ongoing"] == [],
-        f"fresh follow-up shipped beside its stale ongoing card: {validated['selected_ongoing']!r}",
-    )
-    updated = editorial.apply_story_state_proposals(
-        tracker, validated, candidates, "2026-09-20"
-    )
-
-    next_day = {
-        "selected_fresh": [],
-        "selected_ongoing": [{
-            "story_url": root_url,
-            "rank": 1,
-            "summary": "Trump signed the Russia sanctions bill into law.",
-            "why_still_relevant": "The bill became law on Sept. 19.",
-        }],
-    }
-    _, ongoing = editorial.materialize_editorial_selection(next_day, [], updated)
-    card = ongoing[0]
-    check(
-        card["title"] == "Trump signs Russia sanctions bill into law",
-        f"ongoing card kept its first headline: {card['title']!r}",
-    )
-    check(card["url"] == followup_url, card["url"])
-    check(card.get("date_published") == "2026-09-19", card)
-    check(
-        "signed" in updated["stories"][0]["latest_dev"],
-        updated["stories"][0]["latest_dev"],
-    )
-
-    legacy = copy.deepcopy(tracker["stories"][0])
-    legacy["url"] = "https://apnews.com/article/legacy-root"
-    legacy["developments"] = [
-        {"date": "2026-09-17", "url": legacy["url"]},
-        {"date": "2026-09-20", "url": "https://example.com/unattributed-update"},
-    ]
-    legacy["latest_dev"] = "A newer development from an unrecorded source."
-    with tempfile.TemporaryDirectory() as temporary:
-        root = Path(temporary)
-        run_dir = root / catalog.TOPICS["world"]["category"] / "2026-09-21"
-        run_dir.mkdir(parents=True)
-        with patch.object(runtime, "DIGESTS_DIR", root):
-            _, pool_c = research.phase_3_rank(
-                catalog.TOPICS["world"], [], [],
-                {"stories": [updated["stories"][0], legacy]}, run_dir,
-            )
-    check(
-        [contracts.normalize_url(story["url"]) for story in pool_c]
-        == [contracts.normalize_url(root_url)],
-        f"unprovable tracker record reached Developing and Ongoing: {pool_c!r}",
-    )
-
-    # A pre-latest_source record (the real 2026-09-22 shape) recovers its
-    # headline from the run that selected its newest evidence article; a
-    # record whose evidence run is gone stays withheld.
-    today = datetime.now(timezone.utc).date()
-    evidence_day = (today - timedelta(days=1)).isoformat()
-    recoverable = copy.deepcopy(tracker["stories"][0])
-    recoverable["developments"] = [
-        {"date": (today - timedelta(days=3)).isoformat(), "url": root_url},
-        {"date": evidence_day, "url": followup_url},
-    ]
-    recoverable["latest_dev"] = "Trump signed the Russia sanctions bill into law."
-    orphan = copy.deepcopy(recoverable)
-    orphan["url"] = "https://apnews.com/article/orphan-root"
-    orphan["developments"] = [
-        {"date": (today - timedelta(days=3)).isoformat(), "url": orphan["url"]},
-        {"date": evidence_day, "url": "https://example.com/unselected-update"},
-    ]
-    with tempfile.TemporaryDirectory() as temporary:
-        digest_dir = Path(temporary) / catalog.TOPICS["world"]["category"]
-        (digest_dir / evidence_day).mkdir(parents=True)
-        (digest_dir / evidence_day / "06-curated.json").write_text(json.dumps({
-            "fresh": [{
-                "title": "Trump signs Russia sanctions bill into law",
-                "url": followup_url,
-                "date_confirmed": evidence_day,
-            }],
-            "ongoing": [],
-        }))
-        (digest_dir / "stories-in-flight.json").write_text(
-            json.dumps({"stories": [recoverable, orphan]})
-        )
-        loaded = archive.load_and_prune_stories_in_flight(digest_dir)
-    displays = [contracts.tracker_display_source(story) for story in loaded["stories"]]
-    check(
-        displays[0] is not None
-        and displays[0]["title"] == "Trump signs Russia sanctions bill into law"
-        and displays[0]["url"] == followup_url,
-        f"legacy record did not recover its newest source: {displays!r}",
-    )
-    check(displays[1] is None, f"unprovable legacy record was displayed: {displays!r}")
 
 
 def test_runtime_preflight_fails_closed_on_missing_symbol() -> None:
@@ -996,11 +819,6 @@ def test_attention_phase_persists_durable_observations() -> None:
             "url": "https://acme.example/quasar-9",
             "editorial_significance": "medium",
         }]
-        ongoing = [{
-            "title": "Older event",
-            "url": "https://example.com/older",
-            "editorial_significance": "high",
-        }]
         now_s = int(datetime.now(timezone.utc).timestamp())
         rows = [
             {"src": "gkg", "t": now_s - 3600, "domain": f"outlet{i}.example",
@@ -1020,8 +838,8 @@ def test_attention_phase_persists_durable_observations() -> None:
             patch.object(runtime, "ATTENTION_HEALTH_LOG_PATH", root / "attention-health.log"),
             patch("jev.load_client", return_value=_PhaseJev()),
         ):
-            scored_fresh, scored_ongoing = research.phase_2b_attention(
-                catalog.TOPICS["ai-tech"], fresh, ongoing, run_dir
+            scored_fresh = research.phase_2b_attention(
+                catalog.TOPICS["ai-tech"], fresh, run_dir
             )
         story = scored_fresh[0]
         check((run_dir / "02b-attention.json").exists(), "run attention artifact missing")
@@ -1033,12 +851,6 @@ def test_attention_phase_persists_durable_observations() -> None:
             story["priority_score"]
             == attention.blended_priority("medium", story["jev_importance"], observation["attention"]),
             (story, observation),
-        )
-        check(scored_ongoing[0]["attention"]["status"] == "out_of_scope", scored_ongoing)
-        check(
-            scored_ongoing[0]["priority_score"]
-            == attention.importance_score("high", scored_ongoing[0]["jev_importance"]),
-            scored_ongoing,
         )
         check(observation["attention"]["evidence"]["measures"]["gkg_domains"] == 3, observation)
         check(durable["snapshot"]["id"] == "fixture-snapshot" and "rows" not in durable["snapshot"], durable)
@@ -1082,7 +894,7 @@ def test_attention_phase_leaves_out_failed_sources_and_unadjudicated_stories() -
                 patch.object(runtime, "ATTENTION_HEALTH_LOG_PATH", root / "attention-health.log"),
                 patch("jev.load_client", return_value=client),
             ):
-                scored, _ = research.phase_2b_attention(catalog.TOPICS["ai-tech"], fresh, [], run_dir)
+                scored = research.phase_2b_attention(catalog.TOPICS["ai-tech"], fresh, run_dir)
             return scored, json.loads((root / "attention" / "2026-08-25" / "ai-tech.json").read_text())
 
     complete, _ = run_phase({}, _PhaseJev())
@@ -1119,8 +931,8 @@ def test_offline_attention_phase_never_reaches_the_network() -> None:
                   side_effect=AssertionError("offline runs must not collect")),
             patch("jev.load_client", side_effect=AssertionError("offline runs must not call Jev")),
         ):
-            scored_fresh, _ = research.phase_2b_attention(
-                catalog.TOPICS["world"], fresh, [], run_dir
+            scored_fresh = research.phase_2b_attention(
+                catalog.TOPICS["world"], fresh, run_dir
             )
         check(scored_fresh[0]["priority_score"] == attention.EDITORIAL_POINTS["low"], scored_fresh)
         durable = json.loads((root / "attention" / "2026-08-25" / "world.json").read_text())
@@ -1151,9 +963,7 @@ def test_phase_three_uses_product_priority() -> None:
             },
         ]
         with patch.object(runtime, "DIGESTS_DIR", root):
-            queue, _ = research.phase_3_rank(
-                catalog.TOPICS["ai-tech"], fresh, [], {"stories": []}, run_dir
-            )
+            queue = research.phase_3_rank(catalog.TOPICS["ai-tech"], fresh, run_dir)
         check(
             [item["title"] for item in queue]
             == [
@@ -1217,9 +1027,8 @@ def test_hard_paywall_story_never_reaches_fetch() -> None:
                 patch.object(runtime, "ARTICLE_CACHE_DIR", root / "cache"), \
                 patch.object(research, "FRESH_CAP", 1), \
                 patch.object(runtime, "_call_omp_p", side_effect=_record_fetches(fetched)):
-            queue, _ = research.phase_3_rank(
-                catalog.TOPICS["world"], fresh, [], {"stories": []}, run_dir,
-                research_findings,
+            queue = research.phase_3_rank(
+                catalog.TOPICS["world"], fresh, run_dir, research_findings,
             )
             research.phase_4_fetch(catalog.TOPICS["world"], queue, run_dir)
         # The paywalled stories rank first, so they must be gone before the cap
@@ -1271,9 +1080,8 @@ def test_hard_paywall_story_uses_alternate_source() -> None:
         with patch.object(runtime, "DIGESTS_DIR", root), \
                 patch.object(runtime, "ARTICLE_CACHE_DIR", root / "cache"), \
                 patch.object(runtime, "_call_omp_p", side_effect=_record_fetches(fetched)):
-            queue, _ = research.phase_3_rank(
-                catalog.TOPICS["world"], [copy.deepcopy(story)], [], {"stories": []},
-                run_dir, research_findings,
+            queue = research.phase_3_rank(
+                catalog.TOPICS["world"], [copy.deepcopy(story)], run_dir, research_findings,
             )
             research.phase_4_fetch(catalog.TOPICS["world"], queue, run_dir)
         check(fetched == [alternate["url"]], f"fetched={fetched!r}")
@@ -1301,7 +1109,7 @@ def test_hard_paywall_story_uses_same_event_attention_url() -> None:
         covered = "https://www.apnews.com/article/noreaster-yesterday-coverage"
         (root / category / "2026-09-26").mkdir()
         (root / category / "2026-09-26" / "06-curated.json").write_text(json.dumps({
-            "fresh": [{"url": covered}], "ongoing": [],
+            "fresh": [{"url": covered}],
         }))
         wapo = "https://www.washingtonpost.com/weather/2026/09/26/major-noreaster/"
         ranked_elsewhere = "https://www.cbsnews.com/news/noreaster-east-coast-flooding/"
@@ -1332,8 +1140,8 @@ def test_hard_paywall_story_uses_same_event_attention_url() -> None:
         with patch.object(runtime, "DIGESTS_DIR", root), \
                 patch.object(runtime, "ARTICLE_CACHE_DIR", root / "cache"), \
                 patch.object(runtime, "_call_omp_p", side_effect=_record_fetches(fetched)):
-            queue, _ = research.phase_3_rank(
-                catalog.TOPICS["world"], [copy.deepcopy(story), other], [], {"stories": []},
+            queue = research.phase_3_rank(
+                catalog.TOPICS["world"], [copy.deepcopy(story), other],
                 run_dir, [copy.deepcopy(story), other],
             )
             research.phase_4_fetch(catalog.TOPICS["world"], queue, run_dir)
@@ -1409,6 +1217,168 @@ def test_phase_four_concurrency_and_shared_cache() -> None:
         check(all(item["cache_hit"] for item in second), "second topic missed shared cache")
 
 
+def _fetches_by_host(urls: list[str], failing: tuple[str, ...] = (), raising: tuple[str, ...] = ()):
+    """Fake fetch model: URLs on ``failing`` hosts report fetch_success=false,
+    on ``raising`` hosts raise; every other URL fetches."""
+    def fake_omp(prompt: str, **kwargs: object) -> str:
+        url = prompt.split("Fetch this article: ", 1)[1].splitlines()[0]
+        urls.append(url)
+        if any(host in url for host in raising):
+            raise RuntimeError(f"omp crashed on {url}")
+        ok = not any(host in url for host in failing)
+        return json.dumps({
+            "title": f"Fetched {url}", "url": url, "date_confirmed": "2026-09-30",
+            "author": "", "summary": "A detailed factual summary." if ok else "HTTP 403 Forbidden.",
+            "key_details": ["detail"] if ok else [], "fetch_success": ok,
+        })
+    return fake_omp
+
+
+FTC_STORY = {
+    "title": "FTC opens investigation into OpenAI and Anthropic over consumer AI risks",
+    "event": "The FTC opened an investigation into OpenAI and Anthropic over consumer AI risks.",
+    "event_terms": ["FTC investigation", "OpenAI"],
+    "source_verdict": "fresh",
+}
+
+
+def test_failed_fetch_uses_alternate_source() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        category = catalog.TOPICS["ai-tech"]["category"]
+        run_dir = root / category / "2026-10-01"
+        run_dir.mkdir(parents=True)
+        covered = "https://www.reuters.com/technology/ftc-probe-openai-anthropic/"
+        (root / category / "2026-09-30").mkdir()
+        (root / category / "2026-09-30" / "06-curated.json").write_text(json.dumps({
+            "fresh": [{"url": covered}],
+        }))
+        ap = "https://apnews.com/article/ftc-openai-anthropic"
+        other_queue = "https://www.theverge.com/ai/chip-export-rules"
+        research_alternate = "https://www.theguardian.com/us-news/2026/sep/30/ftc-openai-anthropic"
+        attention_alternate = "https://siliconangle.com/2026/09/30/ftc-openai-anthropic/"
+        story = {
+            **FTC_STORY, "url": ap, "source_domain": "apnews.com", "priority_score": 95.0,
+            "editorial_significance": "high", "date_published": "2026-09-30",
+            "attention": {"status": "ok", "evidence": {"same_event_urls": [
+                # Unusable: same outlet, covered yesterday, hard paywall, already queued.
+                {"url": "https://apnews.com/article/ftc-probe-explainer", "domain": "apnews.com",
+                 "title": "FTC probe explained", "source": "panel"},
+                {"url": covered, "domain": "reuters.com", "title": "FTC probes AI labs", "source": "gkg"},
+                {"url": "https://www.theinformation.com/articles/ftc-ai", "domain": "theinformation.com",
+                 "title": "FTC AI probe", "source": "panel"},
+                {"url": other_queue, "domain": "theverge.com", "title": "FTC", "source": "panel"},
+                {"url": attention_alternate, "domain": "siliconangle.com",
+                 "title": "FTC investigating OpenAI, Anthropic", "source": "panel"},
+            ]}},
+        }
+        other = {
+            "title": "US tightens chip export rules", "url": other_queue, "priority_score": 40.0,
+            "editorial_significance": "medium", "date_published": "2026-09-30",
+            "event": "The US tightened chip export rules.", "event_terms": ["chip export rules"],
+        }
+        guardian = {
+            **FTC_STORY, "url": research_alternate, "source_domain": "theguardian.com",
+            "title": "FTC opens investigation into OpenAI and Anthropic",
+            "date_published": "2026-09-30", "summary": "US regulator probes AI labs.",
+        }
+        fetched: list[str] = []
+        with patch.object(runtime, "DIGESTS_DIR", root), \
+                patch.object(runtime, "ARTICLE_CACHE_DIR", root / "cache"), \
+                patch.object(runtime, "_call_omp_p", side_effect=_fetches_by_host(fetched, failing=("apnews.com",))):
+            queue = research.phase_3_rank(
+                catalog.TOPICS["ai-tech"], [copy.deepcopy(story), copy.deepcopy(other)], run_dir,
+                [copy.deepcopy(story), copy.deepcopy(other), guardian],
+            )
+            results = research.phase_4_fetch(catalog.TOPICS["ai-tech"], queue, run_dir)
+        ranked = json.loads((run_dir / "03-urls-ranked.json").read_text())["phase_4_queue"]
+        alternates = next(item for item in ranked if item["url"] == ap)["fetch_alternates"]
+        check(
+            [(entry["url"], entry["origin"]) for entry in alternates]
+            == [(research_alternate, "research"), (attention_alternate, "attention:panel")],
+            alternates,
+        )
+        check(sorted(fetched[:2]) == sorted([ap, other_queue]) and fetched[2:] == [research_alternate],
+              f"fetched={fetched!r}")
+        check([item.get("fetch_substituted_from") for item in results] == [ap, None], results)
+        swapped = results[0]
+        check(swapped["url"] == research_alternate and swapped["fetch_success"]
+              and swapped["source_domain"] == "theguardian.com"
+              and swapped["fetch_alternate_origin"] == "research", swapped)
+        check(swapped["priority_score"] == 95.0 and swapped["editorial_significance"] == "high",
+              f"ranking fields lost: {swapped!r}")
+        check(all("fetch_alternates" not in item for item in results), results)
+
+
+def test_failed_fetch_alternates_exhausted() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        alternates = [
+            {"url": "https://raise.example/ftc", "title": "FTC A", "source_domain": "raise.example",
+             "origin": "research", "overlap": 0.6},
+            {"url": "https://blocked.example/ftc", "title": "FTC B", "source_domain": "blocked.example",
+             "origin": "attention:panel", "overlap": None},
+            {"url": "https://third.example/ftc", "title": "FTC C", "source_domain": "third.example",
+             "origin": "attention:gkg", "overlap": None},
+        ]
+        queue = [{**FTC_STORY, "url": "https://apnews.com/article/ftc", "fetch_alternates": alternates}]
+        fetched: list[str] = []
+        with patch.object(runtime, "ARTICLE_CACHE_DIR", root / "cache"), \
+                patch.object(runtime, "_call_omp_p", side_effect=_fetches_by_host(
+                    fetched, failing=("apnews.com", "blocked.example"), raising=("raise.example",))):
+            results = research.phase_4_fetch(catalog.TOPICS["ai-tech"], queue, root)
+        alternate_calls = [url for url in fetched if "apnews.com" not in url]
+        check(alternate_calls == [alternates[0]["url"], alternates[1]["url"]]
+              and len(alternate_calls) <= research.FETCH_ALTERNATE_LIMIT,
+              f"alternates retried or over limit: {fetched!r}")
+        record = results[0]
+        check(record["url"] == queue[0]["url"] and record["fetch_success"] is False, record)
+        tried = record["fetch_alternates_tried"]
+        check([entry["url"] for entry in tried] == [alternates[0]["url"], alternates[1]["url"]], tried)
+        check("omp crashed" in tried[0]["reason"] and tried[1]["reason"] == "HTTP 403 Forbidden.", tried)
+
+
+def test_failed_fetch_same_story_substitutes_once() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        cached_alternate = "https://www.theguardian.com/ftc"
+        queue = [
+            {**FTC_STORY, "url": "https://apnews.com/article/ftc", "priority_score": 90.0, "fetch_alternates": [
+                {"url": cached_alternate, "title": "FTC probes AI labs", "source_domain": "theguardian.com",
+                 "origin": "attention:panel", "overlap": None},
+            ]},
+            {**FTC_STORY, "url": "https://www.axios.com/ftc", "title": "FTC opens investigation into OpenAI",
+             "fetch_alternates": [
+                 {"url": "https://www.semafor.com/ftc", "title": "FTC probes", "source_domain": "semafor.com",
+                  "origin": "attention:panel", "overlap": None},
+             ]},
+            {"title": "Chip rules", "url": "https://www.theverge.com/chips", "event_terms": ["chip rules"],
+             "fetch_alternates": [
+                 {"url": "https://www.wired.com/chips", "title": "Chip rules", "source_domain": "wired.com",
+                  "origin": "research", "overlap": 0.5},
+             ]},
+        ]
+        fetched: list[str] = []
+        with patch.object(runtime, "ARTICLE_CACHE_DIR", root / "cache"), \
+                patch.object(runtime, "_call_omp_p", side_effect=_fetches_by_host(
+                    fetched, failing=("apnews.com", "axios.com"))):
+            runtime._save_article_cache(cached_alternate, {
+                "title": "FTC probes AI labs", "url": cached_alternate, "date_confirmed": "2026-09-30",
+                "author": "", "summary": "Cached summary.", "key_details": [], "fetch_success": True,
+            }, model=runtime.MODEL)
+            results = research.phase_4_fetch(catalog.TOPICS["ai-tech"], queue, root)
+        check(sorted(fetched) == sorted(item["url"] for item in queue),
+              f"alternate fetched by model: {fetched!r}")
+        first, second, third = results
+        check(first["url"] == cached_alternate and first["cache_hit"] and first["summary"] == "Cached summary."
+              and first["fetch_substituted_from"] == queue[0]["url"] and first["priority_score"] == 90.0, first)
+        check(second["url"] == queue[1]["url"] and second["fetch_success"] is False
+              and second["fetch_alternate_skipped"] == "same story already fetched"
+              and "fetch_alternates_tried" not in second, second)
+        check(third["url"] == queue[2]["url"] and "fetch_substituted_from" not in third, third)
+
+
+
 
 def test_phase_five_backfills_date_confirmed_from_date_published() -> None:
     """A candidate whose Phase 4 fetch and Phase 5 re-fetch could not confirm a
@@ -1465,16 +1435,12 @@ def test_cached_curation_regenerates_referenced_url_sidecar() -> None:
         run_dir.mkdir(parents=True)
         topic = catalog.TOPICS["ai-tech"]
         summaries: list[dict] = []
-        sif_candidates: list[dict] = []
-        tracker = {"stories": []}
         blocked_urls = contracts.load_cross_topic_urls(topic, run_dir)
         inputs = runtime.phase_inputs(
             "curate",
             topic=topic,
             upstream={
                 "summaries": runtime.canonical_fingerprint(summaries),
-                "sif_candidates": runtime.canonical_fingerprint(sif_candidates),
-                "stories_in_flight": runtime.canonical_fingerprint(tracker),
                 "cross_topic_urls": sorted(blocked_urls),
             },
             policy={
@@ -1499,11 +1465,7 @@ def test_cached_curation_regenerates_referenced_url_sidecar() -> None:
         }
         state.complete_json(
             "curate",
-            {
-                "fresh": [cached_story],
-                "stories_in_flight": tracker,
-                "ongoing": [],
-            },
+            {"fresh": [cached_story]},
         )
         sidecar = run_dir / "referenced-urls.json"
         check(not sidecar.exists(), "sidecar unexpectedly preexisted")
@@ -1511,9 +1473,7 @@ def test_cached_curation_regenerates_referenced_url_sidecar() -> None:
             "daily_news.contracts.collect_referenced_urls",
             return_value=["example.com/source"],
         ):
-            fresh, _, _ = editorial.phase_6_curate(
-                topic, summaries, sif_candidates, tracker, run_dir
-            )
+            fresh = editorial.phase_6_curate(topic, summaries, run_dir)
         check(fresh == [cached_story], fresh)
         sidecar_data = json.loads(sidecar.read_text())
         check(sidecar_data["stories"][0]["url"] == cached_story["url"], sidecar_data)
@@ -1545,16 +1505,6 @@ def test_phase_six_backfills_missing_date_confirmed_on_curated_fresh() -> None:
                 "candidate_id": candidate_id,
                 "editorial_summary": "Verified fresh summary.",
                 "selection_reason": "Fresh impact.",
-                "related_story_url": None,
-            }],
-            "selected_ongoing": [],
-            "story_state_proposals": [{
-                "operation": "add",
-                "candidate_id": candidate_id,
-                "evidence_candidate_ids": [candidate_id],
-                "latest_dev": "Verified fresh summary.",
-                "editorial_significance": "high",
-                "status": "active",
             }],
             "rejected": [],
             "gaps": "",
@@ -1567,8 +1517,8 @@ def test_phase_six_backfills_missing_date_confirmed_on_curated_fresh() -> None:
         with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
             runtime, "_call_llm_proxy", side_effect=responses
         ):
-            fresh, _, _ = editorial.phase_6_curate(
-                catalog.TOPICS["ai-tech"], [summary], [], {}, run_dir
+            fresh = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], [summary], run_dir
             )
         check(len(fresh) == 1, f"fresh story was not curated: {fresh}")
         check(fresh[0]["date_confirmed"] == fresh_day,
@@ -1580,7 +1530,7 @@ def test_phase_six_backfills_missing_date_confirmed_on_curated_fresh() -> None:
         )
 
 
-def editorial_fixture(issue_date: str | None = None) -> tuple[list[dict], list[dict], dict]:
+def editorial_fixture(issue_date: str | None = None) -> list[dict]:
     # Phase-oriented fixtures derive freshness from the immutable run date;
     # pure proposal tests default to the current date.
     base_date = (
@@ -1613,113 +1563,49 @@ def editorial_fixture(issue_date: str | None = None) -> tuple[list[dict], list[d
             "judge_verdict": "keep",
         },
     ], set())
-    tracker = {"stories": [{
-        "title": "Existing narrative",
-        "url": "https://example.com/existing",
-        "category": "Research",
-        "latest_dev": "Previous development.",
-        "status": "active",
-        **validated_high_fields(),
-        "first_seen": "2026-08-08",
-        "last_updated": "2026-08-09",
-        "developments": [
-            {"date": "2026-08-08", "url": "https://example.com/existing"},
-            {"date": "2026-08-09", "url": "https://example.com/existing-update"},
-        ],
-    }]}
-    return candidates, tracker["stories"], tracker
+    return candidates
 
 
-def test_editorial_validation_and_state_application() -> None:
-    candidates, sif_candidates, tracker = editorial_fixture()
+def test_editorial_validation() -> None:
+    candidates = editorial_fixture()
     first_id = candidates[0]["candidate_id"]
-    # A candidate carrying the tracked story's own URL is legitimate update
-    # evidence; a different-story candidate is not (digest-quality audit
-    # 2026-08-22: ai-hardware's memory-prices story was overwritten with the
-    # related KOSPI story's development).
-    same_story = {
-        **candidates[0],
-        "title": "Existing narrative update",
-        "url": "https://example.com/existing",
-        "candidate_id": "candidate-same-story",
-    }
-    candidates.append(same_story)
-    same_story_id = same_story["candidate_id"]
+    second_id = candidates[1]["candidate_id"]
     proposal = {
         "selected_fresh": [
-            {"candidate_id": same_story_id, "editorial_summary": "Approved summary."},
+            {"candidate_id": first_id, "editorial_summary": "Approved summary."},
             {"candidate_id": "candidate-unknown", "editorial_summary": "Bad."},
-            {"candidate_id": same_story_id, "editorial_summary": "Duplicate."},
-            {"candidate_id": first_id, "editorial_summary": "Cross-story source."},
-        ],
-        "selected_ongoing": [],
-        "story_state_proposals": [
-            {
-                "operation": "update",
-                "story_url": "https://example.com/existing",
-                "evidence_candidate_ids": [same_story_id],
-                "latest_dev": "New verified development.",
-                "editorial_significance": "high",
-                "status": "active",
-            },
-            {
-                "operation": "update",
-                "story_url": "https://example.com/existing",
-                "evidence_candidate_ids": ["candidate-unknown"],
-                "latest_dev": "Unsupported.",
-            },
-            {
-                "operation": "update",
-                "story_url": "https://example.com/existing",
-                "evidence_candidate_ids": [first_id],
-                "latest_dev": "Related story development.",
-            },
+            {"candidate_id": first_id, "editorial_summary": "Duplicate."},
+            {"candidate_id": second_id, "editorial_summary": "Second story."},
         ],
     }
-    validated, warnings = editorial.validate_editorial_proposal(
-        proposal, candidates, sif_candidates, tracker
+    validated, warnings = editorial.validate_editorial_proposal(proposal, candidates)
+    check(
+        [item["candidate_id"] for item in validated["selected_fresh"]] == [first_id, second_id],
+        validated,
     )
-    check(len(validated["selected_fresh"]) == 2, validated)
-    check(len(validated["story_state_proposals"]) == 2, validated)
-    update_ops = [
-        op for op in validated["story_state_proposals"]
-        if op["operation"] == "update"
-    ]
-    check(len(update_ops) == 1, validated["story_state_proposals"])
+    check(validated["selected_fresh"][0]["editorial_summary"] == "Approved summary.", validated)
     check(
         validated["balance_summary"]
-        == "Validated selection: 2 fresh, 0 developing/ongoing; "
-           "1 source domain(s); categories: Research.",
+        == "Validated selection: 2 fresh; 2 source domain(s); categories: Policy, Research.",
         validated["balance_summary"],
     )
     check(any("unknown candidate_id" in warning for warning in warnings), warnings)
+    check(any("duplicate fresh selection" in warning for warning in warnings), warnings)
+
+    empty, _ = editorial.validate_editorial_proposal({"selected_fresh": []}, candidates)
     check(
-        any("unlinked tracker update" in warning for warning in warnings),
-        warnings,
-    )
-    original = json.loads(json.dumps(tracker))
-    updated = editorial.apply_story_state_proposals(
-        tracker, validated, candidates, "2026-08-10"
-    )
-    check(tracker == original, "state application mutated its input")
-    check(updated["stories"][0]["latest_dev"] == "New verified development.", updated)
-    check(updated["stories"][0]["last_updated"] == "2026-08-10", updated)
-    check(
-        contracts.story_development_dates(updated["stories"][0])
-        == {"2026-08-08", "2026-08-09", "2026-08-10"},
-        updated["stories"][0],
+        empty["balance_summary"] == "Validated selection: no publishable fresh stories.",
+        empty["balance_summary"],
     )
 
 
 def test_editorial_critic_patch_contract() -> None:
-    candidates, _, tracker = editorial_fixture()
+    candidates = editorial_fixture()
     proposal = {
         "selected_fresh": [
             {"candidate_id": candidates[0]["candidate_id"]},
             {"candidate_id": candidates[1]["candidate_id"]},
         ],
-        "selected_ongoing": [],
-        "story_state_proposals": [],
     }
     patched, applied, warnings = editorial.apply_editorial_patches(proposal, {
         "changes": [{
@@ -1731,57 +1617,28 @@ def test_editorial_critic_patch_contract() -> None:
     check(patched["selected_fresh"][0]["candidate_id"] == candidates[1]["candidate_id"],
           patched)
     check(len(applied) == 1 and not warnings, (applied, warnings))
-    check(tracker["stories"], "fixture tracker unexpectedly empty")
 
 
 def test_editorial_drops_stale_fresh_selection() -> None:
-    """A stale Fresh pick cannot enter either output or tracker evidence."""
-    candidates, sif_candidates, tracker = editorial_fixture()
+    """A stale Fresh pick never ships under Fresh."""
+    candidates = editorial_fixture()
     stale_day = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
     stale = copy.deepcopy(candidates[0])
     stale["date_published"] = stale_day
     stale["date_confirmed"] = stale_day
-    stale["date_tag"] = "ongoing"
-    stale["source_verdict"] = "ongoing"
     candidates = [stale, copy.deepcopy(candidates[1])]
     proposal = {
         "selected_fresh": [
             {"candidate_id": candidate["candidate_id"]} for candidate in candidates
         ],
-        "selected_ongoing": [],
-        "story_state_proposals": [{
-            "operation": "add",
-            "candidate_id": stale["candidate_id"],
-            "evidence_candidate_ids": [stale["candidate_id"]],
-            "latest_dev": "Prices still climbing.",
-            "editorial_significance": "high",
-            "status": "active",
-        }],
     }
-    validated, warnings = editorial.validate_editorial_proposal(
-        proposal, candidates, sif_candidates, tracker
-    )
+    validated, warnings = editorial.validate_editorial_proposal(proposal, candidates)
     check(len(validated["selected_fresh"]) == 1, validated["selected_fresh"])
     check(
         validated["selected_fresh"][0]["candidate_id"] == candidates[1]["candidate_id"],
         validated["selected_fresh"],
     )
     check(any("stale fresh selection" in warning for warning in warnings), warnings)
-    # The qualified developing story may fill the thin digest, but display is
-    # not evidence and therefore creates no tracker update.
-    check(validated["story_state_proposals"] == [],
-          validated["story_state_proposals"])
-    updated = editorial.apply_story_state_proposals(
-        tracker, validated, candidates, "2026-08-10"
-    )
-    check(
-        not any(story.get("url") == stale["url"] for story in updated["stories"]),
-        "stale-dropped candidate entered the tracker",
-    )
-    check(
-        updated["stories"][0]["last_updated"] == "2026-08-09",
-        "displaying a story fabricated an evidence date",
-    )
 
 
 def test_freshness_gate_rejects_future_dates() -> None:
@@ -1863,14 +1720,10 @@ def test_editorial_caps_source_concentration() -> None:
             {"candidate_id": candidate["candidate_id"]}
             for candidate in candidates
         ],
-        "selected_ongoing": [],
-        "story_state_proposals": [],
         "gaps": "",
         "balance_summary": "",
     }
-    validated, warnings = editorial.validate_editorial_proposal(
-        proposal, candidates, [], {"stories": []}
-    )
+    validated, warnings = editorial.validate_editorial_proposal(proposal, candidates)
     selected = validated["selected_fresh"]
     domains = {
         candidate["candidate_id"]: candidate["source_domain"]
@@ -1909,8 +1762,8 @@ def test_editorial_proposal_retries_with_freshness_hint() -> None:
                 "editorial_significance": significance,
                 "date_published": day,
                 "date_confirmed": day,
-                "date_tag": "fresh" if day == fresh_day else "ongoing",
-                "source_verdict": "fresh" if day == fresh_day else "ongoing",
+                "date_tag": "fresh",
+                "source_verdict": "fresh",
                 "judge_verdict": "keep",
             }
 
@@ -1927,8 +1780,6 @@ def test_editorial_proposal_retries_with_freshness_hint() -> None:
                 {"candidate_id": stale_a_id},
                 {"candidate_id": stale_b_id},
             ],
-            "selected_ongoing": [],
-            "story_state_proposals": [],
             "gaps": "",
             "balance_summary": "",
         }
@@ -1938,16 +1789,6 @@ def test_editorial_proposal_retries_with_freshness_hint() -> None:
                 "rank": 1,
                 "editorial_summary": "Reviewed factual summary.",
                 "selection_reason": "Only fresh-eligible candidate.",
-                "related_story_url": None,
-            }],
-            "selected_ongoing": [],
-            "story_state_proposals": [{
-                "operation": "add",
-                "candidate_id": fresh_c_id,
-                "evidence_candidate_ids": [fresh_c_id],
-                "latest_dev": "Reviewed factual summary.",
-                "editorial_significance": "high",
-                "status": "active",
             }],
             "rejected": [],
             "gaps": "",
@@ -1968,12 +1809,11 @@ def test_editorial_proposal_retries_with_freshness_hint() -> None:
         with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
             runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, _, ongoing = editorial.phase_6_curate(
-                catalog.TOPICS["agentic-platform"], summaries, [], {"stories": []}, run_dir
+            fresh = editorial.phase_6_curate(
+                catalog.TOPICS["agentic-platform"], summaries, run_dir
             )
         check(len(fresh) == 1, f"expected 1 fresh after hint retry, got {fresh}")
         check(fresh[0]["url"] == "https://example.com/fresh-c", fresh)
-        check(not ongoing, ongoing)
         check(not responses, f"unused model responses: {responses!r}")
         proposal_artifact = json.loads(
             (run_dir / "06a-editorial-proposal.json").read_text()
@@ -2018,8 +1858,8 @@ def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
             "editorial_significance": "high",
             "date_published": stale_day,
             "date_confirmed": stale_day,
-            "date_tag": "ongoing",
-            "source_verdict": "ongoing",
+            "date_tag": "fresh",
+            "source_verdict": "fresh",
             "judge_verdict": "keep",
         }
         candidate_id = editorial.editorial_candidate_id(summary)
@@ -2029,16 +1869,6 @@ def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
                 "rank": 1,
                 "editorial_summary": "Prices spiked 39%.",
                 "selection_reason": "Consumer impact.",
-                "related_story_url": None,
-            }],
-            "selected_ongoing": [],
-            "story_state_proposals": [{
-                "operation": "add",
-                "candidate_id": candidate_id,
-                "evidence_candidate_ids": [candidate_id],
-                "latest_dev": "Prices spiked 39%.",
-                "editorial_significance": "high",
-                "status": "active",
             }],
             "rejected": [],
             "gaps": "",
@@ -2063,8 +1893,8 @@ def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
         with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
             runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, updated, _ = editorial.phase_6_curate(
-                catalog.TOPICS["ai-hardware"], [summary], [], {}, run_dir
+            fresh = editorial.phase_6_curate(
+                catalog.TOPICS["ai-hardware"], [summary], run_dir
             )
         check(fresh == [], f"stale story shipped under Fresh: {fresh}")
         artifact = json.loads((run_dir / "06-curated.json").read_text())
@@ -2076,14 +1906,6 @@ def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
             (run_dir / "06b-editorial-review.json").read_text()
         )
         check(not review_artifact["errors"], review_artifact["errors"])
-        # The stale story was not selected for anything, so it is not tracked.
-        check(
-            not any(
-                story.get("url") == summary["url"]
-                for story in updated.get("stories", [])
-            ),
-            updated,
-        )
         check(not responses, f"unused model responses: {responses!r}")
 
 
@@ -2095,7 +1917,7 @@ def test_critic_emptying_valid_fresh_still_fails_closed() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-12"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture(run_dir.name)
+        candidates = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -2103,14 +1925,10 @@ def test_critic_emptying_valid_fresh_still_fails_closed() -> None:
         proposal = {
             "selected_fresh": [
                 {"candidate_id": candidates[0]["candidate_id"], "rank": 1,
-                 "editorial_summary": "Fresh story one.", "selection_reason": "Top.",
-                 "related_story_url": None},
+                 "editorial_summary": "Fresh story one.", "selection_reason": "Top."},
                 {"candidate_id": candidates[1]["candidate_id"], "rank": 2,
-                 "editorial_summary": "Fresh story two.", "selection_reason": "Second.",
-                 "related_story_url": None},
+                 "editorial_summary": "Fresh story two.", "selection_reason": "Second."},
             ],
-            "selected_ongoing": [],
-            "story_state_proposals": [],
             "rejected": [],
             "gaps": "",
             "balance_summary": "Two fresh stories.",
@@ -2134,8 +1952,8 @@ def test_critic_emptying_valid_fresh_still_fails_closed() -> None:
         with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
             runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, _, _ = editorial.phase_6_curate(
-                catalog.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            fresh = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], summaries, run_dir
             )
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(artifact["editorial"]["review_status"] == "unavailable", artifact)
@@ -2147,7 +1965,7 @@ def test_phase_six_fallback_and_review_chain() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-10"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture(run_dir.name)
+        candidates = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -2159,16 +1977,6 @@ def test_phase_six_fallback_and_review_chain() -> None:
                 "rank": 1,
                 "editorial_summary": "Reviewed factual summary.",
                 "selection_reason": "Highest product priority.",
-                "related_story_url": None,
-            }],
-            "selected_ongoing": [],
-            "story_state_proposals": [{
-                "operation": "add",
-                "candidate_id": selected_id,
-                "evidence_candidate_ids": [selected_id],
-                "latest_dev": "Reviewed factual summary.",
-                "editorial_significance": "high",
-                "status": "active",
             }],
             "rejected": [],
             "gaps": "",
@@ -2190,11 +1998,10 @@ def test_phase_six_fallback_and_review_chain() -> None:
         with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
             runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, updated, ongoing = editorial.phase_6_curate(
-                catalog.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            fresh = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], summaries, run_dir
             )
-        check(len(fresh) == 1 and not ongoing, (fresh, ongoing))
-        check(len(updated["stories"]) == 2, updated)
+        check(len(fresh) == 1, fresh)
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(artifact["editorial"]["proposal_model"] == runtime.MODEL_FALLBACK, artifact)
         check(artifact["editorial"]["review_status"] == "reviewed", artifact)
@@ -2211,7 +2018,7 @@ def test_editorial_proposal_retries_primary_before_fallback() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-10"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture(run_dir.name)
+        candidates = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -2223,16 +2030,6 @@ def test_editorial_proposal_retries_primary_before_fallback() -> None:
                 "rank": 1,
                 "editorial_summary": "Retried primary summary.",
                 "selection_reason": "Highest product priority.",
-                "related_story_url": None,
-            }],
-            "selected_ongoing": [],
-            "story_state_proposals": [{
-                "operation": "add",
-                "candidate_id": selected_id,
-                "evidence_candidate_ids": [selected_id],
-                "latest_dev": "Retried primary summary.",
-                "editorial_significance": "high",
-                "status": "active",
             }],
             "rejected": [],
             "gaps": "",
@@ -2253,10 +2050,10 @@ def test_editorial_proposal_retries_primary_before_fallback() -> None:
         with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
             runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, _, ongoing = editorial.phase_6_curate(
-                catalog.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            fresh = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], summaries, run_dir
             )
-        check(len(fresh) == 1 and not ongoing, (fresh, ongoing))
+        check(len(fresh) == 1, fresh)
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(
             artifact["editorial"]["proposal_model"] == runtime.MODEL,
@@ -2283,7 +2080,7 @@ def test_editorial_critic_retries_primary_after_transient_error() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-10"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture(run_dir.name)
+        candidates = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -2295,16 +2092,6 @@ def test_editorial_critic_retries_primary_after_transient_error() -> None:
                 "rank": 1,
                 "editorial_summary": "Reviewed factual summary.",
                 "selection_reason": "Highest product priority.",
-                "related_story_url": None,
-            }],
-            "selected_ongoing": [],
-            "story_state_proposals": [{
-                "operation": "add",
-                "candidate_id": selected_id,
-                "evidence_candidate_ids": [selected_id],
-                "latest_dev": "Reviewed factual summary.",
-                "editorial_significance": "high",
-                "status": "active",
             }],
             "rejected": [],
             "gaps": "",
@@ -2325,8 +2112,8 @@ def test_editorial_critic_retries_primary_after_transient_error() -> None:
         with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
             runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, _, _ = editorial.phase_6_curate(
-                catalog.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            fresh = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], summaries, run_dir
             )
         check(len(fresh) == 1, (fresh,))
         artifact = json.loads((run_dir / "06-curated.json").read_text())
@@ -2351,7 +2138,7 @@ def test_critic_fallback_verdict_spelling_normalized() -> None:
         root = Path(temporary)
         run_dir = root / "world" / "2026-08-31"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture(run_dir.name)
+        candidates = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -2363,10 +2150,7 @@ def test_critic_fallback_verdict_spelling_normalized() -> None:
                 "rank": 1,
                 "editorial_summary": "Reviewed factual summary.",
                 "selection_reason": "Highest product priority.",
-                "related_story_url": None,
             }],
-            "selected_ongoing": [],
-            "story_state_proposals": [],
             "rejected": [],
             "gaps": "",
             "balance_summary": "One lead story.",
@@ -2388,8 +2172,8 @@ def test_critic_fallback_verdict_spelling_normalized() -> None:
         with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
             runtime, "_call_llm_proxy", side_effect=fake_call
         ):
-            fresh, _, _ = editorial.phase_6_curate(
-                catalog.TOPICS["world"], summaries, [], tracker, run_dir
+            fresh = editorial.phase_6_curate(
+                catalog.TOPICS["world"], summaries, run_dir
             )
         check(len(fresh) == 1, (fresh,))
         artifact = json.loads((run_dir / "06-curated.json").read_text())
@@ -2418,7 +2202,7 @@ def test_critic_rejection_fails_closed() -> None:
         root = Path(temporary)
         run_dir = root / "ai-tech" / "2026-08-10"
         run_dir.mkdir(parents=True)
-        candidates, _, tracker = editorial_fixture(run_dir.name)
+        candidates = editorial_fixture(run_dir.name)
         summaries = [
             {key: value for key, value in candidate.items() if key != "candidate_id"}
             for candidate in candidates
@@ -2429,15 +2213,6 @@ def test_critic_rejection_fails_closed() -> None:
                 "candidate_id": selected_id,
                 "editorial_summary": "Proposed summary.",
             }],
-            "selected_ongoing": [],
-            "story_state_proposals": [{
-                "operation": "add",
-                "candidate_id": selected_id,
-                "evidence_candidate_ids": [selected_id],
-                "latest_dev": "Proposed summary.",
-                "editorial_significance": "high",
-                "status": "active",
-            }],
         }
         responses = [
             json.dumps(proposal),
@@ -2447,39 +2222,14 @@ def test_critic_rejection_fails_closed() -> None:
         with patch.object(runtime, "DIGESTS_DIR", root), patch.object(
             runtime, "_call_llm_proxy", side_effect=responses
         ):
-            fresh, updated, _ = editorial.phase_6_curate(
-                catalog.TOPICS["ai-tech"], summaries, [], tracker, run_dir
+            fresh = editorial.phase_6_curate(
+                catalog.TOPICS["ai-tech"], summaries, run_dir
             )
         artifact = json.loads((run_dir / "06-curated.json").read_text())
         check(len(fresh) == 2, "critic rejection did not use source-ranked fallback")
-        # Rejected state cannot apply. The deterministic fallback records only
-        # selected high-significance roots; medium one-offs are not follow-up
-        # candidates for Developing and Ongoing.
         check(
-            not any(
-                story.get("latest_dev") == "Proposed summary."
-                for story in updated["stories"]
-            ),
-            "rejected state proposal was applied",
-        )
-        today = run_dir.name
-        added = {
-            story.get("url"): story
-            for story in updated["stories"]
-            if story.get("first_seen") == today
-        }
-        check(
-            set(added) == {"https://example.com/primary"},
-            f"fallback tracked non-high fresh stories: {added}",
-        )
-        check(
-            all(
-                story.get("last_updated") == today
-                and story.get("editorial_significance") == "high"
-                and len(story.get("developments", [])) == 1
-                for story in added.values()
-            ),
-            added,
+            all(story.get("summary") != "Proposed summary." for story in fresh),
+            "rejected proposal summary shipped",
         )
         check(
             artifact["editorial"]["review_status"] == "rejected_fallback",
@@ -2508,7 +2258,7 @@ def test_standfirst_boundary_and_deterministic_render() -> None:
     )
     check(not valid and "mid-sentence" in reason, reason)
     fallback = copy_module.fallback_standfirst(
-        [{"summary": "A verified change occurred. Additional detail follows."}], []
+        [{"summary": "A verified change occurred. Additional detail follows."}]
     )
     check(fallback == "A verified change occurred.", fallback)
     abbreviation_sentence = (
@@ -2540,7 +2290,6 @@ def test_standfirst_boundary_and_deterministic_render() -> None:
                 ),
             },
         ],
-        [],
     )
     check(
         fallback == "Emergency crews moved residents to safer ground.",
@@ -2555,445 +2304,24 @@ def test_standfirst_boundary_and_deterministic_render() -> None:
         "category": "Research",
         "summary": "Verified & reviewed.",
     }]
-    ongoing = [{
-        "title": "Ongoing",
-        "url": "https://example.com/ongoing",
-        "category": "Policy",
-        "summary": "Existing summary.",
-        "why_still_relevant": "New evidence.",
-    }]
     rendered = archive.render_digest_html(
-        {"title": "Test Section"}, fresh, ongoing, "Verified source-backed standfirst."
+        {"title": "Test Section"}, fresh, "Verified source-backed standfirst."
     )
     check("Safe &lt;Title&gt;" in rendered, "title was not escaped")
     check('href="https://example.com/story?a=1&amp;b=2"' in rendered,
           "URL was not safely rendered")
-    check("↳ New evidence." in rendered, "ongoing rationale missing")
     check("{{FRESH_STORIES}}" not in rendered, "template placeholder remained")
     check("STORY BLOCK TEMPLATE" not in rendered, "template instructions leaked")
-    check(
-        "Developing and Ongoing" in rendered,
-        "rendered section label did not match the editorial contract",
-    )
 
 
-def test_tracker_updates_require_material_evidence() -> None:
-    """Rendering is not evidence; an exact source-linked follow-up is."""
-    candidates, sif_candidates, tracker = editorial_fixture()
-    proposal = {
-        "selected_fresh": [{"candidate_id": candidates[1]["candidate_id"]}],
-        "selected_ongoing": [{
-            "story_url": "https://example.com/existing",
-            "summary": "Established multi-day development.",
-            "why_still_relevant": "Latest verified action remains in effect.",
-        }],
-        "story_state_proposals": [],
-    }
-    validated, _ = editorial.validate_editorial_proposal(
-        proposal, candidates, sif_candidates, tracker
-    )
-    check(validated["story_state_proposals"] == [],
-          validated["story_state_proposals"])
-    original = json.loads(json.dumps(tracker))
-    displayed = editorial.apply_story_state_proposals(
-        tracker, validated, candidates, "2026-08-10"
-    )
-    check(tracker == original, "state application mutated its input")
-    check(displayed["stories"][0]["last_updated"] == "2026-08-09",
-          displayed["stories"][0])
-
-    # A new article may update a tracked root only when the dedicated research
-    # path declared the exact relationship. The candidate URL may differ.
-    followup = {
-        **candidates[0],
-        "title": "Existing narrative materially advances",
-        "url": "https://news.example.com/existing-action",
-        "candidate_id": "candidate-linked-followup",
-        "develops_story_url": "https://example.com/existing",
-    }
-    candidates.append(followup)
-    with_update = {
-        "selected_fresh": [{
-            "candidate_id": followup["candidate_id"],
-            "editorial_summary": "Officials took a new, verified action.",
-            "related_story_url": "https://example.com/existing",
-        }],
-        "selected_ongoing": [{
-            "story_url": "https://example.com/existing",
-            "summary": "The tracked story now includes the official action.",
-            "why_still_relevant": "Officials took a new action today.",
-        }],
-        "story_state_proposals": [],
-    }
-    validated, _ = editorial.validate_editorial_proposal(
-        with_update, candidates, sif_candidates, tracker
-    )
-    update_ops = [
-        op for op in validated["story_state_proposals"]
-        if op["operation"] == "update"
-    ]
-    check(len(update_ops) == 1, validated["story_state_proposals"])
-    check(
-        update_ops[0]["evidence_candidate_ids"] == [followup["candidate_id"]],
-        update_ops,
-    )
-    updated = editorial.apply_story_state_proposals(
-        tracker, validated, candidates, "2026-08-10"
-    )
-    story = updated["stories"][0]
-    check(story["latest_dev"] == "Officials took a new, verified action.", story)
-    check(
-        contracts.story_development_dates(story)
-        == {"2026-08-08", "2026-08-09", "2026-08-10"},
-        story,
-    )
-
-
-def test_developing_section_requires_significance_and_multiple_dates() -> None:
-    """One-off and non-high stories never qualify, regardless of age/touches."""
-    candidates, _, _ = editorial_fixture()
-    one_off = {
-        "title": "Single announcement",
-        "url": "https://tracker.example/announcement",
-        "category": "Industry",
-        "latest_dev": "The original announcement.",
-        "status": "active",
-        "editorial_significance": "high",
-        "first_seen": "2026-08-20",
-        # A legacy display touch must not count as evidence.
-        "last_updated": "2026-08-24",
-    }
-    medium_multiday = {
-        "title": "Repeated but not important",
-        "url": "https://tracker.example/medium",
-        "category": "Industry",
-        "latest_dev": "A second minor update.",
-        "status": "active",
-        "editorial_significance": "medium",
-        "first_seen": "2026-08-20",
-        "last_updated": "2026-08-22",
-        "developments": [
-            {"date": "2026-08-20", "url": "https://tracker.example/medium"},
-            {"date": "2026-08-22", "url": "https://news.example/medium-update"},
-        ],
-    }
-    qualified = {
-        "title": "Important story with real movement",
-        "url": "https://tracker.example/qualified",
-        "category": "Policy",
-        "latest_dev": "Officials issued a binding decision.",
-        "status": "active",
-        **validated_high_fields(),
-        "first_seen": "2026-08-20",
-        "last_updated": "2026-08-22",
-        "developments": [
-            {"date": "2026-08-20", "url": "https://tracker.example/qualified"},
-            {"date": "2026-08-22", "url": "https://news.example/binding-decision"},
-        ],
-    }
-    unsupported_high = {
-        "title": "High label without evidence",
-        "url": "https://tracker.example/unsupported-high",
-        "category": "Policy",
-        "latest_dev": "A second update occurred.",
-        "status": "active",
-        "editorial_significance": "high",
-        "first_seen": "2026-08-20",
-        "last_updated": "2026-08-22",
-        "developments": [
-            {"date": "2026-08-20", "url": "https://tracker.example/unsupported-high"},
-            {"date": "2026-08-22", "url": "https://news.example/unsupported-update"},
-        ],
-    }
-    tracker = {"stories": [one_off, medium_multiday, unsupported_high, qualified]}
-    proposal = {
-        "selected_fresh": [
-            {"candidate_id": candidates[0]["candidate_id"]},
-            {"candidate_id": candidates[1]["candidate_id"]},
-        ],
-        "selected_ongoing": [
-            {"story_url": story["url"], "summary": story["latest_dev"],
-             "why_still_relevant": story["latest_dev"]}
-            for story in tracker["stories"]
-        ],
-        "story_state_proposals": [],
-    }
-    validated, warnings = editorial.validate_editorial_proposal(
-        proposal, candidates, tracker["stories"], tracker
-    )
-    check(
-        [item["story_url"] for item in validated["selected_ongoing"]]
-        == [qualified["url"]],
-        validated["selected_ongoing"],
-    )
-    check(
-        sum("unqualified developing story" in warning for warning in warnings) == 3,
-        warnings,
-    )
-
-
-def test_followup_research_targets_prior_high_significance_stories() -> None:
-    today = datetime(2026, 8, 25, tzinfo=timezone.utc).date()
-    stories = {
-        "stories": [
-            {
-                "title": "Prior high story",
-                "url": "https://tracker.example/high",
-                **validated_high_fields(),
-                "status": "active",
-                "first_seen": "2026-08-24",
-                "last_updated": "2026-08-24",
-            },
-            {
-                "title": "Prior medium story",
-                "url": "https://tracker.example/medium",
-                "editorial_significance": "medium",
-                "status": "active",
-                "first_seen": "2026-08-24",
-                "last_updated": "2026-08-24",
-            },
-            {
-                "title": "Same-day high story",
-                "url": "https://tracker.example/today",
-                **validated_high_fields(),
-                "status": "active",
-                "first_seen": "2026-08-25",
-                "last_updated": "2026-08-25",
-            },
-        ]
-    }
-    angle = contracts.build_developing_followup_angle(stories, today)
-    check(angle is not None, "high-priority prior story was not scheduled")
-    prompt = angle["prompt"]
-    check("https://tracker.example/high" in prompt, prompt)
-    check("https://tracker.example/medium" not in prompt, prompt)
-    check("https://tracker.example/today" not in prompt, prompt)
-
-
-def test_tracker_retention_uses_evidence_inactivity() -> None:
-    today = datetime(2026, 8, 25, tzinfo=timezone.utc).date()
-    active_long_running = {
-        "title": "Long-running active crisis",
-        "url": "https://tracker.example/active",
-        "editorial_significance": "high",
-        "status": "active",
-        "first_seen": "2026-08-01",
-        "last_updated": "2026-08-24",
-        "developments": [
-            {"date": "2026-08-01", "url": "https://tracker.example/active"},
-            {"date": "2026-08-24", "url": "https://news.example/latest-action"},
-        ],
-    }
-    inactive_active = {
-        "title": "Recently stalled story",
-        "url": "https://tracker.example/stalled",
-        "editorial_significance": "high",
-        "status": "active",
-        "first_seen": "2026-08-10",
-        "last_updated": "2026-08-20",
-        "developments": [
-            {"date": "2026-08-10", "url": "https://tracker.example/stalled"},
-            {"date": "2026-08-20", "url": "https://news.example/stalled-update"},
-        ],
-    }
-    expired_cooled = {
-        "title": "Expired cooled story",
-        "url": "https://tracker.example/expired",
-        "editorial_significance": "high",
-        "status": "cooled",
-        "first_seen": "2026-08-01",
-        "last_updated": "2026-08-10",
-        "developments": [
-            {"date": "2026-08-10", "url": "https://tracker.example/expired"},
-        ],
-    }
-    kept, cooled, pruned = archive.prune_and_cool_stories(
-        [active_long_running, inactive_active, expired_cooled], today
-    )
-    kept_by_url = {story["url"]: story for story in kept}
-    check(active_long_running["url"] in kept_by_url, kept)
-    check(kept_by_url[inactive_active["url"]]["status"] == "cooled", kept)
-    check(expired_cooled["url"] not in kept_by_url, kept)
-    check((cooled, pruned) == (1, 1), (cooled, pruned))
-
-
-def test_ongoing_resurface_cap_cools_recurring_story() -> None:
-    """An Ongoing story surfaced on many consecutive days without an
-    evidence-backed development must be dropped and cooled, so the digest
-    cannot repeat the same story day after day (digest-quality audit
-    2026-08-22: the 404 Media rare-books story ran in ai-tech and OpenAI's
-    PORTS-Pike story in ai-hardware on five consecutive days 08-18→08-22 with
-    paraphrased summaries of the same facts)."""
-    from datetime import date as date_cls
-    story_url = "https://example.com/recurring"
-    tracker = {"stories": [{
-        "title": "Recurring story",
-        "url": story_url,
-        "category": "Research",
-        "latest_dev": "No new development.",
-        "status": "active",
-        "editorial_significance": "medium",
-        "first_seen": "2026-08-18",
-        "last_updated": "2026-08-21",
-    }]}
-    proposal = {
-        "selected_fresh": [],
-        "selected_ongoing": [{
-            "story_url": story_url,
-            "summary": "Same facts as yesterday.",
-            "why_still_relevant": "Still the lead.",
-        }],
-        "story_state_proposals": [],
-    }
-    today = date_cls(2026, 8, 22)
-    with tempfile.TemporaryDirectory() as temporary:
-        digest_dir = Path(temporary)
-        # Days 08-18..08-21 all surfaced the story → this run would be day 5.
-        for day in range(18, 22):
-            curated_dir = digest_dir / f"2026-08-{day:02d}"
-            curated_dir.mkdir()
-            (curated_dir / "06-curated.json").write_text(json.dumps({
-                "fresh": [],
-                "ongoing": [{"url": story_url, "title": "Recurring story"}],
-            }))
-        warnings, ops = contracts.enforce_ongoing_resurface_cap(
-            proposal, tracker, digest_dir, today
-        )
-        check(proposal["selected_ongoing"] == [], proposal["selected_ongoing"])
-        check(
-            any("consecutive days" in warning for warning in warnings), warnings
-        )
-        check(
-            len(ops) == 1
-            and ops[0]["operation"] == "update"
-            and ops[0]["story_url"] == story_url
-            and ops[0]["status"] == "cooled"
-            and ops[0]["latest_dev"] == "No new development.",
-            ops,
-        )
-
-        # A gap in the run resets the counter: 4 days total but not consecutive
-        # means the story is not capped.
-        gap_dir = Path(temporary) / "gap"
-        gap_dir.mkdir()
-        for day in (18, 19, 21):  # 08-20 missing
-            curated_dir = gap_dir / f"2026-08-{day:02d}"
-            curated_dir.mkdir()
-            (curated_dir / "06-curated.json").write_text(json.dumps({
-                "fresh": [],
-                "ongoing": [{"url": story_url}],
-            }))
-        check(
-            contracts.consecutive_surfaced_days(gap_dir, story_url, today) == 1,
-            contracts.consecutive_surfaced_days(gap_dir, story_url, today),
-        )
-
-        # An evidence-backed update op (a real development) resets the cap.
-        evidenced = {
-            "selected_fresh": [],
-            "selected_ongoing": [{
-                "story_url": story_url,
-                "summary": "Same facts as yesterday.",
-                "why_still_relevant": "Still the lead.",
-            }],
-            "story_state_proposals": [{
-                "operation": "update",
-                "story_url": story_url,
-                "evidence_candidate_ids": ["candidate-x"],
-                "latest_dev": "New development.",
-                "editorial_significance": "medium",
-                "status": "active",
-            }],
-        }
-        warnings, ops = contracts.enforce_ongoing_resurface_cap(
-            evidenced, tracker, digest_dir
-        )
-        check(len(evidenced["selected_ongoing"]) == 1, evidenced["selected_ongoing"])
-        check(warnings == [] and ops == [], (warnings, ops))
-
-
-def test_editorial_floor_and_publication_artifact() -> None:
-    """The editorial floor rejects filler and Phase 8 publishes stable local data."""
-    candidates, sif_candidates, tracker = editorial_fixture()
-    low_one_off = {
-        "title": "Low-priority one-off",
-        "url": "https://second.example/one-off",
-        "category": "Policy",
-        "latest_dev": "Only one minor report.",
-        "status": "active",
-        "editorial_significance": "low",
-        "first_seen": "2026-08-10",
-        "last_updated": "2026-08-10",
-    }
-    second_sif = {
-        "title": "Second qualified developing story",
-        "url": "https://second.example/ongoing",
-        "category": "Policy",
-        "latest_dev": "A binding second development.",
-        "status": "active",
-        **validated_high_fields(),
-        "first_seen": "2026-08-09",
-        "last_updated": "2026-08-10",
-        "developments": [
-            {"date": "2026-08-09", "url": "https://second.example/ongoing"},
-            {"date": "2026-08-10", "url": "https://news.example/second-action"},
-        ],
-    }
-    sif_candidates.extend([low_one_off, second_sif])
-
-    # 1 fresh + 0 ongoing → floor uses the newest qualified story only.
-    proposal = {
-        "selected_fresh": [{"candidate_id": candidates[0]["candidate_id"]}],
-        "selected_ongoing": [],
-        "story_state_proposals": [],
-    }
-    validated, warnings = editorial.validate_editorial_proposal(
-        proposal, candidates, sif_candidates, tracker
-    )
-    filled = {item["story_url"] for item in validated["selected_ongoing"]}
-    check(filled == {"https://second.example/ongoing"},
-          validated["selected_ongoing"])
-    check(
-        len(validated["selected_fresh"]) + len(validated["selected_ongoing"]) == 2,
-        validated,
-    )
-    check(
-        all(item["why_still_relevant"] for item in validated["selected_ongoing"]),
-        validated["selected_ongoing"],
-    )
-
-    # Floor does not add a second story once two are selected.
-    both = {
-        "selected_fresh": [
-            {"candidate_id": candidates[0]["candidate_id"]},
-            {"candidate_id": candidates[1]["candidate_id"]},
-        ],
-        "selected_ongoing": [{
-            "story_url": "https://example.com/existing",
-            "summary": "Summarized.",
-            "why_still_relevant": "Relevant.",
-        }],
-        "story_state_proposals": [],
-    }
-    validated, _ = editorial.validate_editorial_proposal(
-        both, candidates, sif_candidates, tracker
-    )
-    check(len(validated["selected_ongoing"]) == 1, validated["selected_ongoing"])
-
-    # 0 fresh + 0 ongoing and an empty pool remains honestly empty.
-    empty_validated, _ = editorial.validate_editorial_proposal(
-        {"selected_fresh": [], "selected_ongoing": [], "story_state_proposals": []},
-        candidates, [], {"stories": []}, set(),
-    )
-    check(not empty_validated["selected_fresh"] and not empty_validated["selected_ongoing"],
-          empty_validated)
-
+def test_phase_eight_publication_artifact() -> None:
+    """Phase 8 publishes stable local data without private editorial fields."""
     with tempfile.TemporaryDirectory() as temporary:
         digest_dir = Path(temporary) / "world-digest"
         run_dir = digest_dir / f"{datetime.now():%Y-%m-%d}"
         digest_dir.mkdir(parents=True)
         run_dir.mkdir()
-        (run_dir / "06-curated.json").write_text(json.dumps({"fresh": [], "ongoing": []}))
+        (run_dir / "06-curated.json").write_text(json.dumps({"fresh": []}))
         fresh_story = {
             "title": "First",
             "url": "https://example.com/a",
@@ -3004,16 +2332,15 @@ def test_editorial_floor_and_publication_artifact() -> None:
             "priority_explanation": "High significance and broad observed coverage.",
             "candidate_id": "private-editorial-id",
         }
-        ongoing_story = {
+        second_story = {
             "title": "Second",
             "url": "https://example.com/b",
             "summary": "Second source-backed summary.",
             "editorial_significance": "high",
             "priority_score": 100.0,
-            "why_still_relevant": "A material development occurred today.",
             "selection_reason": "private editorial reasoning",
         }
-        stories = [fresh_story, ongoing_story]
+        stories = [fresh_story, second_story]
         standfirst = fresh_story["summary"]
         story_fingerprint = copy_module.standfirst_story_fingerprint(stories)
         standfirst_inputs = runtime.phase_inputs(
@@ -3047,11 +2374,9 @@ def test_editorial_floor_and_publication_artifact() -> None:
             publication_path = archive.phase_8_archive(
                 catalog.TOPICS["world"],
                 "<html>archive</html>",
-                {"stories": []},
                 run_dir,
                 digest_dir,
-                fresh=[fresh_story],
-                ongoing=[ongoing_story],
+                fresh=stories,
             )
         check(not subprocess_run.called, "topic archive attempted to send email")
         check((digest_dir / f"{datetime.now():%Y-%m-%d}.html").exists(),
@@ -3059,12 +2384,12 @@ def test_editorial_floor_and_publication_artifact() -> None:
         publication = json.loads(publication_path.read_text())
         check(publication["slug"] == "world", publication)
         check(publication["schema_version"] == 2, publication)
+        check(publication["ranking_schema_version"] == catalog.RANKING_SCHEMA_VERSION, publication)
         check(publication["standfirst"] == standfirst, publication["standfirst"])
-        check(len(publication["fresh"]) + len(publication["ongoing"]) == 2, publication)
+        check([story["url"] for story in publication["fresh"]]
+              == [fresh_story["url"], second_story["url"]], publication)
         check("candidate_id" not in publication["fresh"][0], publication["fresh"][0])
-        check("selection_reason" not in publication["ongoing"][0], publication["ongoing"][0])
-        check(publication["ongoing"][0]["why_still_relevant"].startswith("A material"),
-              publication["ongoing"][0])
+        check("selection_reason" not in publication["fresh"][1], publication["fresh"][1])
 
 
 def test_archive_index_urls_rejected() -> None:
@@ -3094,9 +2419,9 @@ def test_archive_index_urls_rejected() -> None:
 
 def test_listing_urls_rejected() -> None:
     """Section/date archive URLs (Guardian .../all) must never be selected into
-    Fresh or Ongoing or enter the tracker (digest-quality audit 2026-08-21:
-    world-digest ongoing entries on 08-20 and 08-21 were the same two Guardian
-    .../all pages, which fetch as the section listing, not an article)."""
+    Fresh (digest-quality audit 2026-08-21: world-digest entries on 08-20 and
+    08-21 were the same two Guardian .../all pages, which fetch as the section
+    listing, not an article)."""
     listing = "https://www.theguardian.com/technology/2026/aug/18/all"
     check(contracts.is_listing_url(listing), listing)
     check(contracts.is_listing_url(listing + "?utm_source=x"), "query-suffixed listing")
@@ -3119,53 +2444,16 @@ def test_listing_urls_rejected() -> None:
             "judge_verdict": "keep",
         },
     ], set())
-    tracker_listing = {
-        "title": "Tracked listing",
-        "url": listing,
-        "category": "Technology",
-        "latest_dev": "Development.",
-        "status": "active",
-        "editorial_significance": "medium",
-        "first_seen": "2026-08-18",
-        "last_updated": "2026-08-19",
-    }
     proposal = {
         "selected_fresh": [
             {"candidate_id": candidates[0]["candidate_id"]},
         ],
-        "selected_ongoing": [{
-            "story_url": listing,
-            "summary": "Still listed.",
-            "why_still_relevant": "Resurfacing identically.",
-        }],
-        "story_state_proposals": [{
-            "operation": "update",
-            "story_url": listing,
-            "evidence_candidate_ids": [candidates[0]["candidate_id"]],
-            "latest_dev": "Updated.",
-            "editorial_significance": "medium",
-            "status": "active",
-        }],
     }
     validated, warnings = editorial.validate_editorial_proposal(
-        proposal, candidates, [tracker_listing],
-        {"stories": [tracker_listing]}, set(),
+        proposal, candidates, set(),
     )
     check(validated["selected_fresh"] == [], validated["selected_fresh"])
-    check(validated["selected_ongoing"] == [], validated["selected_ongoing"])
-    check(validated["story_state_proposals"] == [], validated["story_state_proposals"])
     check(any("listing URL fresh selection" in warning for warning in warnings), warnings)
-    check(any("listing URL ongoing story" in warning for warning in warnings), warnings)
-
-    # The floor must not fill a thin digest with a listing URL either.
-    floor_proposal = {
-        "selected_fresh": [], "selected_ongoing": [], "story_state_proposals": []
-    }
-    validated, _ = editorial.validate_editorial_proposal(
-        floor_proposal, candidates, [tracker_listing],
-        {"stories": [tracker_listing]}, set(),
-    )
-    check(validated["selected_ongoing"] == [], validated["selected_ongoing"])
 
 
 def test_stub_retry_preserves_failed_attempt_artifacts() -> None:
@@ -3198,9 +2486,8 @@ def test_stub_attempts_cleaned_after_success() -> None:
 
 def test_asset_cdn_urls_rejected() -> None:
     """Publisher asset-CDN hosts (assets.theregister.com) must never be selected
-    into Fresh or Ongoing or enter the tracker; they are not article hosts
-    (digest-quality audit 2026-08-24: research invented assets.theregister.com
-    links that 405'd and resurfaced in the tracker for five days)."""
+    into Fresh; they are not article hosts (digest-quality audit 2026-08-24:
+    research invented assets.theregister.com links that 405'd)."""
     cdn = "https://assets.theregister.com/2026/08/19/20262/?td=keepreading&utm_source=openai"
     check(contracts.is_asset_cdn_url(cdn), cdn)
     check(contracts.is_asset_cdn_url(cdn + "?x=1"), "query-suffixed asset CDN")
@@ -3222,53 +2509,16 @@ def test_asset_cdn_urls_rejected() -> None:
             "judge_verdict": "keep",
         },
     ], set())
-    tracker_cdn = {
-        "title": "Tracked asset-CDN story",
-        "url": cdn,
-        "category": "AI Infrastructure",
-        "latest_dev": "Development.",
-        "status": "active",
-        "editorial_significance": "medium",
-        "first_seen": "2026-08-20",
-        "last_updated": "2026-08-20",
-    }
     proposal = {
         "selected_fresh": [
             {"candidate_id": candidates[0]["candidate_id"]},
         ],
-        "selected_ongoing": [{
-            "story_url": cdn,
-            "summary": "Still developing.",
-            "why_still_relevant": "Resurfacing identically.",
-        }],
-        "story_state_proposals": [{
-            "operation": "update",
-            "story_url": cdn,
-            "evidence_candidate_ids": [candidates[0]["candidate_id"]],
-            "latest_dev": "Updated.",
-            "editorial_significance": "medium",
-            "status": "active",
-        }],
     }
     validated, warnings = editorial.validate_editorial_proposal(
-        proposal, candidates, [tracker_cdn],
-        {"stories": [tracker_cdn]}, set(),
+        proposal, candidates, set(),
     )
     check(validated["selected_fresh"] == [], validated["selected_fresh"])
-    check(validated["selected_ongoing"] == [], validated["selected_ongoing"])
-    check(validated["story_state_proposals"] == [], validated["story_state_proposals"])
     check(any("asset-CDN fresh selection" in warning for warning in warnings), warnings)
-    check(any("asset-CDN ongoing story" in warning for warning in warnings), warnings)
-
-    # The floor must not fill a thin digest with an asset-CDN URL either.
-    floor_proposal = {
-        "selected_fresh": [], "selected_ongoing": [], "story_state_proposals": []
-    }
-    validated, _ = editorial.validate_editorial_proposal(
-        floor_proposal, candidates, [tracker_cdn],
-        {"stories": [tracker_cdn]}, set(),
-    )
-    check(validated["selected_ongoing"] == [], validated["selected_ongoing"])
 
 
 def test_proxy_5xx_retry_with_backoff() -> None:
@@ -3361,11 +2611,9 @@ def main() -> None:
         test_cross_topic_same_event_referenced_url_dedup,
         test_rank_resume_fingerprint_includes_cross_topic_urls,
         test_phase_two_cross_day_dedup_window_contract,
-        test_phase_two_rejects_unvalidated_legacy_followup,
         test_recent_coverage_ledger_blocks_other_section_repeats,
         test_phase_two_shared_url_findings_keep_their_own_metadata,
         test_phase_two_drops_unidentified_shared_url_finding,
-        test_ongoing_card_follows_latest_verified_development,
         test_runtime_preflight_fails_closed_on_missing_symbol,
         test_phase_inputs_include_actual_code_hashes,
         test_empty_phase_has_explicit_durable_outcome,
@@ -3377,10 +2625,13 @@ def main() -> None:
         test_hard_paywall_story_uses_alternate_source,
         test_hard_paywall_story_uses_same_event_attention_url,
         test_phase_four_concurrency_and_shared_cache,
+        test_failed_fetch_uses_alternate_source,
+        test_failed_fetch_alternates_exhausted,
+        test_failed_fetch_same_story_substitutes_once,
         test_phase_five_backfills_date_confirmed_from_date_published,
         test_cached_curation_regenerates_referenced_url_sidecar,
         test_phase_six_backfills_missing_date_confirmed_on_curated_fresh,
-        test_editorial_validation_and_state_application,
+        test_editorial_validation,
         test_editorial_critic_patch_contract,
         test_editorial_drops_stale_fresh_selection,
         test_freshness_gate_rejects_future_dates,
@@ -3396,12 +2647,7 @@ def main() -> None:
         test_critic_fallback_verdict_spelling_normalized,
         test_critic_rejection_fails_closed,
         test_standfirst_boundary_and_deterministic_render,
-        test_tracker_updates_require_material_evidence,
-        test_developing_section_requires_significance_and_multiple_dates,
-        test_followup_research_targets_prior_high_significance_stories,
-        test_tracker_retention_uses_evidence_inactivity,
-        test_ongoing_resurface_cap_cools_recurring_story,
-        test_editorial_floor_and_publication_artifact,
+        test_phase_eight_publication_artifact,
         test_listing_urls_rejected,
         test_archive_index_urls_rejected,
         test_stub_attempts_cleaned_after_success,

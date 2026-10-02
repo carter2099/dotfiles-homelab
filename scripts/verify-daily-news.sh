@@ -98,6 +98,7 @@ run_release_smoke() {
     "$PYTHON" - "$WORKDIR" "$SCRIPT_DIR" <<'PY'
 import json
 import pathlib
+import re
 import sys
 
 root = pathlib.Path(sys.argv[1])
@@ -110,8 +111,16 @@ digests = root / "digests"
 news_dir = root / "news"
 assets = root / "assets"
 assets.mkdir(parents=True)
-(assets / "news.css").write_text("body { color: #171716; }\n", encoding="utf-8")
+(assets / "news.css").write_text(
+    '@font-face { src: url("fonts/unifrakturmaguntia-normal.woff2"); }\n'
+    "body { color: #171716; }\n",
+    encoding="utf-8",
+)
 (assets / "news.js").write_text("void 0;\n", encoding="utf-8")
+(assets / "speculationrules.json").write_text('{"prefetch": []}\n', encoding="utf-8")
+(assets / "fonts").mkdir()
+(assets / "fonts" / "unifrakturmaguntia-normal.woff2").write_bytes(b"wOF2")
+(assets / "fonts" / "OFL-unifrakturmaguntia.txt").write_text("license\n", encoding="utf-8")
 
 for key in news_publish.TOPIC_ORDER:
     topic = news_publish.TOPICS[key]
@@ -136,7 +145,6 @@ for key in news_publish.TOPIC_ORDER:
             "editorial_significance": "high",
             "priority_score": 80.0,
         }],
-        "ongoing": [],
         "generated_at": f"{issue_date}T12:00:00+00:00",
     }
     (run_dir / "publication.json").write_text(
@@ -160,14 +168,34 @@ required_pages = [
     current / issue_date / "index.html",
     current / "archive" / "index.html",
     current / "404.html",
-    current / "assets" / "news.css",
-    current / "assets" / "news.js",
+    current / "assets" / "speculationrules.json",
+    current / "assets" / "fonts" / "OFL-unifrakturmaguntia.txt",
 ]
 for key in news_publish.TOPIC_ORDER:
     required_pages.append(current / issue_date / news_publish.TOPICS[key]["web_slug"] / "index.html")
 for path in required_pages:
     if not path.is_file():
         raise SystemExit(f"release page missing: {path}")
+# nginx caches content-hashed names forever: every page and stylesheet
+# reference must be one, exist in the release, and the preload must be the
+# exact font URL the stylesheet loads.
+hashed = re.compile(r"/assets/(?:fonts/)?[A-Za-z0-9_-]+\.[0-9a-f]{12}\.(?:css|js|woff2)")
+front = (current / "index.html").read_text(encoding="utf-8")
+page_urls = set(re.findall(r'(?:href|src)="(/assets/[^"]+)"', front))
+preloads = set(re.findall(r'<link rel="preload" href="([^"]+)"', front))
+font_urls = set()
+for url in page_urls:
+    if url.endswith(".css"):
+        css = (current / url.lstrip("/")).read_text(encoding="utf-8")
+        font_urls |= {f"/assets/{target}" for target in re.findall(r'url\("([^"]+)"\)', css)}
+if not preloads or not preloads <= font_urls:
+    raise SystemExit(f"nameplate preload {preloads} is not a stylesheet font {font_urls}")
+for url in page_urls | font_urls:
+    if not hashed.fullmatch(url) or not (current / url.lstrip("/")).is_file():
+        raise SystemExit(f"asset reference is unhashed or missing: {url}")
+for path in (current / "assets").rglob("*"):
+    if path.suffix in {".css", ".js", ".woff2"} and not hashed.fullmatch(f"/{path.relative_to(current)}"):
+        raise SystemExit(f"release ships an unhashed asset: {path}")
 build = json.loads((current / "build.json").read_text(encoding="utf-8"))
 if build != {
     **build,

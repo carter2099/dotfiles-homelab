@@ -283,16 +283,20 @@ def scan_diff(diff: str, policy: Policy | None = None, *, mac: bool = True) -> l
     return findings
 
 
+BINARY_REVIEW = "binary file requires manual review"
+NON_UTF8_REVIEW = "non-UTF-8 file requires manual review"
+
+
 def scan(path: str, content: bytes, *, entropy: bool = True) -> str | None:
     """Deterministic secret scan; the reason names the rule and line, never the value."""
     if dotfiles._secret_file_name(path) or dotfiles._is_sensitive(path):
         return "secret-looking file name"
     if b"\0" in content:
-        return "binary file requires manual review"
+        return BINARY_REVIEW
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
-        return "non-UTF-8 file requires manual review"
+        return NON_UTF8_REVIEW
     for number, line in enumerate(text.splitlines(), 1):
         rule = _line_finding(line, entropy)
         if rule:
@@ -357,10 +361,16 @@ def _carter_approved(recorded: dict[str, Any] | None, content: bytes) -> bool:
 def decide(path: str, content: bytes, *, policy: Policy,
            decisions: dict[str, dict[str, Any]],
            client: Any | Callable[[], Any] = None, today: str | None = None) -> Decision:
-    """Publish scope of one path.  ``client`` may be a Jev client or a zero-arg factory."""
+    """Publish scope of one path.  ``client`` may be a Jev client or a zero-arg factory.
+
+    A binary/non-UTF-8 scan hold is lifted only by Carter's ``public`` decision for this
+    exact blob (that decision is the manual review); every other scan hit always holds."""
     if policy.is_private(path):
         return Decision("private", "rule", "private rule")
     hit = scan(path, content, entropy=policy.entropy_checked(path))
+    if hit in (BINARY_REVIEW, NON_UTF8_REVIEW) and _carter_approved(decisions.get(path), content):
+        return Decision("public", "decision", f"{hit}; this exact content approved by carter",
+                        vetted=True)
     if hit:
         return Decision("held", "scan", hit)
     if policy.is_public(path):

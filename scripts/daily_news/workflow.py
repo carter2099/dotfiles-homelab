@@ -85,7 +85,6 @@ def validate_runtime_contract() -> None:
             errors.append(f"{key} missing fields: {', '.join(sorted(missing))}")
     for name, owner in (
         ("load_recent_coverage_ledger", contracts),
-        ("tracker_display_source", contracts),
         ("load_cross_topic_urls", contracts),
         ("phase_2_judge_research", research),
         ("phase_2b_attention", research),
@@ -131,7 +130,6 @@ def _write_test_report(
     n_findings: int,
     n_summaries: int,
     n_fresh: int,
-    n_ongoing: int,
 ) -> None:
     """Write the existing test-run report artifact."""
     report_path = run_dir / "test-report.md"
@@ -162,7 +160,6 @@ def _write_test_report(
         f"| Phase 1 findings | {n_findings} |",
         f"| Phase 4 summaries | {n_summaries} |",
         f"| Final fresh stories | {n_fresh} |",
-        f"| Final ongoing stories | {n_ongoing} |",
         "",
         "## Artifacts",
         "",
@@ -190,11 +187,6 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         test_root = runtime.TEST_ROOT or runtime.DIGESTS_DIR / "test"
         digest_dir = test_root / topic["category"]
         run_dir = digest_dir / label
-        prod_sif = runtime.DIGESTS_DIR / topic["category"] / "stories-in-flight.json"
-        if prod_sif.exists():
-            digest_dir.mkdir(parents=True, exist_ok=True)
-            runtime.atomic_write_text(digest_dir / "stories-in-flight.json", prod_sif.read_text())
-            print(f"  [test] Copied stories-in-flight from prod ({prod_sif})")
     else:
         digest_dir = runtime.DIGESTS_DIR / topic["category"]
         run_dir = digest_dir / today_str
@@ -238,15 +230,6 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         print(f"  [{elapsed:.0f}s] {name}")
 
     setup_started = phase_start("Phase 0: Setup")
-    # Test runs copy the production tracker; its evidence runs live there too.
-    stories_in_flight = archive.load_and_prune_stories_in_flight(
-        digest_dir,
-        evidence_dir=(
-            runtime.DIGESTS_DIR / topic["category"] if runtime.TEST_MODE else None
-        ),
-    )
-    active_stories = [story for story in stories_in_flight.get("stories", []) if story.get("status") == "active"]
-    print(f"  Stories in flight: {len(active_stories)} active")
     if not runtime.TEST_MODE:
         archive.cleanup_old_artifacts(digest_dir)
     phase_done("Phase 0: Setup", setup_started)
@@ -268,7 +251,6 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         findings: list[dict] = []
         summaries: list[dict] = []
         fresh: list[dict] = []
-        ongoing: list[dict] = []
         for stub_retry in range(2):
             if stub_retry > 0:
                 if runtime.MODEL_OVERRIDE:
@@ -280,7 +262,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
 
             started = phase_start("Phase 1: Research")
             runtime.check_search_health("pre-phase1")
-            findings = research.phase_1_research(topic, run_dir, stories_in_flight)
+            findings = research.phase_1_research(topic, run_dir)
             if not findings and not runtime.TEST_MODE:
                 fallback = runtime.MODEL if runtime.MODEL_OVERRIDE else runtime.MODEL_FALLBACK
                 retry_delay = min(10 * (2 ** (retry_count + 1)), 120)
@@ -288,7 +270,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 time.sleep(retry_delay)
                 runtime.MODEL_OVERRIDE = fallback
                 archive.archive_stub_attempt(run_dir)
-                findings = research.phase_1_research(topic, run_dir, stories_in_flight)
+                findings = research.phase_1_research(topic, run_dir)
                 if findings:
                     print(f"  *** RETRY succeeded with fallback model: {fallback}")
                 else:
@@ -299,21 +281,16 @@ def run_digest(category: str, dry_run: bool = False) -> None:
             research_findings = deepcopy(findings)
 
             started = phase_start("Phase 2: Judge Research")
-            fresh_findings, ongoing_findings = research.phase_2_judge_research(
-                topic, findings, run_dir, stories_in_flight,
-            )
+            fresh_findings = research.phase_2_judge_research(topic, findings, run_dir)
             phase_done("Phase 2: Judge Research", started)
 
             started = phase_start("Phase 2b: Observe Attention")
-            fresh_findings, ongoing_findings = research.phase_2b_attention(
-                topic, fresh_findings, ongoing_findings, run_dir,
-            )
+            fresh_findings = research.phase_2b_attention(topic, fresh_findings, run_dir)
             phase_done("Phase 2b: Observe Attention", started)
 
             started = phase_start("Phase 3: Rank URLs")
-            phase_4_queue, sif_candidates = research.phase_3_rank(
-                topic, fresh_findings, ongoing_findings, stories_in_flight, run_dir,
-                research_findings,
+            phase_4_queue = research.phase_3_rank(
+                topic, fresh_findings, run_dir, research_findings,
             )
             phase_done("Phase 3: Rank URLs", started)
 
@@ -326,15 +303,8 @@ def run_digest(category: str, dry_run: bool = False) -> None:
             phase_done("Phase 5: Judge Summaries", started)
 
             started = phase_start("Phase 6: Curate")
-            fresh, stories_in_flight, ongoing = editorial.phase_6_curate(
-                topic, judged, sif_candidates, stories_in_flight, run_dir,
-            )
+            fresh = editorial.phase_6_curate(topic, judged, run_dir)
             phase_done("Phase 6: Curate", started)
-            if stories_in_flight.get("stories"):
-                kept, re_cooled, re_pruned = archive.prune_and_cool_stories(stories_in_flight["stories"])
-                if re_cooled or re_pruned:
-                    print(f"  [post-6] Re-cooled {re_cooled} stale, re-pruned {re_pruned} expired stories")
-                    stories_in_flight["stories"] = kept
 
             if stub_retry == 0 and not fresh and not runtime.TEST_MODE:
                 if not runtime.MODEL_OVERRIDE:
@@ -347,21 +317,20 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         notice = ""
         if research._UPSTREAM_OUTAGE:
             notice = (
-                "NOTE: Today’s research stage was degraded—the research API returned no fresh findings. "
-                "The stories below are ongoing coverage carried over from previous days."
+                "NOTE: Today’s research stage was degraded—the research API returned no fresh findings."
             )
-        rendered_html = archive.phase_7_write(topic, fresh, ongoing, run_dir, notice=notice)
+        rendered_html = archive.phase_7_write(topic, fresh, run_dir, notice=notice)
         phase_done("Phase 7: Write Archive HTML", started)
 
         started = phase_start("Phase 8: Archive & Publish Artifact")
         archive.phase_8_archive(
-            topic, rendered_html, stories_in_flight, run_dir, digest_dir,
-            fresh=fresh, ongoing=ongoing, notice=notice, archive_daily=not dry_run,
+            topic, rendered_html, run_dir, digest_dir,
+            fresh=fresh, notice=notice, archive_daily=not dry_run,
         )
         phase_done("Phase 8: Archive & Publish Artifact", started)
 
         started = phase_start("Phase 9: Summary")
-        archive.phase_9_summary(topic, fresh, ongoing, run_dir, digest_dir)
+        archive.phase_9_summary(topic, fresh, run_dir, digest_dir)
         phase_done("Phase 9: Summary", started)
         archive.cleanup_stub_attempts(run_dir)
     except Exception as error:
@@ -392,7 +361,7 @@ def run_digest(category: str, dry_run: bool = False) -> None:
         )
     if runtime.TEST_MODE:
         _write_test_report(run_dir, topic, category, phase_times, overall_elapsed,
-                           len(findings), len(summaries), len(fresh), len(ongoing))
+                           len(findings), len(summaries), len(fresh))
     if not runtime.TEST_MODE and retry_state_path.exists():
         try:
             retry_state_path.unlink()

@@ -15,8 +15,11 @@ Read `~/agent-state/hyperliquid-sdk.md` in full. Note:
 - Current SDK version
 - Last run date and outcome
 - Upstream reference SHAs (Python SDK, TS SDK, docs)
-- All known gaps and their statuses (🔧 bugs, 🟡 queued, 🔴 needs_approval)
+- All known gaps and their statuses (🔧 bugs, 🟡 queued, 🔴 needs_approval, 📝 planned)
 - Any approved architectural changes ready to implement
+- The `### Plan Queue` at the top of `## Approved Architectural Changes`: its
+  `approved:` line, every row's status and prerequisites, and row RB's
+  **Last check:**
 - Todos/housekeeping items
 
 ## Step 2: Ensure on dev branch and up to date
@@ -116,21 +119,49 @@ For each gap found:
 
 Update the upstream SHA and scan date in the state file for any source actually scanned.
 
+<!-- rbsecp256k1-fork:begin -->
+**rbsecp256k1 release watch** — run only while `~/dev/hyperliquid/Gemfile` contains `carter2099/rbsecp256k1`:
+
+```bash
+RBENV_VERSION=3.4.10 ruby ~/agent-state/hyperliquid-sdk-fixtures/check_rbsecp256k1_release.rb
+```
+
+- `RBSECP256K1_TRIGGER=none|soaking|unsafe …` → copy the line and today's date into Plan Queue row RB's **Last check:** field; nothing else.
+- `RBSECP256K1_TRIGGER=ready version=<V> … sha256=<SHA> …` → set row RB to 🟢 triggered (version `<V>`, sha256 `<SHA>`). Step 5 selects it in this same run, exclusively.
+- Any other output or a non-zero exit → record "rbsecp256k1 watch: check failed" in the email; do not trigger.
+<!-- rbsecp256k1-fork:end -->
+
 ## Step 5: Define scope for this run
 
 Select work from the state file after both queue-producing passes (Dependabot
 reconciliation and upstream scanning):
-- **Priority order:** 🔧 bugs → approved architectural changes → oldest 🟡 work
-  across Known Gaps and DevOps / Repo Hygiene → housekeeping.
+- **Priority order:** a 🟢 triggered Plan Queue row RB → 🔧 bugs that name no
+  Plan Queue row → eligible Dependabot entries → the next Plan Queue row →
+  oldest 🟡 work across Known Gaps and DevOps / Repo Hygiene that no Plan Queue
+  row covers → housekeeping.
+- 🔧/`📝 bug` entries that name a Plan Queue row (W1, O-A, IT-A, D2) or the
+  release flow are fixed by that row or by the release; never select them
+  separately. 📝 entries are only ever implemented through their Plan Queue row.
 - Skip unapproved 🔴 items.
 - A Dependabot entry is eligible only when it was queued before this run and
   its PR number is still present in the current classified manifest.
 - Never select a PR number first seen during this run.
 - Normal API scope remains at most 3 gaps.
-- If the oldest eligible work is Dependabot, make this run dependency-only and
-  select up to 5 oldest eligible Dependabot entries, matching the established
-  DevOps queue pace. Do not mix dependency and API implementation in one
-  commit/run.
+- **Plan Queue rows** (only while the Plan Queue's `approved:` line reads
+  `approved: true`): select exactly one row — the first row not ✅ and not ⛔
+  whose prerequisites are all ✅. Read that row's plan file
+  (`~/agent-state/hyperliquid-plans/<plan>.md`) in full before Step 6. The row
+  is the whole scope of the run: its gap count overrides the 3-gap limit, and
+  nothing else (no other gap, no Dependabot entry) joins it. A docs-only row
+  (D1/D2) is at most 3 docs units as the docs plan defines them. Never flip
+  Known Gaps markers to make a row selectable; the queue table drives selection.
+<!-- rbsecp256k1-fork:begin -->
+- A 🟢 triggered Plan Queue row RB ("rbsecp256k1 fork-pin removal") runs alone: select only it (no API gaps, no plan row, no Dependabot entries) and follow Part B of `~/agent-state/hyperliquid-plans/rbsecp256k1.md` instead of Step 6.
+<!-- rbsecp256k1-fork:end -->
+- If Dependabot work is selected by the priority order, make this run
+  dependency-only and select up to 5 oldest eligible Dependabot entries,
+  matching the established DevOps queue pace. Do not mix dependency and API or
+  plan-row implementation in one commit/run.
 - If there is nothing eligible, skip to Step 11 after recording any newly
   queued work and scan results.
 
@@ -146,13 +177,33 @@ For each selected API gap:
 1. Read the relevant source files before editing. Understand the existing pattern.
 2. Implement the method/feature in the appropriate file (`lib/hyperliquid/info.rb`, `lib/hyperliquid/exchange.rb`, `lib/hyperliquid/ws/`, etc.), following existing code style.
 3. Write a unit test in `spec/` mirroring the existing test structure (WebMock stubs for HTTP methods, no live calls in unit tests).
-4. Run the single spec file to verify before moving on:
+4. Document it in the same commit: add each new public method to `docs/API.md`
+   as `- \`name(signature)\` - description` under the section the placement
+   table in `~/agent-state/hyperliquid-plans/docs.md` §2.3 names (signature =
+   every parameter, defaults shown); add new keyword arguments to the existing
+   entry. For a new main-API WebSocket channel add a row to API.md's
+   `### Main API Channels` table and to `docs/WS.md`'s `## Subscription Routing`
+   table. Give a new integration script a row in `docs/DEVELOPMENT.md`'s script
+   table. Add a `docs/EXAMPLES.md` example only for a new workflow. Never edit
+   `CHANGELOG.md`.
+5. Run the single spec file and the docs gate before moving on (until Plan Queue
+   row D1 has added `spec/docs_coverage_spec.rb`, run only the single spec file):
    ```bash
-   cd ~/dev/hyperliquid && RBENV_VERSION=3.4.10 bundle exec rspec spec/path/to/new_spec.rb
+   cd ~/dev/hyperliquid && RBENV_VERSION=3.4.10 bundle exec rspec spec/path/to/new_spec.rb spec/docs_coverage_spec.rb
    ```
-5. Mark the gap 🔵 in_progress in the state file, then ✅ done once the test passes.
+6. Mark the gap 🔵 in_progress in the state file, then ✅ done once the tests pass.
 
 Do not implement more than the defined scope even if time seems available.
+
+### Plan Queue row scope
+
+Implement the selected row exactly as its plan file describes (files, specs,
+docs, integration script, commit message, state-file updates); where the plan
+file is more specific than this prompt, the plan file wins. API rows also follow
+items 1–6 above. For a docs-only row (D1/D2), change only `docs/`, `README.md`,
+`CLAUDE.md`, `example.rb`, `spec/docs_coverage_spec.rb`, and comment lines
+under `lib/`, and run `RBENV_VERSION=3.4.10 bundle exec rspec spec/docs_coverage_spec.rb`
+before Step 7.
 
 ### Dependabot scope
 
@@ -166,19 +217,23 @@ For selected `bundler` entries:
    `bundle update` against the real Gemfile: it can bypass Dependabot's cooldown
    and select a newer, unsoaked release.
 3. Build `.dependabot.Gemfile` beside the real Gemfile:
-   - Preserve the real source, `gemspec`, and the pinned
+   - Preserve the real source and `gemspec` declarations verbatim.
+   <!-- rbsecp256k1-fork:begin -->
+   - Only while `Gemfile` contains `carter2099/rbsecp256k1`: also preserve
      `gem 'rbsecp256k1', github: 'carter2099/rbsecp256k1', ref: '<sha>'`
-     declaration verbatim (dropping it would re-resolve rubygems rbsecp256k1
-     6.0.0 and drag rubyzip back to the vulnerable 2.x line).
+     verbatim, never edit that git source/ref, and never select, pin, or
+     `--update` `rbsecp256k1` (the pin is removed only by the "rbsecp256k1
+     fork-pin removal" plan). An `rbsecp256k1` entry stays 🟡 with note
+     `deferred: fork pin active until cutover` and is not eligible.
+   <!-- rbsecp256k1-fork:end -->
    - For selected gems declared directly in `Gemfile`, copy their declarations
      with `= <target_version>`, preserving any options.
    - Append exact declarations for selected runtime dependencies supplied by
      the gemspec.
-   - Never select, pin, or `--update` `rbsecp256k1` or `rubyzip`, and never
-     edit the git source/ref: it is Carter's deliberate fork pin. A selected
-     entry targeting either gem, or a resolve that changes the `GIT` block or
-     puts rubyzip below 3.4, fails this step: take the failure path below but
-     mark that entry 🔴 needs_approval instead of 🟡.
+   - `rubyzip` (and, once no fork pin exists, `rbsecp256k1`) are ordinary
+     entries, but a resolve that adds or changes a `GIT` block, locks rubyzip
+     below 3.4, or locks rbsecp256k1 below 6.0.1 fails this step: take the
+     failure path below (entry back to 🟡 with the failure note).
 4. Resolve and normalize:
    ```bash
    cd ~/dev/hyperliquid
@@ -226,6 +281,11 @@ Before investigating any failures, cross-reference against the **Known Pre-exist
 
 For a dependency run, any new integration failure blocks the selected entries; only a failure already documented in the state file as pre-existing may be recorded without blocking. On a blocking failure, perform the Step 6 dependency cleanup, return those entries to 🟡 with the failure, and skip to Step 11. For an API-gap run, fix regressions before committing and record only failures proven unrelated.
 
+For a docs-only run, skip this step if this prints nothing (only comments changed
+under lib/ and scripts/):
+`git diff -U0 HEAD -- lib scripts | grep -E '^[+-][^+-]' | grep -vE '^[+-][[:space:]]*(#|$)'`
+Record "integration skipped: docs-only" in the state file and email. Otherwise run it.
+
 ## Step 9: Sync CLAUDE.md if needed
 
 Before staging the commit, decide whether `~/dev/hyperliquid/CLAUDE.md` needs updating. CLAUDE.md is the canonical source of truth for the repo and should stay current.
@@ -244,16 +304,23 @@ If you do edit CLAUDE.md, include it in the same commit as the code change.
 
 Stage only files changed for the defined scope.
 
-For an API-gap run:
+For an API-gap or Plan Queue row run, never edit `CHANGELOG.md`. Write the
+commit message with your write tool to `/tmp/hl-commit-msg.txt`: the subject
+(type as the plan names it: `feat:`/`fix:`/`test:`/`chore:`; `docs: <concise
+description>` for a docs-only row), a blank line, an optional body, then one
+paragraph starting `Release-note:` per user-facing change the plan gives text
+for (plus one starting `BREAKING:` for a breaking change), then a blank line and
+`Co-Authored-By: hyperliquid-run agent <noreply@carter2099.com>`. Repeat the
+`Release-note:`/`BREAKING:` paragraphs in the Run History row.
 
 ```bash
 cd ~/dev/hyperliquid
-git add lib/hyperliquid/info.rb spec/hyperliquid/info_spec.rb  # use the actual specific files; include CLAUDE.md only if updated
-git commit -m "feat: <concise description of what was implemented>
-
-Co-Authored-By: hyperliquid-run agent <noreply@carter2099.com>"
+git add lib/hyperliquid/info.rb spec/hyperliquid/info_spec.rb  # use the actual specific files, including docs/API.md / docs/WS.md / docs/EXAMPLES.md / docs/DEVELOPMENT.md and new scripts; include CLAUDE.md only if updated
+git commit -F /tmp/hl-commit-msg.txt && rm /tmp/hl-commit-msg.txt
 git push origin dev
 ```
+
+A docs-only row stages only the files its plan run names.
 
 For a dependency run, stage `Gemfile.lock`, the specific changed workflow
 files, and only the exact source/test files needed for a proven
@@ -296,6 +363,10 @@ Edit `~/agent-state/hyperliquid-sdk.md`:
 - Update **Last run** date and outcome.
 - Update upstream SHA/scan dates for any sources scanned this run.
 - Update API gap statuses (🟡→✅, new gaps added, 🔧 bugs fixed, etc.).
+- For a Plan Queue row: mark it ✅ (`<date> run #N <sha>`) and mark ✅ the
+  Known Gaps / Bug Fixes entries it closes; on failure leave it not ✅ with a
+  one-line failure note (it is retried next run unless its plan's stop rule
+  sets ⛔). Keep row RB's **Last check:** current.
 - Record the intake digest, newly queued/refreshed/no-longer-open Dependabot
   entries, selected PR numbers, resolved versions, and close outcomes.
 - Preserve every unselected eligible and newly discovered Dependabot entry as

@@ -23,6 +23,41 @@
     },
     "scope": "public"
   },
+  "news/assets/fonts/playfairdisplay-italic.woff2": {
+    "blob": "a3d793a5c3c1c81e62ddc71d705d205ca2c91ea5",
+    "by": "carter",
+    "date": "2026-10-02",
+    "reason": "SIL OFL 1.1 web font (trimmed, renamed DN Display Italic); Carter approved publishing this exact content",
+    "scope": "public"
+  },
+  "news/assets/fonts/playfairdisplay-normal.woff2": {
+    "blob": "2e89e0cbd0163c88315ef9b6f135beed2e6deb14",
+    "by": "carter",
+    "date": "2026-10-02",
+    "reason": "SIL OFL 1.1 web font (trimmed, renamed DN Display); Carter approved publishing this exact content",
+    "scope": "public"
+  },
+  "news/assets/fonts/sourceserif4-italic.woff2": {
+    "blob": "b11ee5db1d5d0be6324613f7d9c6340fd9292960",
+    "by": "carter",
+    "date": "2026-10-02",
+    "reason": "SIL OFL 1.1 web font (trimmed, renamed DN Text Italic); Carter approved publishing this exact content",
+    "scope": "public"
+  },
+  "news/assets/fonts/sourceserif4-normal.woff2": {
+    "blob": "6002f3567d2cbbc287189f77d40c97c655d23087",
+    "by": "carter",
+    "date": "2026-10-02",
+    "reason": "SIL OFL 1.1 web font (trimmed, renamed DN Text); Carter approved publishing this exact content",
+    "scope": "public"
+  },
+  "news/assets/fonts/unifrakturmaguntia-normal.woff2": {
+    "blob": "4a43f02213d348ea01e29aa2c26eeaa9621f1d13",
+    "by": "carter",
+    "date": "2026-10-02",
+    "reason": "SIL OFL 1.1 web font (subset, renamed DN Blackletter); Carter approved publishing this exact content",
+    "scope": "public"
+  },
   "scripts/test_steward_updates.py": {
     "blob": "240949dd549ff3e16f5296150089dc1caf437dd8",
     "by": "carter",

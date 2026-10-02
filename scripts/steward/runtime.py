@@ -661,14 +661,46 @@ def _load_prev_artifact(run_dir, prev_date_str, name):
     return None
 
 
+REBOOT_RECORD_NAME = "reboot.json"  # run-dir record; not a phase artifact
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+REBOOT_PKGS_PATH = Path("/var/run/reboot-required.pkgs")
+REBOOT_REQUIRED_PATH = Path("/var/run/reboot-required")
+
+
+def _current_boot_id():
+    """This boot's kernel boot id ('' when unreadable)."""
+    try:
+        return BOOT_ID_PATH.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _write_reboot_record(run_dir, phase_label):
+    """Durably record the host reboot request in <run_dir>/reboot.json."""
+    try:
+        packages = [
+            line.strip() for line in REBOOT_PKGS_PATH.read_text().splitlines() if line.strip()
+        ]
+    except OSError:
+        packages = []
+    record = {
+        "requested_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "phase": phase_label,
+        "kernel_before": run_capture(["uname", "-r"]),
+        "boot_id_before": _current_boot_id(),
+        "packages": packages,
+    }
+    path = Path(run_dir) / REBOOT_RECORD_NAME
+    atomic_write_json(path, record)
+    return path
+
 
 def _reboot_if_needed(run_dir, phase_label, dry_run=False):
     """Check /var/run/reboot-required. If present and not dry-run, write pending.md and reboot.
 
     Returns True if a reboot was triggered (caller should exit after this).
     """
-    REBOOT_FLAG = Path("/var/run/reboot-required")
-    if not REBOOT_FLAG.exists():
+    if not REBOOT_REQUIRED_PATH.exists():
         return False
 
     if dry_run:
@@ -693,6 +725,7 @@ and artifact hash still match are skipped. Failed rows always run again.
 """
     atomic_write_text(PENDING_PATH, pending_content)
     print(f"  [reboot] wrote {PENDING_PATH}")
+    print(f"  [reboot] wrote {_write_reboot_record(run_dir, phase_label)}")
 
     try:
         run(["sudo", "systemctl", "reboot"], capture_output=True, text=True)

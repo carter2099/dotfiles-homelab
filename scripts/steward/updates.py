@@ -1198,6 +1198,12 @@ def _await_mergeable(ctx, nwo, number, *, sleep=time.sleep):
     return state
 
 
+def _dependabot_merge_undo(url):
+    """Undo text for one queued Dependabot auto-merge."""
+    return (f"before GitHub merges: gh pr merge --disable-auto {url}; after: "
+            "revert the merge commit on the default branch")
+
+
 def _p1_dependabot_merge(dry_run=False, *, ctx=None):
     """Queue green, non-major Dependabot PRs in auto-merge candidate repos.
 
@@ -1284,12 +1290,11 @@ def _p1_dependabot_merge(dry_run=False, *, ctx=None):
                 errors.append(f"{repo}#{pr.get('number')}: merge request failed: "
                               f"{(result.stderr or result.stdout or '').strip()[-200:]}")
                 continue
-            merged.append({**item, "reason": f"{bump[1]} -> {bump[2]}; {detail}"})
+            merged.append({**item, "reason": f"{bump[1]} -> {bump[2]}; {detail}",
+                           "revert": _dependabot_merge_undo(item["url"])})
+    # Undo is per merged PR (each item's "revert"); the step itself has none.
     row = {"step": "dependabot_merge", "merged": merged, "skipped": skipped,
            "needs_carter": needs_carter, "local_mutation": False, "revert": None}
-    if merged:
-        row["revert"] = ("before GitHub merges: gh pr merge --disable-auto <url>; after: "
-                         "revert the merged commit on the default branch")
     if errors:
         return {**row, "status": "warning", "error": "; ".join(errors[:6])}
     return {**row, "status": "ok" if merged else "skipped",

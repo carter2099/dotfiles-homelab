@@ -532,11 +532,11 @@ def neutral_attention(section: str, reason: str) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "provider": PROVIDER,
-        "status": "out_of_scope" if reason == "out_of_scope" else "unavailable",
+        "status": "unavailable",
         "attention_now": 50.0,
         "digest_prominence": 50.0,
         "confidence": 0.0,
-        "age_bucket": "over-24h" if reason == "out_of_scope" else "unknown",
+        "age_bucket": "unknown",
         "normalized_signals": {},
         "evidence": {
             "sources": list(section_sources(section)),
@@ -642,8 +642,6 @@ def _explain(significance: str, importance: dict[str, Any] | None, attention: di
         )
     elif status == "no_matches":
         parts.append("no matching coverage, sharing, or discussion was observed in the edition window")
-    elif status == "out_of_scope":
-        parts.append("attention applies only to events first observed in the edition window")
     else:
         parts.append("observed attention was unavailable, so it does not affect priority")
     if excluded and status in ("ok", "no_matches"):
@@ -708,19 +706,6 @@ def score_attention(
             "observed_at": observed.isoformat(),
         })
     return scored, observations
-
-
-def score_ongoing(
-    items: list[dict[str, Any]],
-    *,
-    section: str,
-    importance: list[dict[str, Any] | None],
-) -> list[dict[str, Any]]:
-    """Older candidates rank on importance; attention applies only to the edition window."""
-    scored = [normalize_editorial_significance(copy.deepcopy(item)) for item in items]
-    for item, judged in zip(scored, importance):
-        apply_priority(item, measurement=neutral_attention(section, "out_of_scope"), importance=judged)
-    return scored
 
 
 # ---------------------------------------------------------------- offline analysis

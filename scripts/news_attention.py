@@ -19,7 +19,6 @@ from daily_news.attention import (  # noqa: F401
     normalize_editorial_significance,
     priority_sort_key,
     score_attention,
-    score_ongoing,
 )
 
 
@@ -38,5 +37,4 @@ __all__ = (
     "normalize_editorial_significance",
     "priority_sort_key",
     "score_attention",
-    "score_ongoing",
 )

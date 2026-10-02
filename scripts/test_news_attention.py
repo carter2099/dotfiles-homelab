@@ -24,7 +24,6 @@ from daily_news.attention import (
     priority_sort_key,
     reference_scales,
     score_attention,
-    score_ongoing,
     section_sources,
 )
 from jev import JevClient, JevUnavailable
@@ -355,14 +354,6 @@ def test_priority_blends_importance_with_confident_attention_only() -> None:
     check(rows[0]["magnitudes"] == {}, rows[0])
 
 
-def test_ongoing_items_rank_on_importance_without_attention() -> None:
-    older = score_ongoing([dict(CANDIDATE)], section="world",
-                          importance=[{"score": 100.0, "confidence": 1.0, "answers": {}}])
-    check(older[0]["attention"]["status"] == "out_of_scope" and older[0]["attention"]["confidence"] == 0, older)
-    check(older[0]["priority_score"] == importance_score("medium", older[0]["jev_importance"]), older)
-    check(older[0]["priority_score"] > EDITORIAL_POINTS["medium"], older)
-
-
 def test_attention_never_rewrites_editorial_significance() -> None:
     unsupported_high = {**CANDIDATE, "editorial_significance": "high"}
     scored, observations = score_attention(
@@ -484,7 +475,6 @@ def main() -> None:
         test_reference_scales_follow_history_once_it_is_deep_enough,
         test_importance_rewards_broad_consequence_and_discounts_routine_updates,
         test_priority_blends_importance_with_confident_attention_only,
-        test_ongoing_items_rank_on_importance_without_attention,
         test_attention_never_rewrites_editorial_significance,
         test_high_significance_requires_grounded_broad_impact,
         test_priority_ties_use_evidence_not_discovery_order,

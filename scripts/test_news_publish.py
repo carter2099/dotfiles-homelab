@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import gzip
 import json
+import re
 import shutil
 import sys
 from html.parser import HTMLParser
@@ -43,15 +45,6 @@ def sample_publication(topic: dict, issue_date: str, marker: str) -> dict:
             "priority_score": 80.0,
             "priority_explanation": "High significance with observed coverage.",
         }],
-        "ongoing": [{
-            "title": f"{marker} developing story",
-            "url": f"https://example.com/{topic['web_slug']}/developing",
-            "summary": f"{marker} ongoing source-backed summary.",
-            "category": "Developing",
-            "editorial_significance": "high",
-            "priority_score": 70.0,
-            "why_still_relevant": "A second-day source established a material change.",
-        }],
         "generated_at": f"{issue_date}T12:00:00+00:00",
     }
 
@@ -59,20 +52,148 @@ def sample_publication(topic: dict, issue_date: str, marker: str) -> dict:
 def write_assets(root: Path) -> Path:
     assets = root / "assets"
     assets.mkdir()
-    (assets / "news.css").write_text("body { color: #171716; }")
+    (assets / "news.css").write_text(
+        '@font-face { src: url("fonts/unifrakturmaguntia-normal.woff2") format("woff2"); }\n'
+        "@font-face { src: url(fonts/sourceserif4-normal.woff2) format(\"woff2\"); }\n"
+        "body { color: #171716; }"
+    )
     (assets / "news.js").write_text("void 0;")
+    (assets / "speculationrules.json").write_text('{"prefetch": []}')
+    (assets / "fonts").mkdir()
+    (assets / "fonts" / "unifrakturmaguntia-normal.woff2").write_bytes(b"wOF2 nameplate")
+    (assets / "fonts" / "sourceserif4-normal.woff2").write_bytes(b"wOF2 text")
+    (assets / "fonts" / "OFL-unifrakturmaguntia.txt").write_text("license")
     return assets
+
+
+# The names nginx serves with `expires max`: anything else must not look hashed.
+HASHED_ASSET = re.compile(r"/assets/(?:fonts/)?[A-Za-z0-9_-]+\.[0-9a-f]{12}\.(?:css|js|woff2)")
+
+
+class AssetReferences(HTMLParser):
+    """Subresources of one page, plus markup the CSP (`script-src 'self'`, no inline style) blocks."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.urls: set[str] = set()
+        self.preloads: set[str] = set()
+        self.stylesheets: list[str] = []
+        self.preload_kinds: list[str | None] = []
+        self.problems: list[str] = []
+        self.in_script = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        url = values.get("src" if tag == "script" else "href") or ""
+        if tag in {"link", "script"} and url.startswith("/assets/"):
+            self.urls.add(url)
+            if values.get("rel") == "preload":
+                self.preloads.add(url)
+        for name, _ in attrs:
+            if name == "style" or name.startswith("on"):
+                self.problems.append(f"<{tag}> has a CSP-blocked {name}= attribute")
+        if tag == "style":
+            self.problems.append("inline <style> element")
+        rel = (values.get("rel") or "").lower()
+        if tag == "link" and rel == "stylesheet":
+            self.stylesheets.append(url)
+        if tag == "link" and rel == "preload":
+            self.preload_kinds.append(values.get("as"))
+        if tag == "script":
+            self.in_script = True
+            if not url.startswith("/assets/") or "defer" not in values:
+                self.problems.append(f"script {url or '(inline)'} is not a deferred /assets/ file")
+        subresource = (
+            values.get("src") if tag in {"script", "img"}
+            else values.get("href") if tag == "link" and rel != "canonical"
+            else None
+        )
+        if subresource and re.match(r"(?:[a-z][a-z0-9+.-]*:)?//", subresource, re.I):
+            self.problems.append(f"<{tag}> loads a cross-origin subresource: {subresource}")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script":
+            self.in_script = False
+
+    def handle_data(self, data: str) -> None:
+        if self.in_script and data.strip():
+            self.problems.append(f"inline script body: {data.strip()[:60]!r}")
+
+
+def check_page_subresources(page: Path, references: AssetReferences) -> None:
+    """Each page loads one stylesheet, deferred same-origin scripts, at most one font preload."""
+    check(len(references.stylesheets) == 1, f"{page}: stylesheets {references.stylesheets}")
+    check(len(references.preload_kinds) <= 1 and all(kind == "font" for kind in references.preload_kinds),
+          f"{page}: preloads as={references.preload_kinds}")
+    check(not references.problems, f"{page}: {references.problems}")
+
+
+def check_release_assets(release: Path) -> set[str]:
+    """Every asset a page or the stylesheet loads exists under a content-hashed name."""
+    urls: set[str] = set()
+    preloads: set[str] = set()
+    pages = list(release.rglob("*.html"))
+    check(pages, f"release has no pages: {release}")
+    for page in pages:
+        page_references = AssetReferences()
+        page_references.feed(page.read_text())
+        page_references.close()
+        check_page_subresources(page, page_references)
+        urls |= page_references.urls
+        preloads |= page_references.preloads
+    stylesheets = {url for url in urls if url.endswith(".css")}
+    check(stylesheets and any(url.endswith(".js") for url in urls), urls)
+    font_urls: set[str] = set()
+    for stylesheet in stylesheets:
+        css = (release / stylesheet.lstrip("/")).read_text()
+        for target in re.findall(r"""url\(\s*["']?([^"')\s]+)""", css):
+            if not target.startswith("data:"):
+                font_urls.add(f"{stylesheet.rsplit('/', 1)[0]}/{target}")
+    check(font_urls, "stylesheet loads no fonts")
+    for url in urls | font_urls:
+        check(HASHED_ASSET.fullmatch(url), f"asset is not content-hashed: {url}")
+        check((release / url.lstrip("/")).is_file(), f"release is missing {url}")
+    check(preloads and preloads <= font_urls,
+          f"preload {preloads} is not a stylesheet font {font_urls}")
+    for path in (release / "assets").rglob("*"):
+        if path.suffix in {".css", ".js", ".woff2"}:
+            url = f"/{path.relative_to(release)}"
+            check(HASHED_ASSET.fullmatch(url), f"release ships an unhashed asset: {url}")
+    check((release / "assets" / "speculationrules.json").is_file(), "speculation rules missing")
+    check((release / "assets" / "fonts" / "OFL-unifrakturmaguntia.txt").is_file(),
+          "font license missing")
+    return urls | font_urls
+
+
+# The tracked assets, resolved from this checkout: CI runs this file with HOME set to
+# the runner's home, where news_publish.ASSET_DIR (HOME/news/assets) does not exist.
+TRACKED_ASSETS = Path(__file__).resolve().parents[1] / "news" / "assets"
+
+
+def test_tracked_assets_stay_within_byte_budgets() -> None:
+    """Ceilings sit ~5-10% above today's sizes: a re-added full font fails, a CSS tweak does not."""
+    check(TRACKED_ASSETS.is_dir(), f"tracked assets missing: {TRACKED_ASSETS}")
+
+    def within(name: str, size: int, ceiling: int) -> None:
+        check(size <= ceiling, f"{name} is {size:,} B, over its {ceiling:,} B budget")
+
+    fonts = sorted((TRACKED_ASSETS / "fonts").glob("*.woff2"))
+    check(fonts and len(fonts) <= 5, f"{len(fonts)} woff2 files, budget is 5: {fonts}")
+    for font in fonts:
+        within(f"fonts/{font.name}", font.stat().st_size, 40_000)
+    within("all woff2 together", sum(font.stat().st_size for font in fonts), 140_000)
+    within(news.NAMEPLATE_FONT, (TRACKED_ASSETS / news.NAMEPLATE_FONT).stat().st_size, 8_000)
+    css = (TRACKED_ASSETS / "news.css").read_bytes()
+    within("news.css (gzip -6)", len(gzip.compress(css, 6)), 6_500)
+    within("news.js", (TRACKED_ASSETS / "news.js").stat().st_size, 1_024)
 
 
 def test_external_link_arrow_uses_neutral_ink() -> None:
     css_path = Path(__file__).resolve().parents[1] / "news" / "assets" / "news.css"
     css = css_path.read_text()
     block = css.split(".external {", 1)[1].split("}", 1)[0]
-    check("color: var(--ink);" in block, block)
-    check("color: var(--accent);" not in block, block)
-    for forbidden in ("#7a3030", "#5f2020", "#7b2f2f", "122, 48, 48"):
-        check(forbidden not in css.casefold(), forbidden)
-    check("--accent: #59616b;" in css, css[:300])
+    check("color: var(--ink" in block, block)
+    check("var(--accent)" not in block, block)
 
 
 def test_legacy_html_migration() -> None:
@@ -90,7 +211,7 @@ def test_legacy_html_migration() -> None:
     check(parser.standfirst.startswith("A sufficiently"), parser.standfirst)
     check(parser.fresh[0]["category"] == "Industry", parser.fresh)
     check(parser.fresh[0]["summary"] == "Fresh factual summary.", parser.fresh)
-    check(parser.ongoing[0]["why_still_relevant"] == "Material second-day change.", parser.ongoing)
+    check([story["url"] for story in parser.fresh] == ["https://example.com/fresh"], parser.fresh)
 
 
 def test_digest_meta_and_truncated_copy_are_rewritten() -> None:
@@ -105,7 +226,6 @@ def test_digest_meta_and_truncated_copy_are_rewritten() -> None:
             "editorial_significance": "high",
             "priority_score": 90.0,
         }],
-        "ongoing": [],
     }, topic, "2026-08-25")
     standfirst = publication["standfirst"]
     check("digest" not in standfirst.casefold(), standfirst)
@@ -145,7 +265,6 @@ def test_front_page_guarantees_sections_then_applies_global_floor() -> None:
                     },
                 },
             ],
-            "ongoing": [],
         }
     lead, sections = news._front_page_sections(date_editions)
     selected = [story for section in sections for story in section["stories"]]
@@ -287,7 +406,6 @@ def test_publish_builds_separate_history_and_one_email() -> None:
             )
             check(expected in email_body, email_body)
             check(f"{marker} reporting details" not in email_body, email_body)
-            check(f"{marker} developing story" not in email_body, email_body)
 
         current = news_dir / "current"
         check(current.is_symlink(), current)
@@ -295,10 +413,9 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check("&lt;script&gt;alert(1)&lt;/script&gt;" in ai_page, ai_page)
         check("Gaming lead story" not in ai_page, "category content leaked onto AI page")
         front_page = (current / current_date / "index.html").read_text()
-        check("<h1>Front Page</h1>" in front_page, front_page)
+        check('<h1 class="nameplate">' in front_page, front_page)
         check("Priority combines editorial consequence" not in front_page, front_page)
-        check("<span>Updated daily.</span>" in front_page, front_page)
-        check("/assets/news.css?v=6" in front_page, front_page)
+        first_assets = check_release_assets(current.resolve())
         for key in news.TOPIC_ORDER:
             marker = news.TOPICS[key]["web_title"]
             expected = (
@@ -310,8 +427,10 @@ def test_publish_builds_separate_history_and_one_email() -> None:
             category_page = (
                 current / current_date / news.TOPICS[key]["web_slug"] / "index.html"
             ).read_text()
-            check('<section class="introduction"' not in category_page, category_page)
-            check('id="briefing-heading"' not in category_page, category_page)
+            # The standfirst ships only in the meta description, never in the body.
+            description = category_page.split('<meta name="description" content="', 1)[1]
+            description = description.split('"', 1)[0].removesuffix("…")
+            check(description and category_page.count(description) == 1, category_page)
         stored = json.loads(
             (news_dir / "publications" / current_date / "gaming.json").read_text()
         )
@@ -324,6 +443,7 @@ def test_publish_builds_separate_history_and_one_email() -> None:
               "legacy story not migrated")
         check((current / "archive" / "index.html").exists(), "archive page missing")
 
+        (assets / "fonts" / "unifrakturmaguntia-normal.woff2").write_bytes(b"wOF2 redrawn")
         second = news.publish(
             current_date,
             digests_dir=digests,
@@ -334,6 +454,34 @@ def test_publish_builds_separate_history_and_one_email() -> None:
         check(not second["email_sent"], second)
         check(len(sent) == 1, f"summary email sent {len(sent)} times")
         check(len(list((news_dir / "releases").iterdir())) == 2, "rollback release retention failed")
+        second_assets = check_release_assets(current.resolve())
+        changed = first_assets ^ second_assets
+        # The redrawn font gets a new name, and so does the stylesheet that embeds it;
+        # the untouched script and text font keep theirs.
+        check(len(changed) == 4, changed)
+        check(all(url.endswith((".css", ".woff2")) for url in changed), changed)
+        check(
+            any("unifrakturmaguntia" in url for url in changed)
+            and not any("sourceserif4" in url for url in changed),
+            changed,
+        )
+
+        live_release = current.resolve()
+        (assets / "news.css").write_text('@font-face { src: url("fonts/missing.woff2"); }')
+        try:
+            news.publish(
+                current_date,
+                digests_dir=digests,
+                news_dir=news_dir,
+                asset_dir=assets,
+                send_func=fake_send,
+            )
+        except ValueError as error:
+            check("missing.woff2" in str(error), error)
+        else:
+            raise AssertionError("published a stylesheet that loads a missing font")
+        check(current.resolve() == live_release, "failed build replaced the live release")
+        check(len(list((news_dir / "releases").iterdir())) == 2, "failed build left a release")
 
 
 def test_stateful_publication_requires_matching_archive_record() -> None:
@@ -435,7 +583,7 @@ def test_front_page_dedups_same_event_before_section_leads() -> None:
             "Chipmaker reports record quarterly revenue",
             "https://www.example.com/shared-report?utm_source=feed",
             "A chipmaker reported record quarterly revenue.", 90.0, 90.0,
-        )], "ongoing": []},
+        )]},
         "agents": {"fresh": [
             story(
                 "Chipmaker reports record quarterly revenue",
@@ -447,7 +595,7 @@ def test_front_page_dedups_same_event_before_section_leads() -> None:
                 "https://agents.example/framework-sandbox",
                 "An agent framework added sandboxed tool execution.", 50.0, 50.0,
             ),
-        ], "ongoing": []},
+        ]},
         "ai-hardware": {"fresh": [
             story(
                 "Googlebooks launch October 4 starting at $899—here are the five "
@@ -462,7 +610,7 @@ def test_front_page_dedups_same_event_before_section_leads() -> None:
                 "https://hardware.example/hbm-output",
                 "Memory makers raised HBM output targets.", 60.0, 60.0,
             ),
-        ], "ongoing": []},
+        ]},
         "world": {"fresh": [
             story(
                 "Googlebook: The laptop Australian Android phone owners have been "
@@ -476,7 +624,7 @@ def test_front_page_dedups_same_event_before_section_leads() -> None:
                 "https://world.example/budget-vote",
                 "A parliament passed the national budget.", 55.0, 55.0,
             ),
-        ], "ongoing": []},
+        ]},
     }
     lead, sections = news._front_page_sections(date_editions)
     leads = {section["slug"]: section["stories"][0]["url"] for section in sections if section["stories"]}
@@ -500,12 +648,12 @@ def test_front_page_dedups_same_event_before_section_leads() -> None:
             "Trump to meet with Zelensky as Russia-Ukraine attacks intensify",
             "https://world.example/zelensky-meeting",
             "Trump will meet Zelensky as attacks intensify.", 90.0, 90.0,
-        )], "ongoing": []},
+        )]},
         "ai-hardware": {"fresh": [story(
             "AI export controls debate rages as Trump, Xi meet",
             "https://hardware.example/export-controls",
             "Chip export controls are debated during the summit.", 80.0, 80.0,
-        )], "ongoing": []},
+        )]},
     }
     _, sections = news._front_page_sections(distinct)
     check(
@@ -600,6 +748,65 @@ def test_publisher_never_silently_uses_stale_or_out_of_window_content() -> None:
         check(titles == ["In-window story"], f"cleaned run lost its durable publication: {titles!r}")
 
 
+def test_legacy_ongoing_key_is_ignored() -> None:
+    """Publications with or without a legacy "ongoing" list are current; its stories never render."""
+    issue_date = "2026-09-25"
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        digests = root / "digests"
+        news_dir = digests / "news"
+        for index, key in enumerate(news.TOPIC_ORDER):
+            topic = news.TOPICS[key]
+            run_dir = digests / topic["category"] / issue_date
+            run_dir.mkdir(parents=True)
+            publication = sample_publication(topic, issue_date, topic["web_title"])
+            publication["fresh"][0]["date_published"] = "2026-09-24"
+            if index % 2 == 0:
+                publication["ongoing"] = [{
+                    "title": f"{topic['web_title']} legacy carried-over story",
+                    "url": f"https://example.com/{topic['web_slug']}/carried-over",
+                    "summary": "Legacy carried-over summary.",
+                    "editorial_significance": "high",
+                    "priority_score": 99.0,
+                    "why_still_relevant": "Legacy what-changed line.",
+                }]
+            state = WorkflowState(run_dir, "daily-news", run_id=run_dir.name)
+            state.begin_phase(
+                "archive",
+                inputs={"fixture": key},
+                artifact_path=run_dir / "publication.json",
+                schema_version=news.PUBLICATION_SCHEMA_VERSION,
+            )
+            state.complete_json("archive", publication)
+
+        sent: list[tuple[str, str, list[str]]] = []
+        result = news.publish(
+            issue_date,
+            digests_dir=digests,
+            news_dir=news_dir,
+            asset_dir=write_assets(root),
+            send_func=lambda subject, body, recipients: sent.append((subject, body, recipients)),
+        )
+        check(result["categories"] == 5, result)
+        check(not result["degraded_sections"], result)
+        current = news_dir / "current" / issue_date
+        pages = {"email": sent[0][1], "front": (current / "index.html").read_text()}
+        for key in news.TOPIC_ORDER:
+            slug = news.TOPICS[key]["web_slug"]
+            pages[slug] = (current / slug / "index.html").read_text()
+            stored = json.loads(
+                (news_dir / "publications" / issue_date / f"{slug}.json").read_text()
+            )
+            check("ongoing" not in stored, stored)
+        for name, page in pages.items():
+            check("carried-over" not in page, f"legacy ongoing story rendered on {name}")
+            check("what-changed" not in page, f"legacy ongoing context rendered on {name}")
+        for key in news.TOPIC_ORDER:
+            title = news.TOPICS[key]["web_title"].replace("&", "&amp;")
+            check(f"{title} lead story" in pages[news.TOPICS[key]["web_slug"]], key)
+            check(f"{title} lead story" in pages["front"], key)
+
+
 def main() -> None:
     tests = [
         test_legacy_html_migration,
@@ -610,7 +817,9 @@ def main() -> None:
         test_stateful_publication_requires_matching_archive_record,
         test_publications_frozen_after_mail_sent,
         test_front_page_dedups_same_event_before_section_leads,
+        test_tracked_assets_stay_within_byte_budgets,
         test_publisher_never_silently_uses_stale_or_out_of_window_content,
+        test_legacy_ongoing_key_is_ignored,
     ]
     for test in tests:
         test()

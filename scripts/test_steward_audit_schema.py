@@ -238,5 +238,115 @@ class AuditPoolTests(unittest.TestCase):
         self.assertEqual(master["sections"][0]["verdict"], "PASS")
 
 
+class CitedExcerptTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name) / "home"
+        self.outside = Path(self._tmp.name) / "outside"
+        self.home.mkdir()
+        self.outside.mkdir()
+        home_patch = patch.object(audit, "HOME", self.home)
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
+
+    def _write(self, rel, lines):
+        path = self.home / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(f"{line}\n" for line in lines))
+        return path
+
+    def test_parses_single_line_ranges_lists_and_punctuation(self):
+        findings = [
+            _finding(evidence="see `scripts/x.py:3-4`, then (notes/a.json:7).",
+                     claim="'b.py:1-2,10-12' differs; localhost:8080 is unrelated",
+                     fix='edit "~/c.md:5"'),
+            _finding(evidence="again scripts/x.py:3-4"),
+        ]
+        self.assertEqual(audit._parse_finding_citations(findings), [
+            ("scripts/x.py", 3, 4), ("notes/a.json", 7, 7),
+            ("b.py", 1, 2), ("b.py", 10, 12), ("~/c.md", 5, 5),
+        ])
+
+    def test_resolves_absolute_tilde_home_relative_and_run_dir_names(self):
+        self._write("scripts/x.py", ["one", "two"])
+        self._write("digests/news/a.json", ["{}"])
+        run_dir = self.home / "digests" / "steward" / "2026-10-01"
+        self._write("digests/steward/2026-10-01/01-applied.json", ["applied"])
+        findings = [_finding(evidence=(
+            f"{self.home}/scripts/x.py:1 ~/scripts/x.py:2 "
+            "digests/news/a.json:1 01-applied.json:1"
+        ))]
+        text, records = audit._build_cited_excerpts(findings, run_dir)
+        self.assertEqual([(r["path"], r["start"], r["status"]) for r in records], [
+            ("scripts/x.py", 1, "ok"), ("scripts/x.py", 2, "ok"),
+            ("digests/news/a.json", 1, "ok"),
+            ("digests/steward/2026-10-01/01-applied.json", 1, "ok"),
+        ])
+        self.assertIn("### scripts/x.py:1-2\n0001| one\n0002| two", text)
+        self.assertIn("### digests/steward/2026-10-01/01-applied.json:1-1\n0001| applied", text)
+        _, records = audit._build_cited_excerpts(
+            [_finding(evidence="01-applied.json:1")], None)
+        self.assertEqual(records[0]["status"], "not found")
+
+    def test_sensitive_and_out_of_home_citations_are_unreadable_only(self):
+        self._write(".ssh/config", ["Host private-ssh-line"])
+        self._write("notes/api-token.txt", ["private-token-line"])
+        outside = self.outside / "x.py"
+        outside.write_text("private-outside-line\n")
+        (self.home / "link.py").symlink_to(outside)
+        findings = [_finding(evidence=(
+            f".ssh/config:1 notes/api-token.txt:1 {outside}:1 link.py:1"
+        ))]
+        text, records = audit._build_cited_excerpts(findings)
+        self.assertEqual([r["status"] for r in records], [
+            "sensitive path", "sensitive file name", f"outside {self.home}",
+            f"symlink escapes {self.home}",
+        ])
+        self.assertNotIn("private-", text)
+        self.assertIn("- .ssh/config:1-1 — sensitive path", text)
+        self.assertIn(f"- {outside}:1-1 — outside {self.home}", text)
+
+    def test_secret_lines_are_withheld(self):
+        token = "ghp_" + "A" * 36
+        self._write("scripts/conf.py", ["host = 'x'", f"token = '{token}'", "port = 1"])
+        text, records = audit._build_cited_excerpts([_finding(evidence="scripts/conf.py:2")])
+        self.assertEqual(records[0]["status"], "ok")
+        self.assertNotIn(token, text)
+        self.assertIn("0002| [line withheld: secret-scan hit]", text)
+        self.assertIn("0003| port = 1", text)
+
+    def test_excerpts_are_capped_and_overflow_is_reported(self):
+        self._write("scripts/big.py", [f"line {n} " + "word " * 40 for n in range(1, 401)])
+        findings = [_finding(evidence=" ".join(
+            f"scripts/big.py:{start}-{start + 70}" for start in range(1, 400, 100)))]
+        text, records = audit._build_cited_excerpts(findings)
+        self.assertLessEqual(len(text), audit._CITATION_EXCERPT_CAP)
+        self.assertIn("cited excerpts truncated at 16000 chars", text)
+        self.assertEqual(records[0]["status"], "ok")
+        self.assertEqual(records[-1]["status"], "omitted: excerpt cap reached")
+
+    def test_judge_prompt_contains_cited_lines(self):
+        self._write("scripts/x.py", ["l1", "l2", "alpha = 3", "beta = 4", "l5", "l6", "l7"])
+        worker = (
+            '```json\n{"verdict": "DRIFT", "findings": [{"claim": "beta wrong", '
+            '"evidence": "scripts/x.py:3-4", "fix": "fix beta"}]}\n```'
+        )
+        judge = (
+            '```json\n{"verdict": "DRIFT", "confirmed": [{"id": "finding-1", '
+            '"evidence": "excerpt shows beta = 4"}], "rejected": []}\n```'
+        )
+        section = {"name": "digest-quality", "guidance": "inspect", "timeout": 600}
+        with patch.object(audit, "_call_omp_p", side_effect=[worker, judge]) as mock_call:
+            result = audit._run_audit_agent_pair(section, {}, "hash1")
+        prompt = mock_call.call_args_list[1].args[0]
+        self.assertIn("CITED EXCERPTS", prompt)
+        self.assertIn("### scripts/x.py:1-6\n0001| l1\n0002| l2\n0003| alpha = 3\n0004| beta = 4",
+                      prompt)
+        self.assertNotIn("0007|", prompt)
+        self.assertEqual(result["judge_citations"],
+                         [{"path": "scripts/x.py", "start": 3, "end": 4, "status": "ok"}])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -70,7 +70,9 @@ from .config import (
 from .runtime import (
     NO_TOOLS,
     READ_ONLY_TOOLS,
+    REBOOT_RECORD_NAME,
     atomic_write_text,
+    _current_boot_id,
     _assistant_text_from_message,
     _balanced_json_slice,
     _call_omp_p,
@@ -132,6 +134,7 @@ from .fixes import (
 )
 from .dotfiles import untracked_in_scope as _dotfiles_untracked_in_scope
 from .setup import P0B_PROBLEM_ACTIONS
+from .updates import _dependabot_merge_undo
 
 
 def _dotfiles_untracked_paths():
@@ -496,6 +499,61 @@ def _dependabot_merge_lines(step):
     return lines
 
 
+def _dependabot_done_rows(step):
+    """[(text, undo)] — one Done Automatically row per queued Dependabot auto-merge."""
+    rows = []
+    for pr in step.get("merged") or []:
+        if not isinstance(pr, dict):
+            continue
+        undo = pr.get("revert") or (_dependabot_merge_undo(pr["url"]) if pr.get("url") else "")
+        rows.append((
+            f"dependabot: {pr.get('repo')}#{pr.get('number')} "
+            f"{str(pr.get('title') or '')[:120]} — auto-merge queued ({pr.get('reason') or 'ok'})",
+            undo,
+        ))
+    return rows
+
+
+def _host_reboot_status(run_dir):
+    """Render-time outcome of this run's ThinkPad reboot request (None when none).
+
+    Compares the boot id recorded in reboot.json before `systemctl reboot`
+    with the current one: a new boot id means the host really restarted.
+    """
+    path = Path(run_dir) / REBOOT_RECORD_NAME
+    if not path.exists():
+        return None
+    try:
+        record = read_json(path)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    requested = str(record.get("requested_at") or "")
+    match = re.search(r"T(\d{2}:\d{2})", requested)
+    hhmm = match.group(1) if match else "?"
+    phase = record.get("phase") or "?"
+    before_boot = str(record.get("boot_id_before") or "")
+    now_boot = _current_boot_id()
+    kernel_before = str(record.get("kernel_before") or "?")
+    kernel_after = run_capture(["uname", "-r"]) or "?"
+    rebooted = bool(before_boot and now_boot and before_boot != now_boot)
+    if rebooted:
+        if kernel_before != kernel_after:
+            text = (f"ThinkPad rebooted for kernel update: {kernel_before} -> {kernel_after} "
+                    f"({hhmm} UTC, after {phase}); run resumed")
+        else:
+            text = (f"ThinkPad rebooted (kernel {kernel_after} unchanged) "
+                    f"({hhmm} UTC, after {phase}); run resumed")
+        color = "#2a2a36"
+    else:
+        text = (f"ThinkPad reboot requested at {hhmm} UTC (after {phase}) "
+                "but the host did not restart")
+        color = "#e65100"
+    return {"rebooted": rebooted, "text": text, "color": color, "time": hhmm,
+            "kernel_before": kernel_before, "kernel_after": kernel_after}
+
+
 def _omp_db_repair_text(step):
     """(text, color) for the OMP SQLite self-repair row; ("", "") when all DBs are ok."""
     status = str(step.get("status") or "")
@@ -530,14 +588,18 @@ def _omp_stale_note(step):
 def _html_updates(applied_data):
     """Render update steps — signal only, no no-op greys."""
     steps = applied_data.get("steps", [])
+    reboot = applied_data.get("host_reboot")
+    head = [_p1_line(reboot["text"], reboot["color"])] if reboot else []
     if not steps:
         if _p1_phase_failed(applied_data):
-            return _p1_phase_failure_row(applied_data)
-        if applied_data.get("dry_run"):
-            return '<p style="margin:0; color:#888; font-size:13px;">Dry run — no mutations applied.</p>'
-        return '<p style="margin:0; color:#888; font-size:13px;">No update steps executed.</p>'
+            body = _p1_phase_failure_row(applied_data)
+        elif applied_data.get("dry_run"):
+            body = '<p style="margin:0; color:#888; font-size:13px;">Dry run — no mutations applied.</p>'
+        else:
+            body = '<p style="margin:0; color:#888; font-size:13px;">No update steps executed.</p>'
+        return "\n".join(head + [body])
 
-    lines = []
+    lines = list(head)
     for s in steps:
         name = s.get("step", "")
         status = s.get("status", "")
@@ -823,11 +885,21 @@ def _html_health(validation_data, hb_data, applied_data=None):
             parts.append(_dot("ok") + f"cleared stale: {clr}")
         sys_rows.append(("Systemd units", " ".join(parts)))
 
-    # Reboot
+    # Reboot (heartbeat runs after a mid-run ThinkPad reboot, so the run's own
+    # reboot record says whether one happened tonight)
     rb = hb_data.get("reboot", {}) or {}
-    sys_rows.append(("Reboot",
-        (_dot("danger") + f'Needed — kernel {rb.get("kernel","?")}' if rb.get("needed")
-         else _dot("ok") + "Not needed")))
+    host_reboot = (applied_data or {}).get("host_reboot")
+    if rb.get("needed"):
+        reboot_cell = _dot("danger") + f'Needed — kernel {rb.get("kernel","?")}'
+    elif host_reboot and host_reboot.get("rebooted"):
+        reboot_cell = _dot("ok") + html.escape(
+            f'Rebooted {host_reboot["time"]} UTC — kernel {host_reboot["kernel_after"]}')
+    elif host_reboot:
+        reboot_cell = _dot("warn") + html.escape(
+            f'Requested {host_reboot["time"]} UTC — host did not restart')
+    else:
+        reboot_cell = _dot("ok") + "Not needed"
+    sys_rows.append(("Reboot", reboot_cell))
 
     # Disk
     disk = hb_data.get("disk", {}) or {}
@@ -1642,7 +1714,8 @@ def _tldr_collect_gamingrig_failures(step):
 
 def _tldr_collect_updates(applied):
     """Real local changes plus actionable remote-maintenance signals."""
-    updates = []
+    reboot = (applied or {}).get("host_reboot")
+    updates = [reboot["text"]] if reboot else []
     n_failed = 0
     for s in applied.get("steps", []) or []:
         step = s.get("step", "")
@@ -2280,8 +2353,14 @@ def _html_actions(audit, fixes, applied, steward_code=None):
     p1_done = [
         s for s in (applied or {}).get("steps", []) or []
         if isinstance(s, dict) and s.get("revert") and s.get("status") == "ok"
+        and s.get("step") != "dependabot_merge"
     ]
-    if not (needs or code_needs or done or in_progress or p1_done):
+    dependabot_done = [
+        row for s in (applied or {}).get("steps", []) or []
+        if isinstance(s, dict) and s.get("step") == "dependabot_merge"
+        for row in _dependabot_done_rows(s)
+    ]
+    if not (needs or code_needs or done or in_progress or p1_done or dependabot_done):
         return ""
 
     def block(title, color, items):
@@ -2318,7 +2397,7 @@ def _html_actions(audit, fixes, applied, steward_code=None):
         if len(needs) > 10:
             items.append(item(html.escape(f"…and {len(needs) - 10} more in the audit below.")))
         out.append(block("Needs You", "#c62828", items))
-    if done or in_progress or p1_done:
+    if done or in_progress or p1_done or dependabot_done:
         items = []
         for r in done:
             items.append(item(
@@ -2328,11 +2407,20 @@ def _html_actions(audit, fixes, applied, steward_code=None):
             ))
         for s in p1_done:
             label = s.get("service") or s.get("step")
+            if s.get("pre_version") and s.get("post_version"):
+                what = (f"updated {_short_sha(s.get('pre_version'))} -> "
+                        f"{_short_sha(s.get('post_version'))}")
+            else:
+                what = str(s.get("reason") or "done")
             items.append(item(
-                f"<strong>{html.escape(str(label))}</strong>: updated "
-                f"{html.escape(_short_sha(s.get('pre_version')))} -> "
-                f"{html.escape(_short_sha(s.get('post_version')))}",
+                f"<strong>{html.escape(str(label))}</strong>: {html.escape(what)}",
                 f"Undo: {s['revert']}",
+            ))
+        for text, undo in dependabot_done:
+            label, _, rest = text.partition(": ")
+            items.append(item(
+                f"<strong>{html.escape(label)}</strong>: {html.escape(rest)}",
+                f"Undo: {undo}" if undo else "",
             ))
         for r in in_progress:
             items.append(item(
@@ -2359,6 +2447,9 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
 
     # Load all phase data
     applied = read_json(run_dir / "01-applied.json") if (run_dir / "01-applied.json").exists() else {"steps": []}
+    host_reboot = _host_reboot_status(run_dir)
+    if host_reboot:
+        applied["host_reboot"] = host_reboot
     validation = read_json(run_dir / "02-validation.json") if (run_dir / "02-validation.json").exists() else {"checks": []}
     troubleshoot = read_json(run_dir / "03-troubleshoot.json") if (run_dir / "03-troubleshoot.json").exists() else None
     heartbeat = read_json(run_dir / "04-heartbeat.json") if (run_dir / "04-heartbeat.json").exists() else {}
@@ -2524,6 +2615,7 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
 
     # Load key artifacts for summary
     applied = read_json(run_dir / "01-applied.json") if (run_dir / "01-applied.json").exists() else {}
+    host_reboot = _host_reboot_status(run_dir)
     validation = read_json(run_dir / "02-validation.json") if (run_dir / "02-validation.json").exists() else {}
     audit = read_json(run_dir / "07-audit.json") if (run_dir / "07-audit.json").exists() else {}
     queue = read_json(run_dir / "05-queue.json") if (run_dir / "05-queue.json").exists() else {}
@@ -2537,6 +2629,8 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
         "",
         "## Update Status",
     ]
+    if host_reboot:
+        lines.append(f"- {host_reboot['text']}")
     if _p1_phase_failed(applied):
         lines.append(f"- Maintenance: FAILED — {_p1_failure_detail(applied)}")
     elif applied.get("phase_status") == "degraded":

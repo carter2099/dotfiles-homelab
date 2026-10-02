@@ -98,6 +98,7 @@ from .runtime import (
     user_env,
     write_json,
 )
+from . import public_dotfiles
 
 def _audit_collector_1_agents_md():
     """Collector: AGENTS.md truth-check evidence."""
@@ -221,10 +222,7 @@ def _audit_collector_3_digest_quality():
                     try:
                         publication_text = path.read_text()
                         publication = json.loads(publication_text)
-                        stories = (
-                            publication.get("fresh", [])
-                            + publication.get("ongoing", [])
-                        )
+                        stories = publication.get("fresh", [])
                         standfirst = publication.get("standfirst", "")
                         attention_path = (
                             news_root / "attention" / date_dir.name / f"{slug}.json"
@@ -258,10 +256,7 @@ def _audit_collector_3_digest_quality():
                                         and story.get("significance_validation", {}).get("status")
                                         == "accepted"
                                     )
-                                    for story in (
-                                        publication.get("fresh", [])
-                                        + publication.get("ongoing", [])
-                                    )
+                                    for story in stories
                                 )
                             ),
                             "priority_complete": all(
@@ -273,7 +268,7 @@ def _audit_collector_3_digest_quality():
                                 or all(
                                     isinstance(story.get("attention"), dict)
                                     and story["attention"].get("status")
-                                    in {"ok", "no_matches", "unavailable", "out_of_scope"}
+                                    in {"ok", "no_matches", "unavailable"}
                                     for story in stories
                                 )
                             ),
@@ -882,11 +877,11 @@ AUDIT_SECTIONS = [
         "timeout": 600,
         "guidance": (
             "Judge Daily News over the last 48 hours plus systemic regressions: completeness, "
-            "freshness, duplication, tracker hygiene, five schema-v2/ranking-v3 publications, "
+            "freshness, duplication, five schema-v2/ranking-v3 publications, "
             "complete standfirsts, and active front page. Every high significance must have "
             "accepted source-grounded evidence; routine deprecations without demonstrated broad "
             "impact must be downgraded. `no_matches` must score attention/prominence 0; "
-            "`unavailable` and `out_of_scope` must have confidence 0 so observed attention cannot "
+            "`unavailable` must have confidence 0 so observed attention cannot "
             "move priority (priority is then editorial significance plus any Jev importance); sources "
             "not fully collected are left out and listed in evidence.sources_excluded. Check deterministic "
             "priority fields, durable attention records, one mail marker after the 2026-08-25 "
@@ -1321,8 +1316,221 @@ def _apply_deterministic_audit_guards(section_name, evidence, verdict, confirmed
     return verdict, confirmed
 
 
-def _run_audit_agent_pair(section, evidence, current_hash, session_memory=""):
-    """Worker + judge for one audit section. Returns the section result dict."""
+# The judge runs without tools, so the steward reads the worker's file:line
+# citations itself and inlines exactly those lines (secret-scanned) for it.
+_CITATION_RE = re.compile(
+    r"(?<![\w.@+~/-])"
+    r"(?P<path>~?/?(?:[\w.@+-]+/)*[\w.@+-]+)"
+    r":(?P<ranges>\d+(?:[-–]\d+)?(?:,\d+(?:[-–]\d+)?)*)(?!\d)"
+)
+_CITATION_EXTENSION_RE = re.compile(r"\.[A-Za-z][\w-]*$")
+_CITATION_CONTEXT_LINES = 2
+_CITATION_MAX_LINES = 80
+_CITATION_MAX_BYTES = 2 * 1024 * 1024
+_CITATION_MAX_COUNT = 40
+_CITATION_LINE_CHARS = 500
+_CITATION_EXCERPT_CAP = 16000
+_CITATION_SENSITIVE_DIRS = (
+    ".ssh/", ".gnupg/", ".local/state/", ".local/share/", ".config/rig-dashboard/",
+)
+_CITATION_SENSITIVE_NAME_RE = re.compile(
+    r"env|\.env.*|id_.*|.*\.(?:pem|key|db|db-wal|db-shm)|.*\.sqlite.*", re.IGNORECASE
+)
+_CITATION_SENSITIVE_WORD_RE = re.compile(
+    r"token|secret|credential|password|api[-_]?key", re.IGNORECASE
+)
+
+
+def _parse_finding_citations(findings):
+    """Ordered unique (path, start, end) citations in findings' evidence/claim/fix text."""
+    seen = set()
+    citations = []
+    for finding in findings or []:
+        if not isinstance(finding, dict):
+            continue
+        for field in ("evidence", "claim", "fix"):
+            text = finding.get(field)
+            if not isinstance(text, str):
+                continue
+            for match in _CITATION_RE.finditer(text):
+                path = match.group("path")
+                if "/" not in path and not _CITATION_EXTENSION_RE.search(path):
+                    continue  # host:port, version strings, and similar non-files
+                for part in match.group("ranges").split(","):
+                    bounds = re.split(r"[-–]", part)
+                    start, end = sorted((max(1, int(bounds[0])), max(1, int(bounds[-1]))))
+                    key = (path, start, end)
+                    if key not in seen:
+                        seen.add(key)
+                        citations.append(key)
+    return citations
+
+
+def _citation_sensitive_reason(rel):
+    """Why a home-relative path must never be inlined, or None."""
+    slashed = rel + "/"
+    if slashed.startswith(_CITATION_SENSITIVE_DIRS):
+        return "sensitive path"
+    if slashed.startswith(".omp/agent/") and not (
+        rel.startswith(".omp/agent/prompts/")
+        or (rel.count("/") == 2 and rel.endswith((".yml", ".yaml")))
+    ):
+        return "sensitive path"
+    for part in rel.split("/"):
+        if _CITATION_SENSITIVE_NAME_RE.fullmatch(part) or _CITATION_SENSITIVE_WORD_RE.search(part):
+            return "sensitive file name"
+    return None
+
+
+def _citation_candidate(raw, run_dir):
+    """Lexically normalized absolute path for a cited path."""
+    home = Path(HOME)
+    if raw.startswith("~/"):
+        candidate = home / raw[2:]
+    elif raw.startswith("/"):
+        candidate = Path(raw)
+    elif "/" not in raw and run_dir is not None and (Path(run_dir) / raw).exists():
+        candidate = Path(run_dir) / raw  # bare steward artifact name
+    else:
+        candidate = home / raw
+    return Path(os.path.normpath(candidate))
+
+
+def _read_citation_lines(raw, run_dir):
+    """Return (label, lines, None) for a readable citation or (label, None, reason)."""
+    home = Path(HOME)
+    home_real = home.resolve()
+
+    def relative(path, root):
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            return None
+
+    candidate = _citation_candidate(raw, run_dir)
+    label = relative(candidate, home)
+    if label is None:
+        label = relative(candidate, home_real)
+    if label is None:
+        return raw, None, f"outside {home}"
+    resolved = candidate.resolve()
+    rel = relative(resolved, home_real)
+    if rel is None:
+        return label, None, f"symlink escapes {home}"
+    reason = _citation_sensitive_reason(label) or _citation_sensitive_reason(rel)
+    if reason:
+        return label, None, reason
+    if not resolved.exists():
+        return label, None, "not found"
+    if not resolved.is_file():
+        return label, None, "not a regular file"
+    try:
+        if resolved.stat().st_size > _CITATION_MAX_BYTES:
+            return label, None, "file larger than 2 MB"
+        data = resolved.read_bytes()
+    except OSError as error:
+        return label, None, f"unreadable: {error.strerror or error}"
+    if b"\0" in data[:8192]:
+        return label, None, "binary file"
+    return rel, data.decode("utf-8", errors="replace").splitlines(), None
+
+
+def _build_cited_excerpts(findings, run_dir=None):
+    """Read the worker's file:line citations for the no-tools judge.
+
+    Returns (text, citations): the CITED EXCERPTS prompt block and one
+    {"path", "start", "end", "status"} record per citation ("ok" or a reason).
+    """
+    records = []
+    seen = set()
+    files = {}
+    reads = {}
+    for raw, start, end in _parse_finding_citations(findings)[:_CITATION_MAX_COUNT]:
+        if raw not in reads:
+            reads[raw] = _read_citation_lines(raw, run_dir)
+        label, lines, reason = reads[raw]
+        if (label, start, end) in seen:
+            continue
+        seen.add((label, start, end))
+        if lines is not None and start > len(lines):
+            reason = f"line {start} beyond end of file ({len(lines)} lines)"
+        record = {"path": label, "start": start, "end": end, "status": reason or "ok"}
+        records.append(record)
+        if reason:
+            continue
+        low = max(1, start - _CITATION_CONTEXT_LINES)
+        high = min(len(lines), end + _CITATION_CONTEXT_LINES, low + _CITATION_MAX_LINES - 1)
+        files.setdefault(label, {"lines": lines, "spans": []})["spans"].append(
+            (low, high, record)
+        )
+
+    unreadable = [
+        f"- {record['path']}:{record['start']}-{record['end']} — {record['status']}"
+        for record in records if record["status"] != "ok"
+    ]
+    unreadable_text = (
+        "\n\nUNREADABLE CITATIONS (not shown; claims resting only on these stay unverifiable):\n"
+        + "\n".join(unreadable)
+    ) if unreadable else ""
+    budget = _CITATION_EXCERPT_CAP - len(unreadable_text) - 200
+    omitted = "omitted: excerpt cap reached"
+    blocks = []
+    used = 0
+    truncated = False
+    for label, entry in files.items():
+        merged = []
+        for low, high, record in sorted(entry["spans"], key=lambda span: span[:2]):
+            if merged and low <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], high)
+                merged[-1][2].append(record)
+            else:
+                merged.append([low, high, [record]])
+        for low, high, span_records in merged:
+            body = []
+            shown = low - 1
+            cost = len(f"### {label}:{low}-{high}") + 2
+            for number in range(low, high + 1) if not truncated else ():
+                text = entry["lines"][number - 1]
+                if public_dotfiles._line_finding(text):
+                    text = "[line withheld: secret-scan hit]"
+                elif len(text) > _CITATION_LINE_CHARS:
+                    text = text[:_CITATION_LINE_CHARS] + " …[line truncated]"
+                rendered = f"{number:04d}| {text}"
+                if used + cost + len(rendered) + 1 > budget:
+                    truncated = True
+                    break
+                body.append(rendered)
+                cost += len(rendered) + 1
+                shown = number
+            for record in span_records:
+                if record["start"] > shown:
+                    record["status"] = omitted
+            if body:
+                blocks.append("\n".join([f"### {label}:{low}-{shown}", *body]))
+                used += cost
+
+    if not records:
+        text = "(none: the worker findings cite no file:line locations)"
+    else:
+        text = "\n\n".join(blocks) if blocks else "(no cited lines could be shown)"
+    if truncated:
+        dropped = sum(record["status"] == omitted for record in records)
+        text += (
+            f"\n\n[cited excerpts truncated at {_CITATION_EXCERPT_CAP} chars; "
+            f"{dropped} citation(s) omitted and unverifiable]"
+        )
+    text += unreadable_text
+    if len(text) > _CITATION_EXCERPT_CAP:
+        note = "\n[cited excerpts truncated]"
+        text = text[:_CITATION_EXCERPT_CAP - len(note)] + note
+    return text, records
+
+
+def _run_audit_agent_pair(section, evidence, current_hash, session_memory="", run_dir=None):
+    """Worker + judge for one audit section. Returns the section result dict.
+
+    ``run_dir`` lets the judge's cited excerpts resolve bare steward artifact names.
+    """
     section_name = section["name"]
     worker_prompt = f"""
 You are a homelab audit agent for section '{section_name}'.
@@ -1395,6 +1603,13 @@ verified:
                 "confirmed_findings": [],
             }
 
+    try:
+        cited_excerpts, judge_citations = _build_cited_excerpts(
+            worker_packet.get("findings", []), run_dir
+        )
+    except Exception as error:
+        cited_excerpts, judge_citations = f"(cited excerpts unavailable: {error})", []
+
     judge_prompt = f"""
 You are a skeptical judge reviewing a homelab audit agent's findings. Independently
 re-verify each finding against the collected evidence and the worker's citations.
@@ -1412,6 +1627,10 @@ COLLECTED EVIDENCE:
 WORKER VERDICT + FINDINGS:
 {json.dumps(worker_packet, indent=2)}
 
+CITED EXCERPTS (read by the steward, not the worker, from the worker's file:line citations;
+each block shows exactly what those lines of the file contain right now):
+{cited_excerpts}
+
 RECENT SESSION MEMORY (context for interpreting the state the findings describe):
 {session_memory}
 
@@ -1425,6 +1644,9 @@ Return a fenced ```json packet:
 - `confirmed` contains unresolved problem findings only, never healthy-state confirmations.
 - `PASS` requires an empty `confirmed` list. Use `ATTENTION` for unresolved manual/security
   action and `DRIFT` for a concrete state/config mismatch.
+- A finding whose load-bearing citation is shown in CITED EXCERPTS must be judged on those
+  lines; never reject it merely because the file is absent from COLLECTED EVIDENCE.
+  Citations listed as unreadable stay unverifiable.
 - For every confirmed item set `severity` by this rubric; you may override the worker's:
 {_SEVERITY_RUBRIC}
 - Route: the worker's `action`/`target`/`decision` stand unless unsafe or unsupported by
@@ -1487,6 +1709,7 @@ Return a fenced ```json packet:
         "worker_findings": worker_packet.get("findings", []),
         "judge_confirmed": confirmed,
         "judge_rejected": rejected,
+        "judge_citations": judge_citations,
     }
 
 
@@ -1611,6 +1834,7 @@ def phase_7_audit(run_dir, setup_data, dry_run=False):
                     "worker_findings": prev_artifact.get("worker_findings", []),
                     "judge_confirmed": prev_artifact.get("judge_confirmed", []),
                     "judge_rejected": prev_artifact.get("judge_rejected", []),
+                    "judge_citations": prev_artifact.get("judge_citations", []),
                 }
                 write_json(run_dir / artifact_name, result)
                 all_results.append(result)
@@ -1634,7 +1858,9 @@ def phase_7_audit(run_dir, setup_data, dry_run=False):
         print(f"  fanning out {len(to_fire)} sections (max_workers={AUDIT_MAX_WORKERS})")
         with ThreadPoolExecutor(max_workers=AUDIT_MAX_WORKERS) as pool:
             futures = {
-                pool.submit(_run_audit_agent_pair, section, evidence, chash, session_memory): (section, artifact_name)
+                pool.submit(
+                    _run_audit_agent_pair, section, evidence, chash, session_memory, run_dir
+                ): (section, artifact_name)
                 for (section, evidence, chash, artifact_name) in to_fire
             }
             for fut in as_completed(futures):
