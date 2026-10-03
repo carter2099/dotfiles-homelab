@@ -259,6 +259,31 @@ class StewardCodeCloneTests(unittest.TestCase):
         self.assertEqual(plans, [])
         self.assertTrue(any("steward-code path is not repairable" in e for e in errors), errors)
 
+    def test_snapshot_stages_verifier_support_files_read_only(self):
+        # verify-daily-news.sh preflights the checkout's .omp config; without
+        # it every Daily News repair failed validation inside the worker.
+        for rel in (*worker.STEWARD_CODE_VERIFIER_SUPPORT, ".omp/agent/config.yml", ".config/other/app.conf"):
+            (self.clone / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.clone / rel).write_text("x\n")
+        self.run_git("add", "-A")
+        self.run_git("commit", "-q", "-m", "support")
+        listed = worker._tracked_paths(self.clone)
+        for rel in worker.STEWARD_CODE_VERIFIER_SUPPORT:
+            self.assertIn(rel, listed)
+            with self.assertRaises(worker.WorkerPolicyError):
+                worker._safe_relpath(rel, kind=worker.REPO_KIND_STEWARD_CODE)
+        self.assertNotIn(".omp/agent/config.yml", listed)
+        self.assertNotIn(".config/other/app.conf", listed)
+        app = self.dev / "app"
+        for rel in worker.STEWARD_CODE_VERIFIER_SUPPORT:
+            (app / rel).parent.mkdir(parents=True, exist_ok=True)
+            (app / rel).write_text("x\n")
+        (app / "main.py").write_text("x = 1\n")
+        git("init", "-q", "--initial-branch=main", cwd=app)
+        git("add", "-A", cwd=app)
+        git("commit", "-q", "-m", "seed", cwd=app)
+        self.assertEqual(worker._tracked_paths(app), ["main.py"])
+
     def test_publisher_accepts_allowed_and_rejects_protected_paths(self):
         result = worker.publish_validated_result(self.packet("scripts/steward/health.py", "LIMIT = 2\n"), "s")
         self.assertEqual(result["status"], "published", result)

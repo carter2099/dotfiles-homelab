@@ -31,17 +31,26 @@ _ABBREVIATION_TOKENS = frozenset({
     # Geographic and credential short forms used mid-sentence
     "u.s", "u.k", "u.n", "u.s.s.r", "u.a.e", "d.c", "ph.d",
 })
+# Personal initials and dotted capital acronyms ("T. Rowe Price", "J.R.R.
+# Tolkien") are abbreviations too: splitting on the initial cut the 2026-10-01
+# AI & Tech fallback standfirst to "...co-led by Wellington and T."
+_INITIALS_RE = re.compile(r"[A-Z](?:\.[A-Z])*")
 _MIN_SENTENCE_WORDS = 3
 _SENTENCE_END_RE = re.compile(r"""[.!?…]["'’”)]*(?=\s|$)""")
 _ABBREVIATION_ENDING_RE = re.compile(r"""\b([A-Za-z0-9’'.&-]+)\.["'’”)]*$""")
 
 
+def _is_abbreviation_token(token: str) -> bool:
+    token = token.rstrip(".")
+    return token.casefold() in _ABBREVIATION_TOKENS or _INITIALS_RE.fullmatch(token) is not None
+
+
 def _is_abbreviation_period(text: str, start: int) -> bool:
-    """True when the period at ``start`` terminates a known abbreviation token."""
+    """True when the period at ``start`` terminates an abbreviation token."""
     end = start
     while end > 0 and (text[end - 1].isalnum() or text[end - 1] in "’.'&-"):
         end -= 1
-    return text[end:start].rstrip(".").casefold() in _ABBREVIATION_TOKENS
+    return _is_abbreviation_token(text[end:start])
 
 
 def _sentence_ends(text: str) -> list[int]:
@@ -58,11 +67,9 @@ def _sentence_ends(text: str) -> list[int]:
 
 
 def _ends_abbreviated(text: str) -> bool:
-    """True when the final punctuation closes a known abbreviation token."""
+    """True when the final punctuation closes an abbreviation token."""
     match = _ABBREVIATION_ENDING_RE.search(text)
-    if match is None:
-        return False
-    return match.group(1).rstrip(".").casefold() in _ABBREVIATION_TOKENS
+    return match is not None and _is_abbreviation_token(match.group(1))
 
 
 def validate_standfirst(standfirst: str, stories: list[dict]) -> tuple[bool, str]:

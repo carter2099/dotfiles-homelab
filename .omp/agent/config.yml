@@ -3,9 +3,9 @@ theme:
   dark: dark-one
 setupVersion: 2
 modelRoles:
-  default: anthropic/claude-opus-5-5:medium
-  smol: openai-codex/gpt-5.6-luna:max
-  tiny: openai-codex/gpt-5.6-luna:low
+  default: anthropic/claude-opus-5-5:high
+  smol: anthropic/claude-sonnet-5-5:high
+  tiny: opencode-go/gpt-6-luna:medium
   slow: anthropic/claude-opus-5-5:max
   task: anthropic/claude-opus-5-5:medium
 advisor:

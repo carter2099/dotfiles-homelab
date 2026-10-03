@@ -38,6 +38,24 @@ fast-forward cleanly, do not change the checkout: skip to Step 11, record the
 blocked run, and send the Step 12 email with the exact Git state. Never
 overwrite or fold pre-existing work into an automated run.
 
+Then run the baseline gate on the untouched tip (every run, no-op included):
+
+```bash
+cd ~/dev/hyperliquid
+git rev-parse --short HEAD
+RBENV_VERSION=3.4.10 bundle exec rake
+```
+
+Copy the rspec summary line (`N examples, 0 failures`) and RuboCop's result
+into the state file's Run History row and the email as
+`baseline <sha>: <N> examples, 0 failures, rubocop clean`. If the baseline is
+red (any spec failure, any RuboCop offense, or rake aborting), record
+`baseline <sha>: RED — <summary line or abort message>`; this run's only scope
+is repairing it. Steps 3 and 4 still run (they only record queue and scan
+state), but Step 5 selects nothing except the repair, Step 6 is the smallest
+fix that makes the baseline green, and Steps 7–10 gate and commit it as `fix:`.
+Never waive a red baseline as pre-existing and never build new work on it.
+
 ## Step 3: Reconcile the preclassified Dependabot intake into the queue
 
 Read the JSON file at `$HYPERLIQUID_DEPENDABOT_MANIFEST`. The scheduled
@@ -135,10 +153,10 @@ RBENV_VERSION=3.4.10 ruby ~/agent-state/hyperliquid-sdk-fixtures/check_rbsecp256
 
 Select work from the state file after both queue-producing passes (Dependabot
 reconciliation and upstream scanning):
-- **Priority order:** a 🟢 triggered Plan Queue row RB → 🔧 bugs that name no
-  Plan Queue row → eligible Dependabot entries → the next Plan Queue row →
-  oldest 🟡 work across Known Gaps and DevOps / Repo Hygiene that no Plan Queue
-  row covers → housekeeping.
+- **Priority order:** repairing a red Step 2 baseline (exclusive) → a 🟢
+  triggered Plan Queue row RB → 🔧 bugs that name no Plan Queue row → eligible
+  Dependabot entries → the next Plan Queue row → oldest 🟡 work across Known
+  Gaps and DevOps / Repo Hygiene that no Plan Queue row covers → housekeeping.
 - 🔧/`📝 bug` entries that name a Plan Queue row (W1, O-A, IT-A, D2) or the
   release flow are fixed by that row or by the release; never select them
   separately. 📝 entries are only ever implemented through their Plan Queue row.
@@ -186,8 +204,7 @@ For each selected API gap:
    table. Give a new integration script a row in `docs/DEVELOPMENT.md`'s script
    table. Add a `docs/EXAMPLES.md` example only for a new workflow. Never edit
    `CHANGELOG.md`.
-5. Run the single spec file and the docs gate before moving on (until Plan Queue
-   row D1 has added `spec/docs_coverage_spec.rb`, run only the single spec file):
+5. Run the new spec file and the docs gate before moving on:
    ```bash
    cd ~/dev/hyperliquid && RBENV_VERSION=3.4.10 bundle exec rspec spec/path/to/new_spec.rb spec/docs_coverage_spec.rb
    ```
@@ -265,26 +282,52 @@ cd ~/dev/hyperliquid
 RBENV_VERSION=3.4.10 bundle exec rake
 ```
 
-Fix failures before continuing. A dependency update may expose a localized compatibility or lint correction; make the smallest behavior-preserving fix, run its focused test, and include that exact file in the dependency commit. If the required correction is broad, changes public behavior, is not clearly caused by the selected entries, or leaves any unexpected failure, perform the Step 6 dependency cleanup, return the selected entries to 🟡 with the failure, and skip to Step 11 without committing or closing PRs. For an API-gap run, a proven unrelated pre-existing failure may be recorded without blocking; never label a failure unrelated or flaky without evidence.
+`rake` (specs, RuboCop, and `rubocop:scripts`) must be green: `0 failures` and
+no offenses. Unit and lint failures are NEVER waived, never recorded as
+pre-existing, and never labelled unrelated or flaky; the Step 2 baseline was
+green, so any failure now is caused by this run. Fix failures before
+continuing. A dependency update may expose a localized compatibility or lint correction; make the smallest behavior-preserving fix, run its focused test, and include that exact file in the dependency commit. If the required correction is broad, changes public behavior, is not clearly caused by the selected entries, or leaves any unexpected failure, perform the Step 6 dependency cleanup, return the selected entries to 🟡 with the failure, and skip to Step 11 without committing or closing PRs. An API-gap or Plan Queue row run that cannot make `rake` green does not commit: restore the changed tracked paths to `HEAD`, remove the files it created, leave its gaps/row not ✅ with the failure, and skip to Step 11.
 
 ## Step 8: Run integration tests
 
-Load the private key and run the automated integration suite:
+First decide whether the change is docs-only (mechanically, never by eye):
+
+```bash
+cd ~/dev/hyperliquid
+RBENV_VERSION=3.4.10 bundle exec rake verify:docs_only
+```
+
+Exit 0 (it prints `DOCS_ONLY=yes`): skip integration and record that exact
+line as "integration skipped: DOCS_ONLY=yes" in the state file and email. Any
+other result (`DOCS_ONLY=no path=…`, or an error) means run integration:
 
 ```bash
 cd ~/dev/hyperliquid
 source ~/.config/hyperliquid-agent/env
-RBENV_VERSION=3.4.10 HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY ruby scripts/test_automated.rb
+HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY RBENV_VERSION=3.4.10 bundle exec rake integration
 ```
 
-Before investigating any failures, cross-reference against the **Known Pre-existing Failures** section in the state file. If a failure matches a known pre-existing issue, note it in the email but do not spend tool calls re-investigating it. Only investigate genuinely new failures.
+The runner's final line, `INTEGRATION GATE: PASS|FAIL total=N pass=a
+guarded=b skipped=c inconclusive=d fail=e timeout=f not_run=g`, and
+`tmp/integration-summary.json` (per-script `status`) are the authoritative
+result; read them, never summarize the scrolling output from memory. A missing
+final line, or `rake integration` exiting 2 (key not loaded), is a failed gate.
 
-For a dependency run, any new integration failure blocks the selected entries; only a failure already documented in the state file as pre-existing may be recorded without blocking. On a blocking failure, perform the Step 6 dependency cleanup, return those entries to 🟡 with the failure, and skip to Step 11. For an API-gap run, fix regressions before committing and record only failures proven unrelated.
-
-For a docs-only run, skip this step if this prints nothing (only comments changed
-under lib/ and scripts/):
-`git diff -U0 HEAD -- lib scripts | grep -E '^[+-][^+-]' | grep -vE '^[+-][[:space:]]*(#|$)'`
-Record "integration skipped: docs-only" in the state file and email. Otherwise run it.
+- `INTEGRATION GATE: FAIL` (including a failed wallet pre-flight
+  `precondition` or post-flight `leak`) or any script with status FAIL,
+  TIMEOUT, or NOT_RUN blocks the commit. There is no waiver list: a name match
+  against an old state-file note proves nothing. Read the failing script's
+  output and fix the cause (a wallet precondition is fixed with
+  `HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY RBENV_VERSION=3.4.10 bundle exec ruby scripts/testnet_wallet_check.rb --fix`,
+  then rerun; exit 2 means underfunded — report it, do not commit).
+  - API-gap or Plan Queue row run: the failure is a regression this run must
+    fix before committing (then rerun `rake` and `rake integration`); if it
+    cannot, it does not commit — restore as in Step 7 and skip to Step 11.
+  - Dependency run: perform the Step 6 dependency cleanup, return the selected
+    entries to 🟡 with the failing script names, and skip to Step 11.
+- INCONCLUSIVE, SKIPPED, and GUARDED never block, but list every such script
+  by name with its status (from `tmp/integration-summary.json`) in the email
+  and the Run History row.
 
 ## Step 9: Sync CLAUDE.md if needed
 
@@ -317,8 +360,9 @@ for (plus one starting `BREAKING:` for a breaking change), then a blank line and
 cd ~/dev/hyperliquid
 git add lib/hyperliquid/info.rb spec/hyperliquid/info_spec.rb  # use the actual specific files, including docs/API.md / docs/WS.md / docs/EXAMPLES.md / docs/DEVELOPMENT.md and new scripts; include CLAUDE.md only if updated
 git commit -F /tmp/hl-commit-msg.txt && rm /tmp/hl-commit-msg.txt
-git push origin dev
 ```
+
+Then push only through the **push protocol** below.
 
 A docs-only row stages only the files its plan run names.
 
@@ -333,8 +377,33 @@ git add Gemfile.lock .github/workflows/<changed-workflow>.yml <specific-compatib
 git commit -m "chore(deps): apply Dependabot batch
 
 Co-Authored-By: hyperliquid-run agent <noreply@carter2099.com>"
-git push origin dev
 ```
+
+**Push protocol** (every commit, every scope):
+
+```bash
+cd ~/dev/hyperliquid
+git status --porcelain                         # must print nothing
+RBENV_VERSION=3.4.10 bundle exec rake verify   # rake, then rake again in a clean clone of the commit with BUNDLE_FROZEN=true
+git push origin dev
+git rev-parse HEAD @{upstream}                 # the two SHAs must be identical
+```
+
+- `rake verify` tests the committed tree, not the working tree: a file you
+  forgot to `git add` or a stale `Gemfile.lock` fails it even though Step 7
+  passed. Never push when it fails. The commit is still local: fix the cause,
+  `git add` it, `git commit --amend --no-edit`, and rerun `rake verify`. If it
+  cannot be made green, `git reset --soft HEAD~1` and take the Step 7 failure
+  path (do not commit).
+- If `git push` is rejected because `origin/dev` moved, run
+  `git pull --rebase origin dev`, then rerun `rake verify` before pushing
+  again. Never force-push.
+- `git rev-parse HEAD @{upstream}` must print the same SHA twice; a push is
+  not done until it does. Do not run `git fetch` or `git ls-remote` (the guard
+  blocks them; a successful `git push` already updated `@{upstream}`). The
+  scheduled wrapper independently re-checks a clean tree, that HEAD is on
+  `origin/dev`, and a fresh clone of `origin/dev`, and fails the run if any
+  check fails.
 
 If every selected Dependabot entry was already satisfied and the checkout has
 no dependency changes, skip the commit; the tests must still pass.
@@ -371,7 +440,10 @@ Edit `~/agent-state/hyperliquid-sdk.md`:
   entries, selected PR numbers, resolved versions, and close outcomes.
 - Preserve every unselected eligible and newly discovered Dependabot entry as
   🟡 queued for a later scheduled run.
-- Append a row to the Run History table.
+- Append a row to the Run History table. Its outcome cell carries the Step 2
+  `baseline <sha>: …` line, the pushed SHA (or "no commit"), the rspec summary
+  line, and the `INTEGRATION GATE:` line (or `skipped: DOCS_ONLY=yes`) copied
+  verbatim, plus every INCONCLUSIVE/SKIPPED/GUARDED script by name.
 
 ## Step 12: Email summary
 
@@ -387,6 +459,12 @@ python3 ~/scripts/send_digest.py \
 rm /home/carter/agent-state/.hyperliquid_email.html
 ```
 
+Every test number in the email (and the Run History row) is copied from tool
+output of this run: the rspec summary line (`N examples, 0 failures`) and the
+`INTEGRATION GATE:` line, verbatim, plus the per-script statuses from
+`tmp/integration-summary.json`. Never type a count from memory or carry one
+over from an earlier run; a gate you did not run is reported as "not run".
+
 Email body must be valid HTML (the script sends `subtype="html"` — markdown-style text will render as one collapsed blob with no line breaks). Use this structure:
 
 ```html
@@ -401,7 +479,10 @@ Email body must be valid HTML (the script sends `subtype="html"` — markdown-st
 <p>Manifest digest; newly queued, refreshed, stale, selected, and deferred PR numbers; applied versions and close outcomes. Say “No open PRs” when empty.</p>
 
 <h3>Test results</h3>
-<p>N/N unit tests passing. N/N integration tests passing. RuboCop clean.</p>
+<p>Baseline: baseline &lt;sha&gt;: &lt;N&gt; examples, 0 failures, rubocop clean</p>
+<p>Unit (pushed &lt;sha&gt;): &lt;rspec summary line verbatim&gt;; RuboCop: &lt;result&gt;; rake verify: green</p>
+<p>Integration: &lt;INTEGRATION GATE: line verbatim&gt; (or "skipped: DOCS_ONLY=yes")</p>
+<p>Not PASS: &lt;script name — INCONCLUSIVE/SKIPPED/GUARDED, one per script&gt; (or "none")</p>
 
 <h3>New gaps</h3>
 <ul>

@@ -2295,6 +2295,19 @@ def test_standfirst_boundary_and_deterministic_render() -> None:
         fallback == "Emergency crews moved residents to safer ground.",
         fallback,
     )
+    initials = (
+        "ElevenLabs is letting employees sell vested equity in a tender offer "
+        "co-led by Wellington and T. Rowe Price. Flow Engineering raised a Series B."
+    )
+    check(
+        copy_module.first_complete_sentence(initials)
+        == initials.removesuffix(" Flow Engineering raised a Series B."),
+        copy_module.first_complete_sentence(initials),
+    )
+    valid, reason = copy_module.validate_standfirst(
+        "ElevenLabs runs a tender offer co-led by Wellington and T.", []
+    )
+    check(not valid and "abbreviation period" in reason, reason)
     clipped = editorial.clean_editorial_text("word " * 300, limit=80)
     check(clipped.endswith("word…") and len(clipped) <= 81, clipped)
 

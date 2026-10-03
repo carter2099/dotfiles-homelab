@@ -162,6 +162,18 @@ STEWARD_CODE_VERIFIERS = (
     )),
 )
 
+# Tracked files outside ~/scripts that those verifiers read from the checkout
+# (verify-daily-news.sh preflights with HOME=<checkout>; the Hyperliquid guard
+# verifier bundles the shipped guard and checks its unit).  They sit under
+# components a snapshot otherwise leaves out, so a steward-code snapshot stages
+# exactly these, read-only: they are never repair paths, and _snapshot_diff
+# rejects any worker change to them.
+STEWARD_CODE_VERIFIER_SUPPORT = frozenset({
+    ".omp/agent/daily-news-headless.yml",
+    ".config/hyperliquid-agent/omp-dependabot-guard.ts",
+    ".config/systemd/user/hyperliquid-sdk.service",
+})
+
 
 def repo_kind(root: Path | str) -> str:
     """Lexical: a direct child of STEWARD_CODE_ROOT is a steward-code clone."""
@@ -258,11 +270,14 @@ def _safe_relpath(path: str, *, source_listing: bool = False, kind: str = REPO_K
         or "\\" in raw or any(ord(char) < 32 or ord(char) == 127 for char in raw)
     ):
         raise WorkerPolicyError(f"unsafe relative path: {path!r}")
-    if kind == REPO_KIND_STEWARD_CODE and not source_listing:
-        reason = steward_code_path_reason(raw)
-        if reason:
-            raise WorkerPolicyError(f"steward-code path is not repairable: {reason}")
-        return p.as_posix()
+    if kind == REPO_KIND_STEWARD_CODE:
+        if source_listing and raw in STEWARD_CODE_VERIFIER_SUPPORT:
+            return p.as_posix()
+        if not source_listing:
+            reason = steward_code_path_reason(raw)
+            if reason:
+                raise WorkerPolicyError(f"steward-code path is not repairable: {reason}")
+            return p.as_posix()
     protected_components = _PROTECTED_COMPONENTS
     protected_files = _PROTECTED_FILE_NAMES
     if source_listing:
@@ -422,7 +437,7 @@ def _tracked_paths(root: Path) -> list[str]:
         if not path:
             continue
         try:
-            _safe_relpath(path, source_listing=True)
+            _safe_relpath(path, source_listing=True, kind=repo_kind(root))
         except WorkerPolicyError:
             continue
         paths.append(path)

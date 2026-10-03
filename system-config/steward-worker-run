@@ -195,7 +195,7 @@ def source_files(source: Path, owner: int, base: str) -> list[str]:
         if not separator or mode not in {"100644", "100755"}:
             fail(f"symlinked or submodule source tree is not repairable: {source}")
         try:
-            _safe_relpath(path, source_listing=True)
+            _safe_relpath(path, source_listing=True, kind=repo_kind(source))
         except ValueError:
             # Credential-looking tracked files are not handed to a model.
             continue
