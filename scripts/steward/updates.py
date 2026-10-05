@@ -979,13 +979,37 @@ _CI_OK_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 # Seconds between TERM and a KILL from `timeout`.  deploy.sh rolls back in its
 # EXIT trap, so it must get TERM first and ample time before any hard kill.
 APP_DEPLOY_KILL_AFTER = 120
+# A commit merged by this same run (dependabot_merge runs just before the
+# app-deploy steps) reaches origin/main before GitHub has created its check
+# runs for the push.  A missing or still-running run set is pending, not red:
+# only a commit this recent is re-read, and only for this long, so an older
+# commit that really has no checks still reports immediately.
+CI_PENDING_MAX_AGE = 600
+CI_CHECK_RECHECKS = 20
+CI_CHECK_RECHECK_SECONDS = 15
 
 
-def _ci_green(github, sha):
+def _commit_age_seconds(repo, sha, *, now=None):
+    """Seconds since ``sha`` was committed, or None when git cannot tell."""
+    out, _, code = run_capture_ok(
+        ["git", "-C", str(repo), "log", "-1", "--format=%ct", sha],
+        env=user_env(), timeout=30)
+    if code != 0:
+        return None
+    try:
+        return max(0.0, (now if now is not None else time.time()) - float(out.strip()))
+    except ValueError:
+        return None
+
+
+def _ci_green(github, sha, *, allow_pending=False):
     """(green, detail): check runs plus commit statuses for one exact commit.
 
     Green means at least one check exists and every one is completed with a
-    success/neutral/skipped conclusion (statuses: state success).
+    success/neutral/skipped conclusion (statuses: state success).  With
+    ``allow_pending`` a set GitHub has not fully created/concluded yet returns
+    ``(None, detail)`` — pending, not a red verdict — so the caller can re-read
+    it; a completed failure still returns ``(False, detail)``.
     """
     env = user_env()
     out, err, code = run_capture_ok(
@@ -1007,28 +1031,42 @@ def _ci_green(github, sha):
         return False, f"unparseable CI payload: {exc}"
     if total_runs > len(runs):
         return False, f"{total_runs} check runs exceed one page; cannot verify all"
-    if not runs and not statuses:
-        return False, "no CI checks reported"
+    incomplete = [
+        f"{run.get('name')}: {run.get('status')}/{run.get('conclusion')}"
+        for run in runs if run.get("status") != "completed"
+    ] + [
+        f"{status.get('context')}: {status.get('state')}"
+        for status in statuses if status.get("state") == "pending"
+    ]
     problems = [
         f"{run.get('name')}: {run.get('status')}/{run.get('conclusion')}"
         for run in runs
-        if run.get("status") != "completed" or run.get("conclusion") not in _CI_OK_CONCLUSIONS
+        if run.get("status") == "completed" and run.get("conclusion") not in _CI_OK_CONCLUSIONS
     ] + [
         f"{status.get('context')}: {status.get('state')}"
-        for status in statuses if status.get("state") != "success"
+        for status in statuses if status.get("state") not in ("success", "pending")
     ]
     if problems:
         return False, "; ".join(problems[:6])
+    if not runs and not statuses:
+        return (None if allow_pending else False), "no CI checks reported"
+    if incomplete:
+        if allow_pending:
+            return None, "; ".join(incomplete[:6])
+        return False, "; ".join(incomplete[:6])
     return True, f"{len(runs)} check run(s), {len(statuses)} status(es) green"
 
 
-def _p1_app_deploy(service, spec, dry_run=False):
+def _p1_app_deploy(service, spec, dry_run=False, *, sleep=time.sleep):
     """Deploy one DEPLOY_REGISTRY service to CI-green origin/main.
 
     The service's deploy script owns the transaction (fast-forward production,
     build, health-check, roll back on failure); this step gates it and
     verifies the deployed commit afterwards: production HEAD, or the commit
-    ``version_cmd`` reports for services deployed as a built artifact.
+    ``version_cmd`` reports for services deployed as a built artifact.  A
+    commit merged by this run's dependabot_merge step can still be waiting on
+    its first check run, so that case is re-read for a bounded interval
+    instead of being reported as a not-green commit.
     """
     print(f"  [1k] app deploy: {service}")
     env = user_env()
@@ -1081,7 +1119,19 @@ def _p1_app_deploy(service, spec, dry_run=False):
         return skip(f"canonical main {local[:7]} cannot fast-forward to origin/main {target[:7]}")
     if git(repo, "merge-base", "--is-ancestor", pre, target)[2] != 0:
         return skip(f"production HEAD {pre[:7]} is not an ancestor of origin/main {target[:7]}")
-    green, detail = _ci_green(spec["github"], target)
+    age = _commit_age_seconds(repo, target)
+    green, detail = _ci_green(spec["github"], target,
+                             allow_pending=age is not None and age < CI_PENDING_MAX_AGE)
+    if green is None:
+        for _ in range(CI_CHECK_RECHECKS):
+            sleep(CI_CHECK_RECHECK_SECONDS)
+            green, detail = _ci_green(spec["github"], target, allow_pending=True)
+            if green is not None:
+                break
+    if green is None:
+        green, detail = False, (
+            f"no check run completed within "
+            f"{CI_CHECK_RECHECKS * CI_CHECK_RECHECK_SECONDS}s: {detail}")
     row["ci"] = detail
     if not green:
         return skip(f"origin/main {target[:7]} is not CI-green: {detail}")

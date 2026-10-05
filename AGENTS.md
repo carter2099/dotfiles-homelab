@@ -275,7 +275,7 @@ ThinkPad remains the sole notes, documentation, infrastructure, and production a
 develop under `/home/carte/dev/<repo>`, transfer code through GitHub, and never deploy
 production, copy authoritative state, or run Kubernetes on the rig.
 
-Rig host security: UFW default-deny inbound; 22/tcp only from 192.168.4.92, .100 and Carter's Mac .77; llama-swap 8080/tcp only from .92 and .100. sshd is key-only via `/etc/ssh/sshd_config.d/10-hardening.conf` (sorts before `50-cloud-init.conf`). Canonical copies: `~/system-config/gamingrig-linux/ufw/rig-ufw-rules.sh` and `~/system-config/gamingrig-linux/sshd_config.d/10-hardening.conf`.
+Rig host security: UFW default-deny inbound; 22/tcp only from 192.168.4.92 (ThinkPad static) and Carter's Mac .77; llama-swap 8080/tcp only from .92. sshd is key-only via `/etc/ssh/sshd_config.d/10-hardening.conf` (sorts before `50-cloud-init.conf`). Canonical copies: `~/system-config/gamingrig-linux/ufw/rig-ufw-rules.sh` and `~/system-config/gamingrig-linux/sshd_config.d/10-hardening.conf`.
 
 - [`local-llm-gaming-rig.md`](notes/docs/homelab/local-llm-gaming-rig.md) — host topology,
   inference/models, proxy/dashboard, Windows/Apollo driver constraints, boot switching,
