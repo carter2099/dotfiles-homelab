@@ -104,9 +104,16 @@ def validate_runtime_contract() -> None:
         else:
             try:
                 digest_config = yaml.safe_load(runtime.DIGEST_OMP_CONFIG.read_text()) or {}
-                provider_order = digest_config.get("providers", {}).get("webSearchOrder", [])
-                if provider_order[:2] != ["codex", "searxng"]:
-                    errors.append("DIGEST_OMP_CONFIG providers.webSearchOrder must start with ['codex', 'searxng']")
+                if "webSearchOrder" in (digest_config.get("providers") or {}):
+                    errors.append("DIGEST_OMP_CONFIG providers.webSearchOrder is retired; use modelRoles.web")
+                web_chain = [(digest_config.get("modelRoles") or {}).get("web")] + list(
+                    ((digest_config.get("retry") or {}).get("fallbackChains") or {}).get("web") or []
+                )
+                if web_chain != list(runtime.DIGEST_WEB_SEARCH_CHAIN):
+                    errors.append(
+                        "DIGEST_OMP_CONFIG web search chain (modelRoles.web + retry.fallbackChains.web) "
+                        f"must be {list(runtime.DIGEST_WEB_SEARCH_CHAIN)}"
+                    )
                 searxng = digest_config.get("searxng", {})
                 if searxng.get("endpoint") != runtime.SEARXNG_URL:
                     errors.append(f"DIGEST_OMP_CONFIG searxng.endpoint must be {runtime.SEARXNG_URL}")

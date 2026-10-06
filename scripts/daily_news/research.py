@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -230,7 +231,9 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
        undated) are dropped as stale without touching the LLM.
     2. Findings are split into batches of BATCH_SIZE.
     3. Each batch gets one LLM call with topic rules and editorial-significance rubric.
-    4. Python restores source metadata and enforces cross-batch dedup.
+    4. Python resolves each approval to its source finding (keeping only the
+       judge's editorial_significance), records unresolvable approvals, and
+       enforces cross-batch dedup.
 
     Before any judging, the shared recent-coverage ledger removes findings any
     section covered in the previous CROSS_DAY_DEDUP_DAYS days (canonical story
@@ -362,54 +365,64 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
             result = runtime._extract_json(raw, f"judge_research batch {batch_idx + 1}")
             batch_approved = result.get("approved", [])
             batch_rejected = result.get("rejected", [])
-            # Normalize: LLM sometimes returns bare strings instead of dicts
-            batch_approved = [f if isinstance(f, dict) else {"title": str(f)} for f in batch_approved]
+            # Approvals may come back as bare finding_id strings; Step 3
+            # resolves every shape to a source finding.
             batch_rejected = [r if isinstance(r, dict) else {"finding": {"title": str(r)}, "reason": "unknown"} for r in batch_rejected]
             all_approved.extend(batch_approved)
             all_rejected.extend(batch_rejected)
             print(f"  Batch {batch_idx + 1}: {len(batch_approved)} approved, {len(batch_rejected)} rejected")
-            for finding in batch_approved:
-                normalize_editorial_significance(finding)
         except Exception as e:
             print(f"  [FAIL] judge_research batch {batch_idx + 1} — {e}, treating all as approved")
             all_approved.extend(batch_items)
 
-    # ── Step 3: Restore source metadata, then enforce deterministic dedup ──
-    # A judged finding is matched to its source by finding_id (checked against
-    # the source URL); only a URL that exactly one source finding carries may
-    # stand in for a missing id. A finding sharing its URL with another source
-    # finding and lacking a valid id cannot be told apart, so it is dropped
-    # rather than given the other finding's event or terms.
+    # ── Step 3: Resolve approvals to source findings, then deterministic dedup ──
+    # Every approval becomes a deep copy of exactly one source finding; the
+    # judge's only kept change is editorial_significance. Resolution: a bare
+    # string equal to a finding_id; a dict's known finding_id, unless its URL is
+    # another source finding's URL (ambiguous); else a URL exactly one source
+    # finding carries. A finding without a valid id on a URL several source
+    # findings share cannot be told apart, so it is rejected rather than given
+    # another finding's event or terms. Nothing approved disappears without a
+    # recorded reason (agentic-platform 2026-10-05: three approvals with
+    # judge-altered URLs and no date_tag vanished between the judge and `fresh`).
     seen_urls: set[str] = set()
-    deduped_approved: list[dict] = []
+    fresh: list[dict] = []
     dedup_rejected: list[dict] = []
+    unresolved: list[dict] = []
     original_by_id = {f["finding_id"]: f for f in pre_tagged}
     originals_by_url: dict[str, list[dict]] = {}
     for f in pre_tagged:
         if normalize_url(f.get("url", "")):
             originals_by_url.setdefault(normalize_url(f.get("url", "")), []).append(f)
 
-    for f in all_approved:
-        url = normalize_url(f.get("url", ""))
-        finding_id = f.get("finding_id")
-        source = original_by_id.get(finding_id) if isinstance(finding_id, str) else None
-        if source is not None and normalize_url(source.get("url", "")) != url:
-            source = None
-        same_url = originals_by_url.get(url, [])
-        if source is None and len(same_url) == 1:
-            source = same_url[0]
-        if source is None and len(same_url) > 1:
-            dedup_rejected.append({"finding": f, "reason": "unidentified_shared_url"})
+    for item in all_approved:
+        judged = item if isinstance(item, dict) else {}
+        source = None
+        if isinstance(item, str):
+            source = original_by_id.get(item.strip())
+        elif judged:
+            judged_url = normalize_url(str(judged.get("url") or ""))
+            same_url = originals_by_url.get(judged_url, [])
+            finding_id = judged.get("finding_id")
+            source = original_by_id.get(finding_id) if isinstance(finding_id, str) else None
+            if source is not None:
+                if same_url and judged_url != normalize_url(source.get("url", "")):
+                    unresolved.append({"finding": item, "reason": "ambiguous_judge_output"})
+                    continue
+            elif len(same_url) == 1:
+                source = same_url[0]
+            elif len(same_url) > 1:
+                dedup_rejected.append({"finding": item, "reason": "unidentified_shared_url"})
+                continue
+        if source is None:
+            unresolved.append({"finding": item, "reason": "unmatched_judge_output"})
             continue
-        if source is not None:
-            for field in (
-                "date_tag", "research_angle_id",
-                "event", "event_terms", "significance_evidence",
-            ):
-                if field in source:
-                    f[field] = source[field]
-                else:
-                    f.pop(field, None)
+        f = deepcopy(source)
+        significance = judged.get("editorial_significance") or judged.get("importance")
+        if significance:
+            f["editorial_significance"] = significance
+            normalize_editorial_significance(f)
+        url = normalize_url(f.get("url", ""))
         if url and url in seen_urls:
             dedup_rejected.append({"finding": f, "reason": "crossbatch_duplicate"})
         elif coverage_key(f.get("url", "")) in recent_coverage:
@@ -417,14 +430,18 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         else:
             if url:
                 seen_urls.add(url)
-            deduped_approved.append(f)
+            fresh.append(f)
 
-    for f in pre_tagged + all_approved + [
-        r.get("finding") for r in all_rejected if isinstance(r, dict)
+    for f in pre_tagged + all_approved + fresh + [
+        r.get("finding") for r in all_rejected + dedup_rejected + unresolved
+        if isinstance(r, dict)
     ]:
         if isinstance(f, dict):
             f.pop("finding_id", None)
 
+    if unresolved:
+        print(f"  [WARN] judge_research — {len(unresolved)} approved item(s) could not be "
+              "matched to a source finding")
     dedup_rejected = ledger_rejected + dedup_rejected
     if dedup_rejected:
         n_cross_day = sum(1 for r in dedup_rejected
@@ -435,8 +452,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         if n_cross_day:
             print(f"  Recent-coverage dedup: removed {n_cross_day} stories any section "
                   "covered on previous days")
-
-    fresh = [f for f in deduped_approved if f.get("date_tag") == "fresh"]
+    dedup_rejected += unresolved
 
     elapsed = time.time() - t0
     print(f"  [done] judge_research — {len(fresh)} fresh, "

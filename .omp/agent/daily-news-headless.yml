@@ -1,5 +1,5 @@
 # Daily News headless-agent config.
-# Keeps Codex-primary digest search and SearXNG fallback separate from other omp -p consumers.
+# Keeps the digest search chain separate from other omp -p consumers.
 advisor:
   enabled: false
   syncBacklog: off
@@ -10,10 +10,18 @@ async:
 bash:
   autoBackground:
     enabled: false
-providers:
-  webSearchOrder:
-    - codex
-    - searxng
+# web_search tries each candidate in order and moves on when one is unavailable
+# (no credential), errors (expired plan, quota, 401/403/429) or times out
+# (providers.webSearchTimeoutSeconds, default 60 s): Codex search on the ChatGPT
+# plan, then Claude search on the Claude plan, then local SearXNG. The chain is
+# explicit, so nothing else is tried.
+modelRoles:
+  web: openai-codex/gpt-5.6-luna
+retry:
+  fallbackChains:
+    web:
+      - anthropic/claude-haiku-4-5
+      - web/searxng
 searxng:
   endpoint: http://localhost:8080
   categories: general,news

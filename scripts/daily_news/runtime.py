@@ -38,6 +38,14 @@ DIGEST_OMP_SANDBOX = Path.home() / "scripts" / "digest-omp-sandbox.ts"
 
 DIGEST_OMP_CONFIG = Path.home() / ".omp/agent/daily-news-headless.yml"
 
+# Research web_search chain in DIGEST_OMP_CONFIG, tried in order: Codex search
+# (ChatGPT plan), Claude search (Claude plan), local SearXNG.
+DIGEST_WEB_SEARCH_CHAIN = (
+    "openai-codex/gpt-5.6-luna",
+    "anthropic/claude-haiku-4-5",
+    "web/searxng",
+)
+
 ARTICLE_CACHE_DIR = DIGESTS_DIR / ".article-cache"
 
 ATTENTION_SNAPSHOT_DIR = DIGESTS_DIR / ".attention-snapshot"

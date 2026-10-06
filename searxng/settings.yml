@@ -1,7 +1,8 @@
-# SearXNG settings for homelab digest backend.
-# The REPLACE_AT_DEPLOY placeholder is swapped for a random secret by up.sh on first
-# deploy (see up.sh). JSON output enabled for the rpiv-web-tools API; limiter off so
-# no Valkey sidecar is needed. use_default_settings pulls all default engines.
+# SearXNG settings for the homelab search backend (Open WebUI + OMP web/searxng).
+# up.sh renders this file into gitignored core-config/settings.yml on every run,
+# substituting the secret_key placeholder with the runtime secret. JSON output is
+# enabled for API consumers; limiter off so no Valkey sidecar is needed.
+# use_default_settings pulls all default engines; overrides below merge by name.
 use_default_settings: true
 
 general:
@@ -19,38 +20,82 @@ server:
   image_proxy: false
 
 outgoing:
-  request_timeout: 15.0
-  max_request_timeout: 30.0
+  # Engines answer in <3 s from this host; one hung engine stalls the whole
+  # response until request_timeout, so keep it short.
+  request_timeout: 6.0
+  max_request_timeout: 15.0
+  retries: 1
 
-# Engine overrides: disable the default engines that are all rate-limited/CAPTCHA'd
-# from this IP, and enable the ones that actually return results.
-# These overrides merge into the container's built-in defaults.
+# Engine overrides, chosen from a per-engine probe on 2026-10-05 (benchmark in
+# ~/notes/docs/homelab/searxng.md). Only engines with time_range_support are
+# queried when a request sets time_range (e.g. Daily News time_range=day).
 engines:
-  # Disable broken/rate-limited engines
-  - name: wikipedia
+  # --- general: broken from this IP ---
+  - name: duckduckgo        # CAPTCHA
     disabled: true
-  - name: wikidata
-    disabled: true
-  - name: duckduckgo
+  - name: google            # 403 access denied
     disabled: true
   - name: google cse
     disabled: true
-  - name: startpage
+  - name: brave             # 429 too many requests
     disabled: true
-  - name: brave
+  - name: qwant             # CAPTCHA on most queries
     disabled: true
-  # Enable working engines
+  - name: startpage         # upstream inactive (proof-of-work captcha)
+    disabled: true
+  - name: wikipedia         # infobox-only, ~0 results for topical queries
+    disabled: true
+  - name: wikidata
+    disabled: true
+  - name: gmx               # CAPTCHA after a few queries (suspended 1 h each time)
+    disabled: true
+  # --- general: working ---
   - name: bing
     disabled: false
-  - name: yahoo
+  - name: yahoo             # honors time_range
     disabled: false
-  - name: yandex
+  - name: yandex            # honors time_range
+    disabled: false
+  - name: duckduckgo web    # DDG HTML endpoint, no CAPTCHA unlike "duckduckgo"
     disabled: false
   - name: yep
     disabled: false
-  - name: presearch
+  - name: zapmeta
     disabled: false
-  - name: qwant
+
+  # --- news: broken from this IP ---
+  - name: reuters           # HTTP 401
+    disabled: true
+  - name: google news       # HTTP 403 access denied
+    disabled: true
+  - name: brave.news        # 429 / challenge page crashes the parser
+    disabled: true
+  # --- news: working ---
+  - name: bing news
     disabled: false
-  - name: mojeek
+    # Upstream maps day to interval="4", which Bing News treats as "past hour"
+    # (empty pages -> "parsing error"). 7 = past 24 h, 8 = past week, 9 = past month.
+    time_map:
+      day: 'interval="7"'
+      week: 'interval="8"'
+      month: 'interval="9"'
+  - name: yahoo news        # upstream inactive by default; works here, dated results
+    inactive: false
+    disabled: false
+  - name: yahoo news 24h    # Yahoo News restricted to the past day (btf=d) so it can
+    engine: yahoo_news      # serve time_range queries; results are always <=24 h old
+    shortcut: yhnd
+    categories: [news]
+    search_url: "https://news.search.yahoo.com/search?{query}&b={offset}&btf=d"
+    time_range_support: true
+    disabled: false
+  - name: duckduckgo news
+    disabled: false
+  - name: qwant news        # unlike qwant web, not CAPTCHA'd here
+    disabled: false
+  - name: hackernews        # Algolia API, honors time_range; tech beats. Links are
+    categories: [it, news]  # HN discussion pages, so rank below publisher news.
+    weight: 0.5
+    disabled: false
+  - name: wikinews
     disabled: false

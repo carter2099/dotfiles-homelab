@@ -2,8 +2,10 @@
 """Focused behavioral fixtures for digest dedup, cache, editorial, and rendering."""
 from __future__ import annotations
 
+import contextlib
 import copy
 import gzip
+import io
 import json
 import os
 import sys
@@ -654,6 +656,144 @@ def test_phase_two_drops_unidentified_shared_url_finding() -> None:
         check([item["event"] for item in fresh] == [unique["event"]], fresh)
 
 
+def _judge_source_findings(today: str) -> list[dict]:
+    """Three distinct raw findings, each on its own URL."""
+    def finding(slug: str, title: str, significance: str) -> dict:
+        return {
+            "title": title,
+            "url": f"https://example.com/agents/{slug}",
+            "source_domain": "example.com",
+            "date_published": today,
+            "summary": f"{title} summary.",
+            "category": "Platforms",
+            "research_angle_id": "platforms",
+            "editorial_significance": significance,
+            "event": f"{title} event",
+            "event_terms": [title, slug],
+            "significance_evidence": {
+                "basis": "major_product_or_platform_shift",
+                "affected_scope": "sector",
+                "impact": f"{title} impact.",
+            },
+        }
+    return [
+        finding("checkpoint-issues", "LangGraph checkpoint issue cluster", "medium"),
+        finding("thinkingbox-bench", "ThinkingBox-Bench benchmark blog", "medium"),
+        finding("red-team-post", "Agent red-team engineering post", "high"),
+    ]
+
+
+def _run_judge_shapes(run_dir: Path, findings: list[dict], shape) -> tuple[list[dict], dict, str]:
+    """Run Phase 2 with a fake judge that approves `shape(items)` and rejects
+    nothing else; returns (fresh, judged artifact, captured stdout)."""
+    def reply(system: str, user: str, model: str | None = None) -> str:
+        start = user.index("## Findings to evaluate")
+        items = json.loads(user[user.index("[", start):user.index("\n\nEvaluate each finding")])
+        return json.dumps({"approved": shape(items), "rejected": []})
+
+    out = io.StringIO()
+    with patch("daily_news.runtime._call_llm_proxy", side_effect=reply), \
+            contextlib.redirect_stdout(out):
+        fresh = research.phase_2_judge_research(
+            catalog.TOPICS["agentic-platform"], copy.deepcopy(findings), run_dir,
+        )
+    judged = json.loads((run_dir / "02-research-judged.json").read_text())
+    return fresh, judged, out.getvalue()
+
+
+def _judge_run_dir(root: Path, name: str, today: str) -> Path:
+    run_dir = root / name / catalog.TOPICS["agentic-platform"]["category"] / today
+    run_dir.mkdir(parents=True)
+    return run_dir
+
+
+def test_phase_two_restores_approvals_with_altered_urls() -> None:
+    """Judge approvals keyed by finding_id survive a URL the judge altered and
+    take title/summary/date_tag from the source finding.
+
+    Regression for agentic-platform 2026-10-05: the judge log said 3 approved
+    but Phase 2 ended with 0 fresh and no record of the 3 approvals.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        today = datetime.now(timezone.utc).date().isoformat()
+        findings = _judge_source_findings(today)
+        run_dir = _judge_run_dir(Path(temporary), "a", today)
+        fresh, _, _ = _run_judge_shapes(run_dir, findings, lambda items: [
+            {"finding_id": item["finding_id"], "url": f"{item['url']}?src=newsletter&aid=x1"}
+            for item in items
+        ])
+        check([item["title"] for item in fresh] == [f["title"] for f in findings],
+              f"approved findings with altered URLs were lost: {fresh!r}")
+        for story, source in zip(fresh, findings):
+            for field in ("url", "summary", "category", "source_domain", "event", "event_terms"):
+                check(story.get(field) == source[field], f"{field} not restored: {story!r}")
+            check(story.get("date_tag") == "fresh", story)
+            check("finding_id" not in story, "run-local finding_id leaked into the artifact")
+
+
+def test_phase_two_keeps_bare_string_id_approvals() -> None:
+    """A judge that approves by bare finding_id string keeps those findings."""
+    with tempfile.TemporaryDirectory() as temporary:
+        today = datetime.now(timezone.utc).date().isoformat()
+        findings = _judge_source_findings(today)
+        run_dir = _judge_run_dir(Path(temporary), "b", today)
+        fresh, _, _ = _run_judge_shapes(
+            run_dir, findings, lambda items: [item["finding_id"] for item in items],
+        )
+        check([item["title"] for item in fresh] == [f["title"] for f in findings],
+              f"bare-string id approvals were lost: {fresh!r}")
+        check(all(item.get("summary") and item.get("date_tag") == "fresh" for item in fresh), fresh)
+
+
+def test_phase_two_records_unmatched_judge_approval() -> None:
+    """An approval with no id and a URL no source carries is recorded, never lost."""
+    with tempfile.TemporaryDirectory() as temporary:
+        today = datetime.now(timezone.utc).date().isoformat()
+        findings = _judge_source_findings(today)
+        run_dir = _judge_run_dir(Path(temporary), "c", today)
+        invented = {"title": "Invented story", "url": "https://nowhere.example/invented"}
+        fresh, judged, out = _run_judge_shapes(
+            run_dir, findings, lambda items: [copy.deepcopy(invented)],
+        )
+        check(fresh == [], fresh)
+        unmatched = [r for r in judged["rejected"] if r.get("reason") == "unmatched_judge_output"]
+        check(len(unmatched) == 1 and unmatched[0]["finding"] == invented,
+              f"unmatched approval was not recorded: {judged['rejected']!r}")
+        check("[WARN] judge_research — 1 approved item(s) could not be matched" in out, out)
+
+
+def test_phase_two_rejects_id_url_conflict() -> None:
+    """An id naming one finding with another finding's URL is ambiguous."""
+    with tempfile.TemporaryDirectory() as temporary:
+        today = datetime.now(timezone.utc).date().isoformat()
+        findings = _judge_source_findings(today)
+        run_dir = _judge_run_dir(Path(temporary), "d", today)
+        fresh, judged, _ = _run_judge_shapes(run_dir, findings, lambda items: [
+            {**items[0], "url": items[1]["url"]},
+        ])
+        check(fresh == [], f"id/URL conflict shipped a finding: {fresh!r}")
+        check([r.get("reason") for r in judged["rejected"]] == ["ambiguous_judge_output"],
+              judged["rejected"])
+
+
+def test_phase_two_applies_judge_significance() -> None:
+    """The judge's editorial_significance adjustment is the one change kept."""
+    with tempfile.TemporaryDirectory() as temporary:
+        today = datetime.now(timezone.utc).date().isoformat()
+        findings = _judge_source_findings(today)
+        run_dir = _judge_run_dir(Path(temporary), "e", today)
+        fresh, _, _ = _run_judge_shapes(run_dir, findings, lambda items: [
+            {"finding_id": items[2]["finding_id"], "editorial_significance": "Low",
+             "title": "Judge-rewritten title"},
+            {"finding_id": items[0]["finding_id"]},
+        ])
+        by_url = {item["url"]: item for item in fresh}
+        lowered = by_url[findings[2]["url"]]
+        check(lowered["editorial_significance"] == "low", lowered)
+        check(lowered["title"] == findings[2]["title"], "judge rewrote the source title")
+        check(by_url[findings[0]["url"]]["editorial_significance"] == "medium", fresh)
+
+
 def test_runtime_preflight_fails_closed_on_missing_symbol() -> None:
     workflow.validate_runtime_contract()
     with patch.object(catalog, "CROSS_DAY_DEDUP_DAYS", None):
@@ -674,25 +814,33 @@ def test_runtime_preflight_fails_closed_on_missing_symbol() -> None:
                 raised = "DIGEST_OMP_CONFIG" in str(error)
             check(raised, "preflight accepted a missing digest OMP config")
 
-        wrong_config = Path(temporary) / "wrong-digest-config.yml"
-        wrong_config.write_text(
-            "providers:\n  webSearchOrder:\n    - searxng\n"
-            "searxng:\n  endpoint: http://localhost:8080\n  categories: general,news\n"
+        valid_chain = (
+            "modelRoles:\n  web: openai-codex/gpt-5.6-luna\n"
+            "retry:\n  fallbackChains:\n    web:\n"
+            "      - anthropic/claude-haiku-4-5\n      - web/searxng\n"
         )
-        with patch.object(runtime, "DIGEST_OMP_CONFIG", wrong_config):
-            raised = False
-            try:
-                workflow.validate_runtime_contract()
-            except RuntimeError as error:
-                raised = "webSearchOrder" in str(error)
-            check(raised, "preflight accepted the wrong search-provider order")
+        searxng_block = "searxng:\n  endpoint: http://localhost:8080\n  categories: general,news\n"
+        for name, text, expected, message in (
+            ("no-claude",
+             "modelRoles:\n  web: openai-codex/gpt-5.6-luna\n"
+             "retry:\n  fallbackChains:\n    web:\n      - web/searxng\n" + searxng_block,
+             "web search chain", "preflight accepted a chain without the Claude fallback"),
+            ("legacy-order",
+             valid_chain + "providers:\n  webSearchOrder:\n    - codex\n    - searxng\n" + searxng_block,
+             "webSearchOrder is retired", "preflight accepted the retired webSearchOrder key"),
+        ):
+            wrong_config = Path(temporary) / f"{name}-digest-config.yml"
+            wrong_config.write_text(text)
+            with patch.object(runtime, "DIGEST_OMP_CONFIG", wrong_config):
+                raised = False
+                try:
+                    workflow.validate_runtime_contract()
+                except RuntimeError as error:
+                    raised = expected in str(error)
+                check(raised, message)
 
         localized_config = Path(temporary) / "localized-digest-config.yml"
-        localized_config.write_text(
-            "providers:\n  webSearchOrder:\n    - codex\n    - searxng\n"
-            "searxng:\n  endpoint: http://localhost:8080\n"
-            "  categories: general,news\n  language: en\n"
-        )
+        localized_config.write_text(valid_chain + searxng_block + "  language: en\n")
         with patch.object(runtime, "DIGEST_OMP_CONFIG", localized_config):
             raised = False
             try:
@@ -2627,6 +2775,11 @@ def main() -> None:
         test_recent_coverage_ledger_blocks_other_section_repeats,
         test_phase_two_shared_url_findings_keep_their_own_metadata,
         test_phase_two_drops_unidentified_shared_url_finding,
+        test_phase_two_restores_approvals_with_altered_urls,
+        test_phase_two_keeps_bare_string_id_approvals,
+        test_phase_two_records_unmatched_judge_approval,
+        test_phase_two_rejects_id_url_conflict,
+        test_phase_two_applies_judge_significance,
         test_runtime_preflight_fails_closed_on_missing_symbol,
         test_phase_inputs_include_actual_code_hashes,
         test_empty_phase_has_explicit_durable_outcome,
