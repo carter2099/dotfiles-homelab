@@ -188,15 +188,15 @@ class StewardCodePolicyTests(unittest.TestCase):
         self.assertIsNone(code_prs._line_risk("-", "LIMIT = 1"))
 
     def test_only_exact_verifier_commands_may_use_bash(self):
-        with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(worker, "WORKER_PRIVATE_HOME", Path(tmp)):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
             with self.assertRaises(worker.WorkerPolicyError):
-                worker._run_validations(Path(tmp), [["bash", "-c", "true"]])
+                worker._run_validations(Path(tmp), [["bash", "-c", "true"]], home)
             with self.assertRaises(worker.WorkerPolicyError):
-                worker._run_validations(Path(tmp), [["bash", "scripts/verify-evil.sh", "full"]])
+                worker._run_validations(Path(tmp), [["bash", "scripts/verify-evil.sh", "full"]], home)
             (Path(tmp) / "scripts").mkdir()
             (Path(tmp) / "scripts/verify-steward.sh").write_text("exit 0\n")
-            records = worker._run_validations(Path(tmp), [["bash", "scripts/verify-steward.sh", "full"]])
+            records = worker._run_validations(Path(tmp), [["bash", "scripts/verify-steward.sh", "full"]], home)
             self.assertEqual(records[0]["returncode"], 0)
 
 

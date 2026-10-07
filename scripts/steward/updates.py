@@ -1364,7 +1364,7 @@ def _p1_deploy_step_ok(step):
         return True
     if name in (
         "herdr_update", "omp_update", "searxng", "openwebui_update",
-        "app_deploy", "worker_omp_refresh",
+        "app_deploy",
     ) and status == "ok":
         return True
     return False
@@ -1669,7 +1669,6 @@ def _p1_llama_cpp_update(releases=None, now=None):
 # Bun global package: only the rig's single omp install uses it
 # (_rig_omp_update). The ThinkPad runs a standalone binary.
 _OMP_PKG = "@oh-my-pi/pi-coding-agent"
-WORKER_OMP = Path("/usr/local/libexec/steward-worker/omp")
 OMP_ROLLBACK_KEEP = 2
 
 
@@ -1761,8 +1760,7 @@ def _omp_entry_points(env):
 def _omp_stale_processes(canonical, proc_root=Path("/proc")):
     """Running omp processes not executing the current canonical binary.
 
-    Report only; sessions are Carter's and are never killed.  The sandboxed
-    worker binary is a separate install by design and is excluded.
+    Report only; sessions are Carter's and are never killed.
     """
     canonical_real = os.path.realpath(canonical)
     pids = []
@@ -1779,7 +1777,7 @@ def _omp_stale_processes(canonical, proc_root=Path("/proc")):
             continue   # exited, kernel thread, or another user's process
         deleted = target.endswith(" (deleted)")
         path = target[:-len(" (deleted)")] if deleted else target
-        if os.path.basename(path) != "omp" or path == str(WORKER_OMP):
+        if os.path.basename(path) != "omp":
             continue
         if deleted or path != canonical_real:
             pids.append(int(entry.name))
@@ -1861,38 +1859,6 @@ def _p1_omp_update(proc_root=Path("/proc")):
                 result["error"] = problem + (f"; {previous}" if previous else "")
     result["stale_processes"] = _omp_stale_processes(omp, proc_root)
     return result
-
-
-def _p1_worker_omp_refresh(omp_result):
-    """Reinstall the sandboxed P7b worker's OMP after a local version change."""
-    step = "worker_omp_refresh"
-    local_pre = str(omp_result.get("pre_version") or "")
-    local_post = str(omp_result.get("post_version") or "")
-    if omp_result.get("status") != "ok" or not local_post or local_post == local_pre:
-        return {"step": step, "status": "skipped",
-                "reason": "omp_update did not change the local version this run"}
-    print("  [1j] steward worker omp refresh")
-
-    def worker_version():
-        version = run_capture([str(WORKER_OMP), "--version"], timeout=30)
-        return version or run_capture(
-            ["sudo", "-n", str(WORKER_OMP), "--version"], timeout=30)
-
-    pre = worker_version()
-    provision = HOME / "system-config" / "steward-worker-provision.sh"
-    stdout, stderr, code = run_capture_ok(
-        ["sudo", "-n", "bash", str(provision), "--omp-only"], timeout=600)
-    out = f"{stdout}\n{stderr}".strip()
-    post = worker_version()
-    row = {"step": step, "pre_version": pre, "post_version": post,
-           "expected_version": local_post, "output_tail": out[-500:]}
-    if code != 0:
-        return {**row, "status": "failed",
-                "error": f"--omp-only provisioning exited {code}: {out[-300:]}"}
-    if post != local_post:
-        return {**row, "status": "failed",
-                "error": f"worker omp reports {post or 'nothing'}, local is {local_post}"}
-    return {**row, "status": "ok"}
 
 
 def _rig_ssh_command(remote_args):
@@ -3456,11 +3422,7 @@ def phase_1_apply(run_dir, dry_run=False, *, progress=None):
     _p1_run_step(steps, "herdr_update", _p1_herdr_update, persist)
     _p1_run_step(steps, "searxng", _p1_searxng_update, persist)
     _p1_run_step(steps, "llama_cpp", _p1_llama_cpp_update, persist)
-    omp_result = _p1_run_step(steps, "omp_update", _p1_omp_update, persist)
-    # The sandboxed P7b worker runs its own root-owned copy of omp; refresh it
-    # only when this run actually changed the local version.
-    _p1_run_step(steps, "worker_omp_refresh",
-                 lambda: _p1_worker_omp_refresh(omp_result), persist)
+    _p1_run_step(steps, "omp_update", _p1_omp_update, persist)
     _p1_run_step(steps, "dependabot_merge", _p1_dependabot_merge, persist)
     # App deploys come after every package/container step so P2 validation
     # (which runs after P1) observes the deployed revisions.

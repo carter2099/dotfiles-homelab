@@ -1,10 +1,9 @@
 """Command execution, OMP protocol parsing, and durable artifact helpers.
 
-P7b repair model/tool/test execution deliberately does not use this module's
-Carter-home headless OMP path.  It is delegated to ``steward.worker`` and the
-provisioned ``steward-worker`` service; the helpers below remain for
-read-only audit/report phases and deterministic maintenance owned by the
-orchestrator.
+P7b repair model/tool/test execution does not use this module's read-only
+headless OMP path; ``steward.worker`` runs its own write-capable omp calls on
+disposable snapshots.  The helpers below serve read-only audit/report phases
+and deterministic maintenance owned by the orchestrator.
 """
 from __future__ import annotations
 

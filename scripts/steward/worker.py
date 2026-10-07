@@ -1,56 +1,38 @@
-"""P7b bounded repair worker and trusted patch publisher.
+"""P7b repair worker and trusted patch publisher.
 
-The normal steward process is Carter's user service.  It never gives that
-process's checkout or credentials to a model.  Instead :func:`run_isolated_fix`
-serializes a small request for the root-owned ``steward-worker-run`` helper.
-The helper creates source snapshots under ``/var/lib/steward-worker`` and
-starts the unprivileged worker service.  The worker edits only those snapshots,
-runs the deterministic validation plan, and asks the existing judge role to
-review the resulting diff.  Only a judge-pass result can reach
+:func:`run_fix` stages each target repository's verified base commit into a
+disposable snapshot with ``git archive`` (never the live checkout), lets one
+headless omp agent edit only that snapshot, runs the deterministic validation
+plan on a separate copy, and asks a second omp call to judge the exact diff.
+Like the other homelab agents, omp runs as Carter with its stored login;
+``--no-new-privs`` blocks sudo.  Only a judge-pass result can reach
 :func:`publish_validated_result`, which stores an exact, path-bounded commit
 under refs/steward-review without changing HEAD, the index, or the checkout.
-
-This module is intentionally standard-library-only so the installed worker
-copy can run with Carter's home masked by systemd.  Keep the parent-side and
-worker-side protocol versioned together with the provisioning helper.
 """
 from __future__ import annotations
 
-import argparse
 import fcntl
 import hashlib
 import json
 import os
 import re
-import selectors
 import shutil
-import socket
-import stat
 import subprocess
-import sys
 import tempfile
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .config import HOME, SESSION_DIR, STEWARD_MODEL, STEWARD_PATH
+
 PROTOCOL_VERSION = "steward-worker-v1"
-WORKER_USER = "steward-worker"
-WORKER_HOME = Path("/var/lib/steward-worker")
-WORKER_PRIVATE_HOME = Path(os.environ.get("HOME", "/var/empty"))
-WORKER_RUN_ROOT = WORKER_HOME / "runs"
-WORKER_REQUEST_ROOT = WORKER_HOME / "requests"
-WORKER_OMP = Path("/usr/local/libexec/steward-worker/omp")
-WORKER_OMP_CONFIG = Path("/etc/steward-worker/omp-config.yml")
-WORKER_HELPER = Path(
-    os.environ.get("STEWARD_WORKER_HELPER", "/usr/local/libexec/steward-worker-run")
-)
+OMP_BIN = HOME / ".bun" / "bin" / "omp"
+HEADLESS_CONFIG = HOME / ".omp" / "agent" / "headless-override.yml"
 DEV_ROOT = Path(os.environ.get("STEWARD_DEV_ROOT", "/home/carter/dev"))
 MAX_FINDINGS = 32
 MAX_PATHS_PER_REPOSITORY = 64
 MAX_DIFF_BYTES = 768 * 1024
-MAX_PACKET_BYTES = 2 * 1024 * 1024
 MAX_COMMAND_OUTPUT = 4000
 MAX_VALIDATION_SECONDS = 900
 MAX_REPAIR_SECONDS = 2700
@@ -237,10 +219,6 @@ class WorkerExecutionError(RuntimeError):
     """The isolated service could not complete a request."""
 
 
-def _json_bytes(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
-
-
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -353,7 +331,7 @@ def _git_args(root: Path, *args: str) -> list[str]:
 def _minimal_env(*, home: str = "/var/empty") -> dict[str, str]:
     return {
         "HOME": home,
-        "PATH": "/usr/local/libexec/steward-worker/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin",
+        "PATH": STEWARD_PATH,
         "LANG": "C",
         "LC_ALL": "C",
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -744,34 +722,6 @@ def _safe_request_findings(findings: Iterable[Mapping[str, Any]]) -> list[dict[s
     return out[:MAX_FINDINGS]
 
 
-def _write_private_json(path: Path, data: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    fd = os.open(path, flags, 0o600)
-    try:
-        payload = _json_bytes(data)
-        if len(payload) > MAX_PACKET_BYTES:
-            raise WorkerPolicyError("worker request is too large")
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        fd = -1
-    finally:
-        if fd >= 0:
-            os.close(fd)
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    raw = path.read_bytes()
-    if len(raw) > MAX_PACKET_BYTES:
-        raise WorkerPolicyError(f"worker packet is too large: {path}")
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise WorkerPolicyError(f"worker packet must be an object: {path}")
-    return data
-
-
 def _policy_proposals(
     findings: Sequence[Mapping[str, Any]],
     reason: str,
@@ -801,17 +751,16 @@ def _policy_proposals(
     return rows
 
 
-def run_isolated_fix(
+def run_fix(
     section_name: str,
     findings: Sequence[Mapping[str, Any]],
     *,
-    run_dir: Path | None = None,
     iteration: int = 1,
     timeout: int = MAX_REPAIR_SECONDS,
 ) -> dict[str, Any]:
-    """Run the P7b fixer and existing judge inside the worker service.
+    """Run the P7b fixer and judge on disposable snapshots of the target repos.
 
-    Stable signature used by ``fixes.py``.  The helper's result is an untrusted
+    Stable entry point used by ``fixes.py``.  The result is an untrusted
     proposal until ``publish_validated_result`` accepts its exact diff.
     """
     findings = [dict(item) for item in findings if isinstance(item, Mapping)]
@@ -829,91 +778,112 @@ def run_isolated_fix(
             "judge_packet": {"verdict": "fail", "reviewed": [], "summary": "worker policy rejected request"},
             "repositories": [],
         }
-    root = Path(run_dir or WORKER_RUN_ROOT)
-    if not root.is_absolute() or not root.exists():
-        return {
-            "protocol_version": PROTOCOL_VERSION,
-            "status": "isolation-unavailable",
-            "error": f"P7b run directory is unavailable: {root}",
-            "fix_packet": {"fixes_applied": [], "summary": "Isolation is not provisioned."},
-            "judge_packet": {"verdict": "fail", "reviewed": [], "summary": "worker helper unavailable"},
-            "repositories": [],
+    section = str(section_name)[:120]
+    iteration = max(1, int(iteration))
+    timeout = min(MAX_REPAIR_SECONDS, max(60, int(timeout)))
+    repositories = [
+        {
+            "source": plan["source"],
+            "base_sha": plan["base_sha"],
+            "allowed_paths": sorted(plan["allowed_paths"]),
+            "validation_commands": _validation_plan(Path(plan["source"]), plan["allowed_paths"]),
+            "findings": _safe_request_findings(plan.get("findings", [])),
         }
-    request_id = uuid.uuid4().hex
-    request_path = root / f".steward-worker-request-{request_id}.json"
-    result_path = root / f".steward-worker-result-{request_id}.json"
-    request = {
-        "protocol_version": PROTOCOL_VERSION,
-        "request_id": request_id,
-        "section": str(section_name)[:120],
-        "iteration": max(1, int(iteration)),
-        "findings": _safe_request_findings(findings),
-        "repositories": [
-            {
-                "source": plan["source"],
-                "base_sha": plan["base_sha"],
-                "allowed_paths": sorted(plan["allowed_paths"]),
-                "validation_commands": _validation_plan(
-                    Path(plan["source"]), plan["allowed_paths"]
-                ),
-                "findings": _safe_request_findings(plan.get("findings", [])),
-            }
-            for plan in plans
-        ],
-    }
+        for plan in plans
+    ]
     try:
-        _write_private_json(request_path, request)
-        command = [
-            str(WORKER_HELPER),
-            "--request",
-            str(request_path),
-            "--result",
-            str(result_path),
-            "--timeout",
-            str(min(MAX_REPAIR_SECONDS, max(60, int(timeout)))),
-        ]
-        if os.geteuid() != 0:
-            command = ["/usr/bin/sudo", "-n", *command]
-        cp = _run(command, env=_minimal_env(), timeout=max(120, int(timeout) + 30))
-        if cp.returncode != 0:
-            detail = (cp.stderr or cp.stdout or "worker helper failed").strip()
-            return {
-                "protocol_version": PROTOCOL_VERSION,
-                "status": "worker-failed",
-                "error": detail[:1000],
-                "fix_packet": {"fixes_applied": [], "summary": "Isolated worker failed."},
-                "judge_packet": {"verdict": "fail", "reviewed": [], "summary": detail[:400]},
-                "repositories": [],
-            }
-        if not result_path.exists():
-            raise WorkerExecutionError("worker helper returned success without a result packet")
-        result = _read_json(result_path)
-        if result.get("protocol_version") != PROTOCOL_VERSION:
-            raise WorkerExecutionError("worker protocol version mismatch")
-        result["_trusted_repositories"] = [
-            {key: repository[key] for key in ("source", "base_sha", "allowed_paths", "validation_commands")}
-            for repository in request["repositories"]
-        ]
-        return result
-    except (OSError, subprocess.TimeoutExpired, ValueError, WorkerPolicyError, WorkerExecutionError) as exc:
+        with tempfile.TemporaryDirectory(prefix="steward-p7b-") as temporary:
+            run_root = Path(temporary)
+            home = run_root / "home"
+            home.mkdir(mode=0o700)
+            outputs = []
+            for index, repository in enumerate(repositories):
+                workspace = run_root / f"repo-{index}"
+                _stage_snapshot(Path(repository["source"]), repository["base_sha"], workspace)
+                outputs.append(_worker_repository(
+                    section, iteration, {**repository, "workspace": str(workspace)}, home, timeout,
+                ))
+    except (OSError, subprocess.TimeoutExpired, ValueError, WorkerExecutionError) as exc:
         return {
             "protocol_version": PROTOCOL_VERSION,
             "status": "worker-failed",
             "error": str(exc)[:1000],
-            "fix_packet": {"fixes_applied": [], "summary": "Isolated worker failed."},
+            "fix_packet": {"fixes_applied": [], "summary": "Repair worker failed."},
             "judge_packet": {"verdict": "fail", "reviewed": [], "summary": str(exc)[:400]},
             "repositories": [],
         }
+    verdicts = [str(output["judge_packet"].get("verdict") or "") for output in outputs]
+    # Any partial/fail keeps the iteration in scope and blocks publication.
+    all_pass = all(verdict == "pass" for verdict in verdicts)
+    all_fixes: list[dict[str, Any]] = []
+    all_reviews: list[dict[str, Any]] = []
+    for output in outputs:
+        all_fixes.extend(output["fix_packet"].get("fixes_applied") or [])
+        all_reviews.extend(output["judge_packet"].get("reviewed") or [])
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "status": "ok",
+        "section": section,
+        "iteration": iteration,
+        "fix_packet": {
+            "fixes_applied": all_fixes[:MAX_FINDINGS],
+            "summary": " ".join(
+                str(output["fix_packet"].get("summary") or "").strip()
+                for output in outputs
+                if output["fix_packet"].get("summary")
+            )[:1000],
+        },
+        "judge_packet": {
+            "verdict": "pass" if all_pass else ("partial" if any(v == "partial" for v in verdicts) else "fail"),
+            "reviewed": all_reviews[:MAX_FINDINGS],
+            "summary": " ".join(
+                str(output["judge_packet"].get("summary") or "").strip()
+                for output in outputs
+                if output["judge_packet"].get("summary")
+            )[:1000],
+        },
+        "repositories": outputs,
+        "_trusted_repositories": [
+            {key: repository[key] for key in ("source", "base_sha", "allowed_paths", "validation_commands")}
+            for repository in repositories
+        ],
+    }
+
+
+def _stage_snapshot(source: Path, base: str, workspace: Path) -> None:
+    """Extract the permitted files of the verified base commit into ``workspace``.
+
+    ``git archive`` reads the immutable commit, never HEAD, the index, or the
+    checkout, so the agent edits a copy and Carter's repository is untouched.
+    """
+    head = _run(_git_args(source, "rev-parse", "--verify", "HEAD^{commit}"), timeout=20)
+    if head.returncode != 0 or head.stdout.strip() != base:
+        raise WorkerPolicyError(f"source base changed before staging: {source}")
+    files = _tracked_paths(source)
+    if not files:
+        raise WorkerPolicyError(f"source snapshot has no permitted files: {source}")
+    workspace.mkdir(mode=0o700)
+    archive = subprocess.Popen(
+        _git_args(source, "archive", "--format=tar", base, "--", *files),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_minimal_env(),
+    )
+    try:
+        tar = subprocess.run(
+            ["/bin/tar", "-xf", "-", "-C", str(workspace), "--no-same-owner"],
+            stdin=archive.stdout,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
     finally:
-        for path in (request_path, result_path):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                # The helper may have left a diagnostic owned by root; its
-                # bounded retention policy removes it on the next invocation.
-                pass
+        if archive.stdout is not None:
+            archive.stdout.close()
+    if archive.wait(timeout=30) != 0 or tar.returncode != 0:
+        detail = (tar.stderr or b"").decode(errors="replace")[:500]
+        raise WorkerExecutionError(f"source archive failed for {source}: {detail}")
+
 
 def _validate_result_paths(
     repository: Mapping[str, Any],
@@ -1229,231 +1199,36 @@ def _ndjson_text(stdout: str) -> str:
     return "".join(deltas) if deltas else "\n".join(ends)
 
 
-WORKER_PROXY_SOCKET = Path("/run/steward-worker/proxy.sock")
-WORKER_PROXY_IDLE_SECONDS = 300
-WORKER_PROXY_PORT = 18082
-
-
-class _LocalProxyBridge:
-    """Expose only the mounted fixed Unix relay on an isolated loopback port."""
-
-    def __init__(self) -> None:
-        self.listener: socket.socket | None = None
-        self.thread: threading.Thread | None = None
-        self.stop = threading.Event()
-
-    def start(self) -> None:
-        if self.listener is not None:
-            return
-        if not WORKER_PROXY_SOCKET.exists():
-            raise WorkerExecutionError("fixed steward-worker proxy socket is not mounted")
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            listener.bind(("127.0.0.1", WORKER_PROXY_PORT))
-            listener.listen(8)
-            listener.settimeout(1)
-        except OSError:
-            listener.close()
-            raise WorkerExecutionError(
-                f"worker loopback bridge port {WORKER_PROXY_PORT} is unavailable"
-            )
-        self.listener = listener
-        self.thread = threading.Thread(target=self._serve, daemon=True)
-        self.thread.start()
-
-    @staticmethod
-    def _close(sock: socket.socket | None) -> None:
-        if sock is None:
-            return
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            sock.close()
-        except OSError:
-            pass
-
-    def _connection(self, client: socket.socket) -> None:
-        upstream: socket.socket | None = None
-        selector: selectors.BaseSelector | None = None
-        try:
-            upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            upstream.settimeout(15)
-            # The path is a compile-time constant mounted by systemd.  It is
-            # never taken from the request, model prompt, or HTTP payload.
-            upstream.connect(str(WORKER_PROXY_SOCKET))
-            client.setblocking(False)
-            upstream.setblocking(False)
-            selector = selectors.DefaultSelector()
-            states = {
-                client: {
-                    "peer": upstream,
-                    "buffer": bytearray(),
-                    "reading": True,
-                    "eof": False,
-                    "write_closed": False,
-                },
-                upstream: {
-                    "peer": client,
-                    "buffer": bytearray(),
-                    "reading": True,
-                    "eof": False,
-                    "write_closed": False,
-                },
-            }
-
-            def refresh(sock: socket.socket) -> None:
-                state = states[sock]
-                peer_state = states[state["peer"]]
-                events = 0
-                if state["reading"] and len(peer_state["buffer"]) < MAX_DIFF_BYTES:
-                    events |= selectors.EVENT_READ
-                if state["buffer"]:
-                    events |= selectors.EVENT_WRITE
-                try:
-                    if events:
-                        selector.modify(sock, events, state["peer"])
-                    else:
-                        selector.unregister(sock)
-                except KeyError:
-                    if events:
-                        selector.register(sock, events, state["peer"])
-
-            selector.register(client, selectors.EVENT_READ, upstream)
-            selector.register(upstream, selectors.EVENT_READ, client)
-            last_activity = time.monotonic()
-            while not self.stop.is_set():
-                remaining = WORKER_PROXY_IDLE_SECONDS - (time.monotonic() - last_activity)
-                if remaining <= 0:
-                    return
-                events = selector.select(timeout=min(1.0, remaining))
-                if not events:
-                    continue
-                for key, mask in events:
-                    source = key.fileobj
-                    destination = key.data
-                    source_state = states[source]
-                    destination_state = states[destination]
-                    if mask & selectors.EVENT_READ and source_state["reading"]:
-                        room = MAX_DIFF_BYTES - len(destination_state["buffer"])
-                        if room > 0:
-                            try:
-                                payload = source.recv(min(65536, room))
-                            except (BlockingIOError, InterruptedError):
-                                payload = None
-                            except OSError:
-                                return
-                            if payload:
-                                destination_state["buffer"].extend(payload)
-                                last_activity = time.monotonic()
-                            elif payload == b"":
-                                source_state["reading"] = False
-                                source_state["eof"] = True
-                                if (
-                                    not destination_state["buffer"]
-                                    and not destination_state["write_closed"]
-                                ):
-                                    try:
-                                        destination.shutdown(socket.SHUT_WR)
-                                    except OSError:
-                                        pass
-                                    destination_state["write_closed"] = True
-                    if mask & selectors.EVENT_WRITE:
-                        pending = source_state["buffer"]
-                        if pending:
-                            try:
-                                sent = source.send(pending)
-                            except (BlockingIOError, InterruptedError):
-                                sent = 0
-                                time.sleep(0.001)
-                            except OSError:
-                                return
-                            if sent:
-                                del pending[:sent]
-                                last_activity = time.monotonic()
-                        if (
-                            not pending
-                            and destination_state["eof"]
-                            and not source_state["write_closed"]
-                        ):
-                            try:
-                                source.shutdown(socket.SHUT_WR)
-                            except OSError:
-                                pass
-                            source_state["write_closed"] = True
-                    if all(
-                        state["eof"] and not state["buffer"]
-                        for state in states.values()
-                    ):
-                        return
-                    for sock in states:
-                        refresh(sock)
-        except OSError:
-            return
-        finally:
-            if selector is not None:
-                selector.close()
-            self._close(upstream)
-            self._close(client)
-
-    def _serve(self) -> None:
-        listener = self.listener
-        if listener is None:
-            return
-        while not self.stop.is_set():
-            try:
-                client, _address = listener.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                if self.stop.is_set():
-                    return
-                continue
-            threading.Thread(target=self._connection, args=(client,), daemon=True).start()
-
-    def close(self) -> None:
-        self.stop.set()
-        self._close(self.listener)
-        self.listener = None
-        if self.thread is not None:
-            self.thread.join(timeout=2)
-            self.thread = None
-
-
-def _omp_call(prompt: str, cwd: Path, session_dir: Path, timeout: int) -> str:
-    if not WORKER_OMP.exists() or not WORKER_OMP_CONFIG.exists():
-        raise WorkerExecutionError("worker OMP binary/config is not provisioned")
-    session_dir.mkdir(parents=True, exist_ok=True)
-    env = _minimal_env(home=str(WORKER_PRIVATE_HOME))
-    env["PI_CODING_AGENT_DIR"] = str(WORKER_PRIVATE_HOME / ".omp" / "agent")
+def _omp_call(prompt: str, cwd: Path, timeout: int) -> str:
+    timeout = max(60, min(MAX_REPAIR_SECONDS, timeout))
     cp = _run(
         [
-            str(WORKER_OMP),
+            "/usr/bin/setpriv", "--no-new-privs",
+            str(OMP_BIN),
             "-p",
-            "--model",
-            "opencode-go/deepseek-v4.1-flash",
-            "--api-key", "proxy",
+            "--model", STEWARD_MODEL,
             "--no-extensions", "--no-skills", "--no-rules",
             "--no-lsp", "--no-pty", "--no-title",
             "--tools", "read,bash,edit,write,grep,glob,todo",
-            "--max-time", str(max(60, min(MAX_REPAIR_SECONDS, timeout))),
+            "--max-time", str(timeout),
             "--mode",
             "json",
             "--cwd",
             str(cwd),
             "--session-dir",
-            str(session_dir),
+            str(SESSION_DIR),
             "--config",
-            str(WORKER_OMP_CONFIG),
+            str(HEADLESS_CONFIG),
             "--add-dir",
             str(cwd),
             prompt,
         ],
         cwd=cwd,
-        timeout=max(60, min(MAX_REPAIR_SECONDS, timeout)),
-        env=env,
+        timeout=timeout,
+        # Carter's environment plus the deterministic Git/Python settings, so
+        # the agent's own test runs leave no bytecode in the snapshot.
+        env={**os.environ, **_minimal_env(home=str(HOME))},
+        input_text="",
     )
     text = _ndjson_text(cp.stdout or "")
     if cp.returncode != 0 and not text.strip():
@@ -1561,10 +1336,11 @@ def _snapshot_diff(root: Path, allowed_paths: Sequence[str]) -> tuple[str, list[
     return diff, changed
 
 
-def _run_validations(root: Path, commands: Sequence[Sequence[str]]) -> list[dict[str, Any]]:
+def _run_validations(root: Path, commands: Sequence[Sequence[str]], home: Path) -> list[dict[str, Any]]:
     records = []
-    env = _minimal_env(home=str(WORKER_PRIVATE_HOME))
-    env["PYTHONPYCACHEPREFIX"] = str(WORKER_PRIVATE_HOME / "pycache")
+    env = _minimal_env(home=str(home))
+    env["PYTHONPYCACHEPREFIX"] = str(home / "pycache")
+    env["RBENV_ROOT"] = str(HOME / ".rbenv")
     env["GOTOOLCHAIN"] = "local"
     env["GOPROXY"] = "off"
     env["CARGO_NET_OFFLINE"] = "true"
@@ -1580,7 +1356,7 @@ def _run_validations(root: Path, commands: Sequence[Sequence[str]]) -> list[dict
         if any("\x00" in item or item.startswith("/") for item in argv):
             raise WorkerPolicyError("validation command contains an absolute/unsafe argument")
         started = time.monotonic()
-        cp = _run(argv, cwd=root, env=env, timeout=MAX_VALIDATION_SECONDS)
+        cp = _run(["/usr/bin/setpriv", "--no-new-privs", *argv], cwd=root, env=env, timeout=MAX_VALIDATION_SECONDS)
         records.append(
             {
                 "argv": argv,
@@ -1670,22 +1446,18 @@ def _validate_judge_packet(packet: Any) -> dict[str, Any]:
     return {"verdict": verdict, "reviewed": out[:MAX_FINDINGS], "summary": str(packet.get("summary") or "")[:1000]}
 
 
-def _worker_repository(request: Mapping[str, Any], repository: Mapping[str, Any], session_root: Path) -> dict[str, Any]:
+def _worker_repository(
+    section: str, iteration: int, repository: Mapping[str, Any], home: Path, timeout: int,
+) -> dict[str, Any]:
     workspace = Path(str(repository.get("workspace") or ""))
-    if not workspace.is_absolute() or not _under(workspace, WORKER_RUN_ROOT):
-        raise WorkerPolicyError(f"workspace outside worker run root: {workspace}")
     kind = repo_kind(str(repository.get("source") or ""))
     allowed = [_safe_relpath(path, kind=kind) for path in repository.get("allowed_paths") or []]
     if not allowed:
         raise WorkerPolicyError("worker repository has no allowed paths")
-    if not workspace.exists():
+    if not workspace.is_absolute() or not workspace.is_dir():
         raise WorkerPolicyError(f"worker workspace missing: {workspace}")
     _initialise_snapshot(workspace)
-    findings = [
-        finding
-        for finding in repository.get("findings", request.get("findings")) or []
-        if isinstance(finding, Mapping)
-    ]
+    findings = [finding for finding in repository.get("findings") or [] if isinstance(finding, Mapping)]
     validation_commands = repository.get("validation_commands") or []
     git_config = workspace / ".git" / "config"
     try:
@@ -1699,12 +1471,7 @@ def _worker_repository(request: Mapping[str, Any], repository: Mapping[str, Any]
     ).stdout.strip()
     if not base_before:
         raise WorkerExecutionError("worker snapshot has no base commit")
-    fix_text = _omp_call(
-        _fix_prompt(str(request.get("section") or "unknown"), findings, allowed, int(request.get("iteration") or 1)),
-        workspace,
-        session_root / "fix",
-        int(request.get("timeout") or MAX_REPAIR_SECONDS),
-    )
+    fix_text = _omp_call(_fix_prompt(section, findings, allowed, iteration), workspace, timeout)
     fix_packet = _validate_fix_packet(_extract_json(fix_text))
     try:
         if git_config.read_bytes() != config_before:
@@ -1742,7 +1509,7 @@ def _worker_repository(request: Mapping[str, Any], repository: Mapping[str, Any]
         if applied.returncode != 0:
             raise WorkerExecutionError(f"could not apply exact candidate for judge: {(applied.stderr or applied.stdout)[:500]}")
     try:
-        validations = _run_validations(judge_workspace, validation_commands)
+        validations = _run_validations(judge_workspace, validation_commands, home)
         candidate = _run(
             _git_args(judge_workspace, "diff", "--no-ext-diff", "--no-textconv", "--binary", "--full-index", "HEAD"),
             env=_minimal_env(), timeout=60,
@@ -1750,10 +1517,7 @@ def _worker_repository(request: Mapping[str, Any], repository: Mapping[str, Any]
         if candidate.returncode != 0 or candidate.stdout != diff:
             raise WorkerPolicyError("validation changed the captured candidate")
         judge_text = _omp_call(
-            _judge_prompt(str(request.get("section") or "unknown"), findings, fix_packet, diff, validations),
-            judge_workspace,
-            session_root / "judge",
-            int(request.get("timeout") or MAX_REPAIR_SECONDS),
+            _judge_prompt(section, findings, fix_packet, diff, validations), judge_workspace, timeout,
         )
         judge_packet = _validate_judge_packet(_extract_json(judge_text))
         if judge_packet["verdict"] == "pass":
@@ -1776,129 +1540,3 @@ def _worker_repository(request: Mapping[str, Any], repository: Mapping[str, Any]
         "fix_packet": fix_packet,
         "judge_packet": judge_packet,
     }
-
-
-def run_worker_request(request_path: Path, result_path: Path) -> dict[str, Any]:
-    """Worker-service entrypoint; only the installed unit should call this."""
-    request = _read_json(request_path)
-    if request.get("protocol_version") != PROTOCOL_VERSION:
-        raise WorkerPolicyError("worker request protocol mismatch")
-    request_id = str(request.get("request_id") or "")
-    if not re.fullmatch(r"[a-f0-9]{32}", request_id):
-        raise WorkerPolicyError("invalid worker request id")
-    expected_home = WORKER_RUN_ROOT / request_id / "home"
-    if WORKER_PRIVATE_HOME != expected_home or not expected_home.is_dir():
-        raise WorkerPolicyError("worker HOME is not owned by this request")
-    if request_path != WORKER_REQUEST_ROOT / f"{request_id}.json" or result_path != WORKER_RUN_ROOT / request_id / "result.json":
-        raise WorkerPolicyError("worker request/result identity differs from this request")
-    repositories = request.get("repositories")
-    if not isinstance(repositories, list) or not repositories:
-        raise WorkerPolicyError("worker request has no repositories")
-    session_root = WORKER_RUN_ROOT / request_id / "sessions"
-    bridge = _LocalProxyBridge()
-    bridge.start()
-    outputs = []
-    try:
-        for index, repository in enumerate(repositories):
-            if not isinstance(repository, Mapping):
-                raise WorkerPolicyError("worker repository request is not an object")
-            outputs.append(_worker_repository(request, repository, session_root / str(index)))
-    finally:
-        bridge.close()
-    verdicts = [str(output["judge_packet"].get("verdict") or "") for output in outputs]
-    # Existing judge semantics are retained: any partial/fail keeps the
-    # iteration in scope and blocks parent publication.
-    all_pass = all(verdict == "pass" for verdict in verdicts)
-    all_fixes: list[dict[str, Any]] = []
-    all_reviews: list[dict[str, Any]] = []
-    for output in outputs:
-        all_fixes.extend(output["fix_packet"].get("fixes_applied") or [])
-        all_reviews.extend(output["judge_packet"].get("reviewed") or [])
-    result = {
-        "protocol_version": PROTOCOL_VERSION,
-        "request_id": request_id,
-        "status": "ok",
-        "section": request.get("section"),
-        "iteration": request.get("iteration"),
-        "fix_packet": {
-            "fixes_applied": all_fixes[:MAX_FINDINGS],
-            "summary": " ".join(
-                str(output["fix_packet"].get("summary") or "").strip()
-                for output in outputs
-                if output["fix_packet"].get("summary")
-            )[:1000],
-        },
-        "judge_packet": {
-            "verdict": "pass" if all_pass else ("partial" if any(v == "partial" for v in verdicts) else "fail"),
-            "reviewed": all_reviews[:MAX_FINDINGS],
-            "summary": " ".join(
-                str(output["judge_packet"].get("summary") or "").strip()
-                for output in outputs
-                if output["judge_packet"].get("summary")
-            )[:1000],
-        },
-        "repositories": outputs,
-        "security": {
-            "identity": WORKER_USER,
-            "home": str(WORKER_PRIVATE_HOME),
-            "network": "provider-proxy-only",
-            "credentials": "none",
-            "publication": "parent-local-review-ref",
-        },
-    }
-    _write_result_json(result_path, result)
-    return result
-
-
-def _write_result_json(path: Path, data: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = _json_bytes(data)
-    if len(payload) > MAX_PACKET_BYTES:
-        raise WorkerPolicyError("worker result is too large")
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-
-
-def _cli() -> int:
-    parser = argparse.ArgumentParser(description="bounded steward repair worker")
-    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--request", required=True, type=Path)
-    parser.add_argument("--result", required=True, type=Path)
-    args = parser.parse_args()
-    try:
-        if not args.worker:
-            parser.error("worker module is only executable with --worker")
-        run_worker_request(args.request, args.result)
-        return 0
-    except Exception as exc:
-        try:
-            _write_result_json(
-                args.result,
-                {
-                    "protocol_version": PROTOCOL_VERSION,
-                    "status": "worker-failed",
-                    "error": str(exc)[:1000],
-                    "fix_packet": {"fixes_applied": [], "summary": "Isolated worker failed."},
-                    "judge_packet": {"verdict": "fail", "reviewed": [], "summary": str(exc)[:400]},
-                    "repositories": [],
-                },
-            )
-        except Exception:
-            pass
-        print(f"steward-worker: {exc}", file=sys.stderr)
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(_cli())

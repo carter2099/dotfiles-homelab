@@ -1,10 +1,10 @@
 ---
-description: Create a new scheduled email digest that runs daily via a systemd timer, spawning a headless omp agent (deepseek-v4-flash) to research the web for news on specified topics and email an HTML summary.
+description: Create a new scheduled email digest that runs daily via a systemd timer, spawning a headless omp agent (Claude Opus 5.5) to research the web for news on specified topics and email an HTML summary.
 ---
 
 # email-digest
 
-Create a scheduled daily email digest powered by a local systemd timer that spawns a headless `omp -p` agent on the OpenCode Go subscription, using `deepseek-v4-flash` by default. Provider-agnostic — the model is a single `--model` flag.
+Create a scheduled daily email digest powered by a local systemd timer that spawns a headless `omp -p` agent on Carter's Claude plan, using `anthropic/claude-opus-5-5:medium` by default. Provider-agnostic — the model is a single `--model` flag.
 
 ## Required input
 
@@ -23,7 +23,7 @@ Gather these from the user before creating the digest. Ask for anything missing:
 - **SMTP config:** `~/scripts/.smtp_config` — Proton Mail SMTP via `bot@carter2099.com` (un-tracked; also a good place to stash third-party recipient addresses, see Step 5 note)
 - **HTML template:** `~/digests/template.html` — shared layout for all digests (dark header, story blocks, footer)
 - **Digest history:** `~/digests/<name>/` — one `.md` summary file per run, kept for 7 days
-- **omp binary:** `omp` on PATH (via bun); auth via `--api-key proxy` (opencode-go-proxy on localhost:8082)
+- **omp binary:** `omp` on PATH (via bun); auth via omp's own Claude login (`~/.omp/agent/agent.db`). An `opencode-go/*` model also needs `--api-key proxy` (opencode-go-proxy on localhost:8082).
 
 If `~/scripts/send_digest.py` or `~/scripts/.smtp_config` don't exist, stop and tell the user — they need to be created first.
 
@@ -104,7 +104,7 @@ Each digest run produces three artifacts for retroactive quality analysis:
 
    ```
    # [SUBJECT] — [DATE]
-   **Model:** deepseek-v4-flash | **Sent to:** [EMAILS]
+   **Model:** claude-opus-5-5 | **Sent to:** [EMAILS]
 
    ## Fresh
    - [Story title](URL) — one-line summary
@@ -123,7 +123,7 @@ Each digest run produces three artifacts for retroactive quality analysis:
 
    ```bash
    #!/usr/bin/env bash
-   # Researches and emails the daily [TOPIC] digest via omp + DeepSeek V4 Flash.
+   # Researches and emails the daily [TOPIC] digest via omp + Claude Opus 5.5.
    # Scheduled via systemd timer ([NAME].timer). Provider-agnostic: change
    # the --model id to switch providers/models without touching anything else.
    set -euo pipefail
@@ -135,9 +135,9 @@ Each digest run produces three artifacts for retroactive quality analysis:
 
    PROMPT='<THE PROMPT FROM STEP 4>'
 
-   omp -p --model opencode-go/deepseek-v4-flash --api-key proxy --allow-home --session-dir ~/.omp/agent/sessions-automated "$PROMPT"
+   omp -p --model anthropic/claude-opus-5-5:medium --allow-home --session-dir ~/.omp/agent/sessions-automated "$PROMPT"
    END_TS="$(date +%s)"
-   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [NAME] duration=$((END_TS - START_TS))s model=deepseek-v4-flash" >> "$HOME/digests/[NAME]/.runs.log"
+   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [NAME] duration=$((END_TS - START_TS))s model=claude-opus-5-5" >> "$HOME/digests/[NAME]/.runs.log"
    ```
 
    Make sure to `chmod +x` the script.
@@ -150,7 +150,7 @@ Each digest run produces three artifacts for retroactive quality analysis:
 
    ```ini
    [Unit]
-   Description=Daily [TOPIC] email digest via omp (deepseek-v4-flash)
+   Description=Daily [TOPIC] email digest via omp (Claude Opus 5.5)
 
    [Service]
    Type=oneshot
@@ -225,13 +225,13 @@ systemctl --user daemon-reload
 
 ## Notes
 
-- Agents run locally on the homelab via `omp -p` (headless) on the OpenCode Go subscription, using `deepseek-v4-flash` by default.
+- Agents run locally on the homelab via `omp -p` (headless) on Carter's Claude plan, using `anthropic/claude-opus-5-5:medium` by default.
 - **Headless omp notes:**
   - omp's `-p` (print) mode is the direct equivalent of `opencode run` — no stdin tricks needed.
   - No file-path restrictions — writes outside `/home/carter` are fine.
   - omp exits non-zero on errors, but still verify artifacts (summary `.md` with URLs, archived `.html`, `.runs.log` entry).
   - omp has both `web_search` (for discovering articles) and `web_fetch` (for reading pages).
-- Auth is provided via the `--api-key proxy` flag (opencode-go-proxy on localhost:8082 handles the real OpenCode Go API keys).
+- Auth comes from omp's stored Claude login. An `opencode-go/*` model instead needs the `--api-key proxy` flag (opencode-go-proxy on localhost:8082 holds the real OpenCode Go API keys).
 - `TimeoutStartSec=600` (10 minutes) prevents a stuck agent from blocking indefinitely.
 - Digest history in `~/digests/<name>/` provides dedup context — the agent reads prior summaries to avoid repeating stories and to track evolving narratives across days.
 - The "Recent & Relevant" section catches stories that are evolving or gaining momentum, not just stories from the last 24 hours — momentum and follow-up coverage are valid reasons to re-include a story.

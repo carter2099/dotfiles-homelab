@@ -47,7 +47,7 @@ ENDPOINTS = {
     "news": "http://127.0.0.1:30144/healthz",
     "freshrss": "http://127.0.0.1:30149/i/",
 }
-STEWARD_MODEL = "opencode-go/deepseek-v4.1-flash"
+STEWARD_MODEL = "anthropic/claude-opus-5-5:medium"
 STEWARD_PATH = "/home/carter/.rbenv/shims:/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # fnm's default Node (the version interactive shells use), if one is set. Picking
@@ -116,14 +116,6 @@ AUTO_MERGE_EXCLUDED = {
 }
 # P9b pushes only to this private GitHub repository.
 DOTFILES_REPO = "carter2099/dotfiles-homelab-private"
-
-# P7b code repairs are delegated to the separately provisioned
-# ``steward-worker`` identity.  The helper is root-owned and validates every
-# request; this process never falls back to Carter's OMP/home context.
-STEWARD_WORKER_HELPER = Path(
-    os.environ.get("STEWARD_WORKER_HELPER", "/usr/local/libexec/steward-worker-run")
-)
-STEWARD_WORKER_POLICY_VERSION = "steward-worker-v1"
 
 PENDING_PATH = HOME / "agent-state" / "pending.md"
 DEPENDABOT_UNIT = "dependabot-webhook.service"

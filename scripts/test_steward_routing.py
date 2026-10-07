@@ -620,7 +620,7 @@ class DryRunAndPhaseTests(SandboxTest):
         run_dir = self.sb.root / "run"
         run_dir.mkdir(exist_ok=True)
         (run_dir / "07-audit.json").write_text(json.dumps(audit))
-        with patch.object(fixes, "run_isolated_fix", side_effect=AssertionError("worker must not run")):
+        with patch.object(fixes, "run_fix", side_effect=AssertionError("worker must not run")):
             ctx.setdefault("fix_section", None)
             result = fixes.phase_7b_fix(run_dir, dry_run=dry_run, route_context=self.sb.ctx(**ctx))
         written = json.loads((run_dir / "07b-fixes.json").read_text())

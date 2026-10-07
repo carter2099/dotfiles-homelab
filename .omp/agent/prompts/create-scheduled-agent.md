@@ -16,7 +16,7 @@ Gather these from the user. Ask for anything missing:
   - Weekdays at 9am ET → `Mon..Fri *-*-* 13:00:00`
   - Weekly Monday 8am ET → `Mon *-*-* 12:00:00`
   - Every 6 hours → `*-*-* 00,06,12,18:00:00`
-- **model** (string, default: `opencode-go/deepseek-v4-flash`): the `--model` flag for `omp -p`. Change this to switch providers/models.
+- **model** (string, default: `anthropic/claude-opus-5-5:medium`): the `--model` flag for `omp -p`, with an optional `:<thinking-level>` suffix. Change this to switch providers/models.
 - **what it does** (string): natural language description of the agent's task. This becomes the prompt.
 - **output** (choice, default: none): 
   - `none` — agent runs silently, logs to `.runs.log`
@@ -45,7 +45,7 @@ Plus an optional log directory if the agent writes output:
 
 Confirm these exist:
 - `omp` on PATH
-- `--api-key proxy` (auth handled by opencode-go-proxy on localhost:8082)
+- omp is logged in to the model's provider (`anthropic/*` uses Carter's Claude login in `~/.omp/agent/agent.db`; an `opencode-go/*` model also needs `--api-key proxy`, handled by opencode-go-proxy on localhost:8082)
 - If output is `email`: `~/scripts/send_digest.py` and `~/scripts/.smtp_config`
 
 ### 2. Create the run script
@@ -63,7 +63,7 @@ START_TS="$(date +%s)"
 
 PROMPT='<the prompt — what the agent should do>'
 
-omp -p --model <model> --api-key proxy --allow-home --session-dir ~/.omp/agent/sessions-automated "$PROMPT"
+omp -p --model <model> --allow-home --session-dir ~/.omp/agent/sessions-automated "$PROMPT"
 END_TS="$(date +%s)"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) <name> duration=$((END_TS - START_TS))s model=<model-short-name>" >> "$HOME/digests/<name>/.runs.log"
 ```

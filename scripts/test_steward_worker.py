@@ -125,9 +125,8 @@ class WorkerBoundaryTests(unittest.TestCase):
         )
         home = self.root / "validation-home"
         home.mkdir()
-        with patch.object(worker, "WORKER_PRIVATE_HOME", home):
-            with self.assertRaises(worker.WorkerExecutionError) as failure:
-                worker._run_validations(self.repo, [["python3", "-m", "unittest", "discover"]])
+        with self.assertRaises(worker.WorkerExecutionError) as failure:
+            worker._run_validations(self.repo, [["python3", "-m", "unittest", "discover"]], home)
         self.assertIn("RuntimeError: attachment content is missing", str(failure.exception))
 
     def test_judge_and_validation_observe_the_exact_repaired_candidate(self):
@@ -138,15 +137,14 @@ class WorkerBoundaryTests(unittest.TestCase):
         )
         self.git("add", "test_answer.py")
         self.git("commit", "-m", "consumer regression fixture")
-        run_root = self.root / "runs"
-        snapshot = run_root / "request" / "repo-0"
+        snapshot = self.root / "runs" / "repo-0"
         shutil.copytree(self.repo, snapshot, ignore=shutil.ignore_patterns(".git"))
         home = self.root / "home"
         home.mkdir()
         finding = {"claim": "answer returns the wrong result"}
         calls = []
 
-        def model(_prompt, cwd, _sessions, _timeout):
+        def model(_prompt, cwd, _timeout):
             if not calls:
                 (cwd / "main.py").write_text("def answer():\n    return 2\n")
                 calls.append("fix")
@@ -161,14 +159,39 @@ class WorkerBoundaryTests(unittest.TestCase):
             "validation_commands": worker._validation_plan(self.repo, ["main.py"]),
             "findings": [finding],
         }
-        with patch.object(worker, "WORKER_RUN_ROOT", run_root), patch.object(worker, "WORKER_PRIVATE_HOME", home), patch.object(worker, "_omp_call", side_effect=model):
-            result = worker._worker_repository({"section": "application-behavior"}, repository, self.root / "sessions")
+        with patch.object(worker, "_omp_call", side_effect=model):
+            result = worker._worker_repository("application-behavior", 1, repository, home, 600)
         packet = {
             "protocol_version": worker.PROTOCOL_VERSION, "status": "ok",
             "judge_packet": result["judge_packet"], "repositories": [result],
             "_trusted_repositories": [copy.deepcopy(repository)],
         }
         published = worker.publish_validated_result(packet, "application-behavior")
+        self.assertEqual(published["status"], "published", published)
+        self.assertEqual(self.answer(self.git("show", f"{published['commits'][0]['ref']}:main.py")), 2)
+        self.assertEqual(self.answer((self.repo / "main.py").read_text()), 1)
+
+    def test_run_fix_edits_a_base_snapshot_without_secrets_or_the_checkout(self):
+        (self.repo / ".env").write_text("TOKEN=do-not-show-the-model\n")
+        self.git("add", ".env")
+        self.git("commit", "-m", "tracked env file")
+        finding = {"id": "f1", "claim": "answer returns the wrong result",
+                   "repo": str(self.repo), "paths": ["main.py"]}
+        seen = []
+
+        def model(_prompt, cwd, _timeout):
+            seen.append(sorted(p.name for p in cwd.iterdir() if p.name != ".git"))
+            if len(seen) == 1:
+                (cwd / "main.py").write_text("def answer():\n    return 2\n")
+                return json.dumps({"fixes_applied": [{"finding": "f1", "action": "fix", "status": "fixed"}], "summary": "repaired"})
+            return json.dumps({"verdict": "pass", "reviewed": [{"finding": "f1", "ok": True, "note": "ok"}], "summary": "verified"})
+
+        with patch.object(worker, "_omp_call", side_effect=model):
+            result = worker.run_fix("application-behavior", [finding])
+        self.assertEqual(result["status"], "ok", result)
+        self.assertNotIn(".env", seen[0], "a credential-looking tracked file reached the model")
+        self.assertIn("main.py", seen[0])
+        published = worker.publish_validated_result(result, "application-behavior")
         self.assertEqual(published["status"], "published", published)
         self.assertEqual(self.answer(self.git("show", f"{published['commits'][0]['ref']}:main.py")), 2)
         self.assertEqual(self.answer((self.repo / "main.py").read_text()), 1)

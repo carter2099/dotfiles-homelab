@@ -2645,6 +2645,61 @@ def test_stub_attempts_cleaned_after_success() -> None:
         check(keep.exists(), "final-run artifact was removed")
 
 
+def test_research_fallback_covers_only_its_research_pass() -> None:
+    """A research fallback must not stay on for the rest of the run (2026-10-04/05:
+    a stub retry ran research, editorial, and standfirst on the fallback model)."""
+    story = {"title": "Story", "url": "https://example.com/story"}
+    for scenario, reason in (("stub", "no-fresh-stories"), ("empty", "no-findings")):
+        calls: list[tuple[str, str]] = []
+        research_results = [[], [dict(story)]] if scenario == "empty" else [[dict(story)], [dict(story)]]
+        curate_results = [[], [dict(story)]] if scenario == "stub" else [[dict(story)]]
+
+        def recorded(name: str, result):
+            def phase(*_args, **_kwargs):
+                calls.append((name, runtime._effective_model(runtime.MODEL)))
+                return result()
+            return phase
+
+        with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack:
+            for owner, name, value in (
+                (runtime, "DIGESTS_DIR", Path(temporary)),
+                (runtime, "TEST_MODE", False),
+                (runtime, "MODEL_OVERRIDE", None),
+                (runtime, "check_search_health", lambda *_args: None),
+                (workflow, "validate_runtime_contract", lambda: None),
+                (workflow.signal, "signal", lambda *_args: None),
+                (workflow.time, "sleep", lambda *_args: None),
+                (archive, "cleanup_old_artifacts", lambda *_args: None),
+                (research, "_UPSTREAM_OUTAGE", False),
+                (research, "phase_1_research", recorded("research", lambda: research_results.pop(0))),
+                (research, "phase_2_judge_research", recorded("judge", lambda: [dict(story)])),
+                (research, "phase_2b_attention", recorded("attention", lambda: [dict(story)])),
+                (research, "phase_3_rank", recorded("rank", lambda: [dict(story)])),
+                (research, "phase_4_fetch", recorded("fetch", lambda: [dict(story)])),
+                (research, "phase_5_judge_summaries", recorded("judge-summaries", lambda: [dict(story)])),
+                (editorial, "phase_6_curate", recorded("curate", lambda: curate_results.pop(0))),
+                (archive, "phase_7_write", lambda *_args, **_kwargs: "<html></html>"),
+                (archive, "phase_8_archive", lambda *_args, **_kwargs: None),
+                (archive, "phase_9_summary", lambda *_args, **_kwargs: None),
+            ):
+                stack.enter_context(patch.object(owner, name, value))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            workflow.run_digest("ai-tech")
+            check(runtime.MODEL_OVERRIDE is None, f"{scenario}: override leaked: {runtime.MODEL_OVERRIDE}")
+            run_record = (Path(temporary) / "ai-tech" / ".runs.log").read_text().splitlines()[-1]
+
+        research_models = [model for name, model in calls if name == "research"]
+        check(research_models == [runtime.MODEL, runtime.MODEL_FALLBACK], f"{scenario}: {calls}")
+        later_models = {model for name, model in calls if name != "research"}
+        check(later_models == {runtime.MODEL}, f"{scenario}: later phases ran on {later_models}")
+        check(
+            run_record.endswith(
+                f" model={runtime.MODEL} research_model={runtime.MODEL_FALLBACK} research_fallback={reason}"
+            ),
+            run_record,
+        )
+
+
 def test_asset_cdn_urls_rejected() -> None:
     """Publisher asset-CDN hosts (assets.theregister.com) must never be selected
     into Fresh; they are not article hosts (digest-quality audit 2026-08-24:
@@ -2714,7 +2769,8 @@ def test_proxy_5xx_retry_with_backoff() -> None:
                return_value={"provider": "opencode-go",
                              "chat_url": "http://proxy.test/v1/chat/completions"}), \
          patch("daily_news.runtime.time.sleep", side_effect=lambda s: sleeps.append(s)):
-        content = runtime._call_llm_proxy("system", "user", model=runtime.MODEL_FALLBACK)
+        # Bare IDs are OpenCode Go models served through the :8082 proxy.
+        content = runtime._call_llm_proxy("system", "user", model="mimo-v2.6-flash")
         check(content == "reviewed ok", content)
         check(len(calls) == 3, f"503 was not retried: {len(calls)} calls")
         check(len(sleeps) == 2, f"backoff sleeps={sleeps}")
@@ -2743,7 +2799,7 @@ def test_proxy_5xx_retry_with_backoff() -> None:
          patch("daily_news.runtime.time.sleep"):
         raised = False
         try:
-            runtime._call_llm_proxy("system", "user", model=runtime.MODEL_FALLBACK)
+            runtime._call_llm_proxy("system", "user", model="mimo-v2.6-flash")
         except requests.HTTPError:
             raised = True
         check(raised, "exhausted 503 did not raise")
@@ -2756,6 +2812,52 @@ def test_proxy_5xx_retry_with_backoff() -> None:
               f"exhausted retries changed session ID: {retry_session_ids}")
         check(retry_session_ids[0] != first_session_id,
               "separate proxy calls reused one global session ID")
+
+
+def test_omp_login_models_never_post_to_proxy() -> None:
+    """Qualified models whose provider has no declared OpenAI-compatible endpoint
+    (anthropic/, openai-codex/) need omp's own login; POSTing them to the
+    OpenCode proxy fails every editorial stage. Declared endpoints still POST."""
+    providers = {
+        "opencode-go": {"baseUrl": "http://proxy.test/v1", "models": {"deepseek-v4.1-flash"}},
+        "local-llm": {"baseUrl": "http://local.test/v1", "models": set()},
+    }
+    omp_calls = []
+    posts = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "via proxy"}}]}
+
+    def fake_omp(system, user, model, timeout):
+        omp_calls.append(model)
+        return "via omp"
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        posts.append((url, json["model"]))
+        return FakeResponse()
+
+    with patch("daily_news.runtime._load_providers", return_value=providers), \
+         patch("daily_news.runtime._MODEL_PROVIDER_CACHE", {}), \
+         patch("daily_news.runtime._call_omp_no_tools", side_effect=fake_omp), \
+         patch("daily_news.runtime.requests.post", side_effect=fake_post):
+        for model in ("anthropic/claude-opus-5-5:medium", "openai-codex/gpt-5.6-luna"):
+            check(runtime._call_llm_proxy("s", "u", model=model) == "via omp", model)
+        check(omp_calls == ["anthropic/claude-opus-5-5:medium", "openai-codex/gpt-5.6-luna"],
+              f"omp calls={omp_calls}")
+        check(posts == [], f"omp-login models were POSTed: {posts}")
+
+        check(runtime._call_llm_proxy("s", "u", model="deepseek-v4.1-flash") == "via proxy", "bare")
+        check(runtime._call_llm_proxy("s", "u", model="local-llm/qwen") == "via proxy", "local")
+        check(posts == [("http://proxy.test/v1/chat/completions", "deepseek-v4.1-flash"),
+                        ("http://local.test/v1/chat/completions", "local-llm/qwen")],
+              f"declared endpoints not POSTed: {posts}")
+        check(len(omp_calls) == 2, f"declared endpoints went through omp: {omp_calls}")
 
 
 def main() -> None:
@@ -2817,8 +2919,10 @@ def main() -> None:
         test_listing_urls_rejected,
         test_archive_index_urls_rejected,
         test_stub_attempts_cleaned_after_success,
+        test_research_fallback_covers_only_its_research_pass,
         test_asset_cdn_urls_rejected,
         test_proxy_5xx_retry_with_backoff,
+        test_omp_login_models_never_post_to_proxy,
     ]
     for test in tests:
         test()

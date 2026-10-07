@@ -358,7 +358,7 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(items["config-doc-drift-finding-1"]["status"], "resolved")
 
     def test_privileged_system_config_paths_are_approval_only(self) -> None:
-        for rel, action in (("system-config/steward-worker-run", "revert"),
+        for rel, action in (("system-config/ufw-rebuild.sh", "revert"),
                             ("system-config/docker-user-rules.sh", "commit"),
                             ("system-config/gamingrig-linux/.zshrc", "commit")):
             with self.subTest(path=rel):

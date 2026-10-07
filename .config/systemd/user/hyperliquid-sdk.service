@@ -1,5 +1,5 @@
 [Unit]
-Description=Hyperliquid Ruby SDK autonomous maintenance run via omp (GLM 5.3)
+Description=Hyperliquid Ruby SDK autonomous maintenance run via omp (Claude Opus 5.5)
 # Bound retry: allow one restart per failure within an hour (initial start +
 # one retry), so transient failures (e.g. upstream connection refused) are
 # retried without an infinite loop on persistent breakage.

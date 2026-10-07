@@ -2242,8 +2242,6 @@ class OmpUpdateTests(unittest.TestCase):
         self.assertIn("resolve to different files", result["error"])
         self.assertIn("report different versions", result["error"])
         self.assertIn(f"local_bin={stray}", result["error"])
-        # A failed omp_update never triggers the worker refresh.
-        self.assertEqual(updates._p1_worker_omp_refresh(result)["status"], "skipped")
 
     def test_stale_processes_are_counted_never_killed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2254,7 +2252,6 @@ class OmpUpdateTests(unittest.TestCase):
                 "102": str(canonical),                  # current: fine
                 "103": "/opt/old/omp",                  # a different install
                 "104": "/usr/bin/python3",              # not omp
-                "105": str(updates.WORKER_OMP),         # sandbox copy by design
             }
             for pid, target in links.items():
                 (proc / pid).mkdir()
@@ -2264,52 +2261,6 @@ class OmpUpdateTests(unittest.TestCase):
                 stale = updates._omp_stale_processes(canonical, proc)
             kill.assert_not_called()
         self.assertEqual(stale, {"count": 2, "pids": [101, 103]})
-
-
-class WorkerOmpRefreshTests(unittest.TestCase):
-    OK = {"step": "omp_update", "status": "ok",
-          "pre_version": "omp/1.0.0", "post_version": "omp/1.1.0"}
-
-    def test_refresh_runs_only_after_a_version_change(self):
-        for omp_result in (
-            {**self.OK, "status": "skipped", "post_version": "omp/1.0.0"},
-            {**self.OK, "post_version": "omp/1.0.0"},
-            {**self.OK, "status": "reverted"},
-            {**self.OK, "status": "failed"},
-        ):
-            with (
-                self.subTest(omp_result=omp_result),
-                patch.object(updates, "run_capture_ok") as ok,
-                patch.object(updates, "run_capture") as capture,
-            ):
-                result = updates._p1_worker_omp_refresh(omp_result)
-                self.assertEqual(result["status"], "skipped")
-                ok.assert_not_called()
-                capture.assert_not_called()
-
-    def test_refresh_runs_omp_only_provisioning_and_verifies_version(self):
-        with tempfile.TemporaryDirectory() as tmp, (
-            patch.object(updates, "HOME", Path(tmp))
-        ), patch.object(updates, "run_capture",
-                        side_effect=["omp/1.0.0", "omp/1.1.0"]), patch.object(
-            updates, "run_capture_ok", return_value=("refreshed", "", 0)
-        ) as ok:
-            result = updates._p1_worker_omp_refresh(self.OK)
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual((result["pre_version"], result["post_version"]),
-                         ("omp/1.0.0", "omp/1.1.0"))
-        self.assertEqual(ok.call_args.args[0], [
-            "sudo", "-n", "bash", f"{tmp}/system-config/steward-worker-provision.sh",
-            "--omp-only"])
-
-    def test_worker_version_mismatch_fails(self):
-        with patch.object(updates, "run_capture",
-                          side_effect=["omp/1.0.0", "omp/1.0.0"]), patch.object(
-            updates, "run_capture_ok", return_value=("", "", 0)
-        ):
-            result = updates._p1_worker_omp_refresh(self.OK)
-        self.assertEqual(result["status"], "failed")
-        self.assertIn("worker omp reports omp/1.0.0, local is omp/1.1.0", result["error"])
 
 
 class AppDeployTests(unittest.TestCase):
@@ -2475,7 +2426,7 @@ class AppDeployTests(unittest.TestCase):
 
 
 class PhaseOneOrderTests(unittest.TestCase):
-    def test_step_order_and_worker_refresh_input(self):
+    def test_step_order(self):
         calls = []
 
         def step(name, **extra):
@@ -2487,11 +2438,6 @@ class PhaseOneOrderTests(unittest.TestCase):
         omp_row = {"step": "omp_update", "status": "ok",
                    "pre_version": "omp/1", "post_version": "omp/2"}
         seen = {}
-
-        def refresh(result):
-            calls.append("worker_omp_refresh")
-            seen["omp"] = result
-            return {"step": "worker_omp_refresh", "status": "ok"}
 
         def deploy(service, spec, dry_run=False):
             calls.append(f"app_deploy:{service}")
@@ -2512,8 +2458,7 @@ class PhaseOneOrderTests(unittest.TestCase):
             updates, "_p1_searxng_update", step("searxng")
         ), patch.object(updates, "_p1_llama_cpp_update", step("llama_cpp")), patch.object(
             updates, "_p1_omp_update", lambda: calls.append("omp_update") or dict(omp_row)
-        ), patch.object(updates, "_p1_worker_omp_refresh", refresh), patch.object(
-            updates, "_p1_app_deploy", deploy
+        ), patch.object(updates, "_p1_app_deploy", deploy
         ), patch.object(updates, "_p1_dependabot_merge", step("dependabot_merge")), patch.object(
             updates, "DEPLOY_REGISTRY", {"blog": {}}
         ), patch.object(updates, "_p1_docker_cleanup", cleanup), patch.object(
@@ -2523,9 +2468,8 @@ class PhaseOneOrderTests(unittest.TestCase):
         self.assertEqual(calls, [
             "gamingrig_maintenance", "omp_db_repair", "apt_upgrade", "freshrss", "openwebui_update",
             "herdr_update", "searxng", "llama_cpp", "omp_update",
-            "worker_omp_refresh", "dependabot_merge", "app_deploy:blog", "docker_cleanup",
+            "dependabot_merge", "app_deploy:blog", "docker_cleanup",
         ])
-        self.assertEqual(seen["omp"]["post_version"], "omp/2")
         # Cleanup sees every earlier row (to find superseded images).
         self.assertIn("openwebui_update", seen["cleanup_saw"])
         self.assertEqual(result["steps"][-2],

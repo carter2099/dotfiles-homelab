@@ -9,6 +9,8 @@ import re
 import subprocess
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -55,11 +57,11 @@ ATTENTION_ARCHIVE_DIR = DIGESTS_DIR / "news" / "attention"
 
 LLM_PROXY_URL = "http://localhost:8081/v1/chat/completions"
 
-MODEL = "deepseek-v4.1-flash"                   # API primary
+MODEL = "anthropic/claude-opus-5-5:medium"       # primary (Claude plan via omp)
 
-MODEL_FALLBACK = "mimo-v2.5"                    # API fallback via opencode-go
+MODEL_FALLBACK = "anthropic/claude-sonnet-5-5:high"  # fallback (Claude plan via omp)
 
-MODEL_REVIEWER = "deepseek-v4.1-flash"          # separate critic pass
+MODEL_REVIEWER = "anthropic/claude-opus-5-5:medium"  # separate critic pass
 
 DEFAULT_TIMEOUT = 900
 
@@ -114,18 +116,6 @@ def _load_providers() -> dict[str, dict]:
                     "models": set(),
                 }
 
-    # Infer opencode-go provider from modelRoles if not present
-    if _OMP_CONFIG_YML.exists() and yaml:
-        raw = yaml.safe_load(_OMP_CONFIG_YML.read_text())
-        for role, model_spec in (raw or {}).get("modelRoles", {}).items():
-            if "/" in (model_spec or ""):
-                prov = model_spec.split("/")[0]
-                if prov not in providers:
-                    providers[prov] = {
-                        "baseUrl": f"http://localhost:8082/v1",
-                        "models": set(),
-                    }
-
     return providers
 
 def _detect_model_provider(model_id: str) -> dict:
@@ -162,7 +152,7 @@ def _detect_model_provider(model_id: str) -> dict:
 
     # Fallback: assume opencode-go (primary API provider for digest models)
     # Previously fell back to local-llm, which caused silent routing of API models
-    # (e.g. deepseek-v4.1-flash, mimo-v2.5) to the gaming rig's llama.cpp — resulting in
+    # (e.g. deepseek-v4.1-flash, mimo-v2.6-flash) to the gaming rig's llama.cpp — resulting in
     # command failures when the local provider didn't have those models.
     if providers and "opencode-go" in providers:
         fb = {
@@ -177,9 +167,34 @@ def _detect_model_provider(model_id: str) -> dict:
     _MODEL_PROVIDER_CACHE[model_id] = fb
     return fb
 
+def _omp_authenticated(model_id: str) -> bool:
+    """True for provider/model IDs that only omp can authenticate.
+
+    models.yml and config.yml declare the OpenAI-compatible endpoints this
+    module may call directly (opencode-go, local-llm). Any other qualified
+    provider, such as anthropic/ or openai-codex/, is an omp login.
+    """
+    return "/" in model_id and model_id.split("/", 1)[0] not in _load_providers()
+
 def _effective_model(requested: str) -> str:
     """Return the effective model, respecting --model override."""
     return MODEL_OVERRIDE if MODEL_OVERRIDE else requested
+
+@contextmanager
+def scoped_model_override(model: str) -> Iterator[None]:
+    """Route model calls to `model` inside the block, then restore the prior override.
+
+    A fallback model must cover only the pass that needed it; later phases run
+    on the primary again (2026-10-04/05 weekend runs: one empty research pass
+    put research, editorial, and standfirst on the fallback for the whole run).
+    """
+    global MODEL_OVERRIDE
+    previous = MODEL_OVERRIDE
+    MODEL_OVERRIDE = model
+    try:
+        yield
+    finally:
+        MODEL_OVERRIDE = previous
 
 MAX_PARALLEL_RESEARCH = 2
 
@@ -456,9 +471,9 @@ def _call_llm_proxy(
     temperature: float = 0.3,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> str:
-    """Call Luna through OMP, or an API fallback through chat completions."""
+    """Call omp-authenticated models through omp, others through chat completions."""
     eff_model = _effective_model(model)
-    if eff_model.startswith("openai-codex/"):
+    if _omp_authenticated(eff_model):
         return _call_omp_no_tools(system, user, eff_model, timeout)
     provider_info = _detect_model_provider(eff_model)
     request_headers: dict[str, str] = {}

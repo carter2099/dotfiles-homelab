@@ -6,9 +6,9 @@ protected path.  This module then
 
 1. clones origin/main of the private dotfiles repository into a disposable
    directory under ``worker.STEWARD_CODE_ROOT`` (the live tree must match
-   origin/main on the finding's paths), which the unchanged isolated worker
-   repairs, validates (``verify-*.sh full`` for every touched area), and has
-   judged; the worker never holds credentials;
+   origin/main on the finding's paths), which the unchanged repair worker
+   repairs in a disposable snapshot, validates (``verify-*.sh full`` for every
+   touched area), and has judged;
 2. gates the published review commit deterministically: single commit on
    the base, only allowed paths, bounded diff, deterministic secret scan, no
    added sudo/firewall/systemd-enablement/network-exposure lines, and every
@@ -238,7 +238,7 @@ def _body(section, findings, facts, section_result):
                   f"  - Fix asked for: {_text(f.get('fix'), 800)}"]
     lines += ["", f"## Change ({facts['changed_lines']} changed lines)"]
     lines += [f"- `~/{p}`" for p in facts["paths"]]
-    lines += ["", "## Verification (isolated worker, patched snapshot of this base)"]
+    lines += ["", "## Verification (repair worker, patched snapshot of this base)"]
     for record in facts["records"]:
         output = f"{record.get('stdout') or ''}\n{record.get('stderr') or ''}".strip()
         tail = [line for line in output.splitlines() if line.strip()][-3:]

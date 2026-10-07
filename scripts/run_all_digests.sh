@@ -86,6 +86,15 @@ for topic in "${TOPICS[@]}"; do
                 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARN  $topic editorial degraded $MODELS" | tee -a "$LOGFILE" || true
             fi
         fi
+        # A research pass that fell back to the fallback model is its own
+        # signal: it covers only Phase 1 and never feeds the consecutive-day
+        # editorial alert (2026-10-04/05: thin weekend news, not model failure).
+        RUN_RECORD=$(tail -n 1 "$HOME/digests/$CATEGORY_DIR/.runs.log" 2>/dev/null || true)
+        case "$RUN_RECORD" in
+            "${TODAY}T"*" $topic "*" research_fallback="*)
+                echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARN  $topic research fallback research_model=${RUN_RECORD#* research_model=}" | tee -a "$LOGFILE" || true
+                ;;
+        esac
     else
         RC=$?
         END_TS=$(date +%s)

@@ -126,8 +126,11 @@ change a runtime merely to satisfy one project.
 
 OMP is installed through Bun at `~/.bun/bin/omp`.
 
-- Default: `opencode-go/deepseek-v4-flash`
-- Central cloud proxy: `http://192.168.4.92:8082/v1`, placeholder API key `proxy`
+- Roles: default/task `anthropic/claude-opus-5-5:medium`, slow `:max`, smol
+  `anthropic/claude-sonnet-5-5:high`, tiny `anthropic/claude-haiku-4-5-20251001:medium`
+  (Claude login stored in the rig's own `~/.omp`)
+- Central OpenCode Go proxy (idle while the subscriptions are paused):
+  `http://192.168.4.92:8082/v1`, placeholder API key `proxy`
 - Rig-local model provider: `http://192.168.4.103:8080/v1`
 - State and sessions are rig-local under `~/.omp/`; do not copy ThinkPad history or auth.
 - Starting `omp` directly in `/home/carte` automatically adds `--allow-home`; subcommands

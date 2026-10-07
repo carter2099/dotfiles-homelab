@@ -11,7 +11,7 @@ Executors and their boundaries:
 - ``cleanup``: ignore rule + untrack paths matching ``CLEANUP_PATTERNS`` in the
   dotfiles bare repository only.
 - ``deploy`` / ``version_update``: recorded only; the P1 steps own execution.
-- ``code_fix``: the existing isolated worker fix/judge loop (injected by
+- ``code_fix``: the existing repair-worker fix/judge loop (injected by
   ``fixes.phase_7b_fix``), then a PR for a published review commit, with
   auto-merge only when live repository checks allow it (never ``--admin``).
   A finding on steward/dotfiles code (``~/scripts/**``) is repaired in a
@@ -888,7 +888,7 @@ def _code_fix_rows(ctx, section, items, section_result, opener=None):
     if status == "dry-run":
         return [
             _row(section, f, "report_only",
-                 f"Dry run: would send {Path(flat['repo']).name} to the isolated repair worker.",
+                 f"Dry run: would send {Path(flat['repo']).name} to the repair worker.",
                  "validation passed; nothing changed")
             for f, flat in items
         ]
@@ -915,7 +915,7 @@ def _code_fix_rows(ctx, section, items, section_result, opener=None):
             ))
         elif status == "fix-failed" or stop == "worker-unavailable":
             rows.append(_row(section, finding, "failed",
-                             "The isolated repair worker could not run for this finding.",
+                             "The repair worker could not run for this finding.",
                              judge or "worker unavailable", iteration=iteration))
         else:
             reason = (

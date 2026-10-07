@@ -106,7 +106,7 @@ from .audit import (
     _validate_prepared_audit_worker_packet,
     phase_7_audit,
 )
-from .worker import publish_validated_result, run_isolated_fix
+from .worker import publish_validated_result, run_fix
 from . import routing
 
 
@@ -282,13 +282,13 @@ def _merge_fixes_applied(iterations):
 
 
 def _fix_one_section(section_name, confirmed_findings, dry_run, run_dir=None):
-    """Run one bounded fix↔judge iteration through the isolated worker.
+    """Run one bounded fix↔judge iteration through the repair worker.
 
-    The worker owns a disposable snapshot and executes all model/tool/test
-    activity there.  Carter's process receives only a versioned packet and a
-    path-bounded diff; the deterministic publisher creates an isolated review
-    ref only after the existing judge returns ``pass``. The checked-out branch,
-    index, and running application remain unchanged.
+    The worker edits a disposable snapshot and runs all model/tool/test
+    activity there.  The deterministic publisher creates a review ref from
+    the path-bounded diff only after the existing judge returns ``pass``. The
+    checked-out branch, index, and running application remain unchanged.
+    ``run_dir`` is part of the routing ``fix_section`` contract and unused here.
     """
     if dry_run:
         return {
@@ -348,12 +348,7 @@ def _fix_one_section(section_name, confirmed_findings, dry_run, run_dir=None):
         return normalized
 
     for n in range(1, FIX_MAX_ITERS + 1):
-        worker_result = run_isolated_fix(
-            section_name,
-            remaining,
-            run_dir=Path(run_dir) if run_dir is not None else None,
-            iteration=n,
-        )
+        worker_result = run_fix(section_name, remaining, iteration=n)
         raw_fix = worker_result.get("fix_packet") if isinstance(worker_result, dict) else {}
         raw_judge = worker_result.get("judge_packet") if isinstance(worker_result, dict) else {}
         fix_packet = dict(raw_fix) if isinstance(raw_fix, dict) else {}
@@ -366,9 +361,8 @@ def _fix_one_section(section_name, confirmed_findings, dry_run, run_dir=None):
         judge_packet["reviewed"] = _canonical_rows(judge_packet.get("reviewed") or [])
         worker_status = str(worker_result.get("status") or "").lower()
 
-        # Isolation failures are a hard boundary, not a reason to retry an
-        # unconfined model call.  Keep the packet reviewable and stop this
-        # section immediately.
+        # A worker that could not run is a hard stop, not a reason to retry.
+        # Keep the packet reviewable and stop this section immediately.
         if worker_status != "ok":
             proposal_rows = [
                 row
@@ -388,13 +382,13 @@ def _fix_one_section(section_name, confirmed_findings, dry_run, run_dir=None):
                         "finding": _finding_text(f),
                         "ok": False,
                         "note": (
-                            "isolated worker did not run; no source change was accepted: "
+                            "repair worker did not run; no source change was accepted: "
                             + str(worker_result.get("error") or worker_status or "unknown worker failure")
                         )[:500],
                     }
                     for f in remaining
                 ],
-                "summary": str(worker_result.get("error") or "isolated worker unavailable")[:500],
+                "summary": str(worker_result.get("error") or "repair worker unavailable")[:500],
             }
             final_judge = judge_packet
             iter_rec = {

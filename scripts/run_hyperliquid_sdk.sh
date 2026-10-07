@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs the Hyperliquid Ruby SDK autonomous maintenance cycle via omp + opencode-go/glm-5.3.
+# Runs the Hyperliquid Ruby SDK autonomous maintenance cycle via omp + anthropic/claude-opus-5-5:high.
 # Scheduled via systemd timer (hyperliquid-sdk.timer) Mon/Thu at 4am ET.
 # Provider-agnostic: change the --model id to switch providers/models.
 #
@@ -110,8 +110,7 @@ PROMPT='/hyperliquid-run'
 MARKER_BEFORE="$(state_run_marker)"
 
 "$OMP_PATH" -p \
-    --model opencode-go/glm-5.3 \
-    --api-key proxy \
+    --model anthropic/claude-opus-5-5:high \
     --allow-home \
     --config "$HOME/.omp/agent/headless-override.yml" \
     --tools bash,read,write,edit,grep,glob,lsp,todo \
