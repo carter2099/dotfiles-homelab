@@ -79,8 +79,16 @@ def validate_editorial_proposal(
         if candidate.get("candidate_id")
     }
 
+    # Lazy import: news_publish imports this package at module load.
+    from news_publish import _frequency_of, _same_event
+
+    # Same-event matching needs token rarity; the section's candidate pool is
+    # the corpus, as the front page uses the day's editions when no history
+    # corpus is supplied.
+    event_frequency = _frequency_of([{"fresh": list(candidate_by_id.values())}])
     fresh: list[dict] = []
     selected_ids: set[str] = set()
+    selected_sources: list[dict] = []
     raw_fresh = proposal.get("selected_fresh", [])
     if not isinstance(raw_fresh, list):
         warnings.append("selected_fresh was not a list")
@@ -128,7 +136,22 @@ def validate_editorial_proposal(
                 f"(best date {stale_date.date().isoformat()} is outside the 24h window)"
             )
             continue
+        duplicate_of = next(
+            (kept for kept in selected_sources if _same_event(kept, source, event_frequency)),
+            None,
+        )
+        if duplicate_of is not None:
+            # Two write-ups of one event must not fill two section slots
+            # (digest-quality audit 2026-10-07: Agents ran Cohere's North 2
+            # launch from cohere.com and VentureBeat). The earlier-ranked
+            # selection keeps the slot.
+            warnings.append(
+                f"ignored same-event duplicate {candidate_id} "
+                f"(same event as {duplicate_of['candidate_id']})"
+            )
+            continue
         selected_ids.add(candidate_id)
+        selected_sources.append(source)
         fresh.append({
             "candidate_id": candidate_id,
             "rank": len(fresh) + 1,

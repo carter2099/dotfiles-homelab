@@ -2740,7 +2740,9 @@ class DependabotMergeTests(unittest.TestCase):
             "blog": [self._pr(116, "Bump mail from 2.9.0 to 2.9.1",
                               branch="dependabot/bundler/mail-2.9.1"),
                      self._pr(117, "Bump actions/checkout from 6.0.3 to 6.0.4",
-                              branch="dependabot/github_actions/actions/checkout-6.0.4")],
+                              branch="dependabot/github_actions/actions/checkout-6.0.4"),
+                     self._pr(118, "Bump hyperliquid from 1.9.2 to 2.0.0",
+                              branch="dependabot/bundler/hyperliquid-2.0.0")],
             "hyperliquid": [self._pr(1, "Bump a from 1.0.0 to 1.0.1")],
         }
         result, calls = self._run(prs)
@@ -2754,7 +2756,8 @@ class DependabotMergeTests(unittest.TestCase):
         self.assertNotIn("carter2099/hyperliquid", listed)
         self.assertEqual(result["status"], "ok")
         self.assertEqual([(i["repo"], i["number"]) for i in result["needs_carter"]],
-                         [("herdr-web-client", 11)])
+                         [("blog", 118), ("herdr-web-client", 11)])
+        self.assertIn("dependabot-webhook owned", result["needs_carter"][0]["reason"])
         reasons = {(i["repo"], i.get("number")): i["reason"] for i in result["skipped"]}
         self.assertIn("dependabot-webhook", reasons[("blog", 116)])
         self.assertIn("checks not green", reasons[("herdr-web-client", 12)])

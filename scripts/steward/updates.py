@@ -1296,7 +1296,14 @@ def _p1_dependabot_merge(dry_run=False, *, ctx=None):
                 skipped.append({**item, "reason": reason})
 
             if repo in DEPENDABOT_WEBHOOK_BUNDLER_REPOS and branch.startswith("dependabot/bundler/"):
-                skip("bundler update owned by the dependabot-webhook")
+                # The webhook only closes PRs its batch lock already satisfies; a
+                # major it cannot resolve stays open forever unless Carter sees it.
+                bump = _dependabot_bump(pr.get("title"))
+                if bump and bump[3]:
+                    needs_carter.append({**item, "reason": f"major bump {bump[1]} -> {bump[2]} "
+                                                           "(bundler; dependabot-webhook owned)"})
+                else:
+                    skip("bundler update owned by the dependabot-webhook")
                 continue
             if pr.get("isDraft"):
                 skip("draft")

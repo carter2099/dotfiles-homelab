@@ -63,6 +63,11 @@ GREEN_CONCLUSIONS = {"success", "neutral", "skipped"}
 VERIFY_TIMEOUT = 900
 CI_WAIT_SECONDS = 600
 POLL_SECONDS = 15
+# GitHub computes `mergeable` lazily: the first read after a push or base change
+# says UNKNOWN and starts the computation.  Every nightly P9b commit moves main,
+# so steward-code PR #6 read UNKNOWN on 2026-10-09 and was MERGEABLE minutes later.
+MERGEABLE_RECHECKS = 4
+MERGEABLE_RECHECK_SECONDS = 5
 PACKET_ENV = "STEWARD_CODE_STARTUP"
 DONE_ENV = "STEWARD_CODE_STARTUP_DONE"
 _PR_FIELDS = (
@@ -149,6 +154,19 @@ def _gh_json(ctx, args):
         return json.loads(cp.stdout or "null")
     except ValueError:
         return None
+
+
+def _await_mergeable(ctx, number):
+    """Re-read an UNKNOWN mergeable state a few times; return the last value seen."""
+    state = "UNKNOWN"
+    for _ in range(MERGEABLE_RECHECKS):
+        ctx.sleep(MERGEABLE_RECHECK_SECONDS)
+        view = _gh_json(ctx, ["pr", "view", str(number), "--repo", ctx.nwo, "--json", "mergeable"])
+        if isinstance(view, Mapping):
+            state = view.get("mergeable") or state
+        if state != "UNKNOWN":
+            break
+    return state
 
 
 def _parse_time(value):
@@ -424,8 +442,11 @@ def merge_due_prs(ctx: StartupContext) -> dict[str, Any]:
         if recent + len(packet["merged"]) >= MAX_MERGES_PER_NIGHT:
             pending(f"nightly merge limit ({MAX_MERGES_PER_NIGHT}) reached")
             continue
-        if pr.get("mergeable") != "MERGEABLE":
-            pending(f"not mergeable ({pr.get('mergeable') or 'unknown'})")
+        mergeable = pr.get("mergeable")
+        if mergeable == "UNKNOWN":
+            mergeable = _await_mergeable(ctx, number)
+        if mergeable != "MERGEABLE":
+            pending(f"not mergeable ({mergeable or 'unknown'})")
             continue
         head = str(pr.get("headRefOid") or "")
         base = str(pr.get("baseRefName") or ctx.branch)

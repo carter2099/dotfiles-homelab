@@ -533,7 +533,8 @@ def pr(number, *, age_hours=30, labels=("steward-auto",), branch=None, mergeable
 class FakeGitHub:
     """gh backed by the sandbox's bare origin: PR heads live at refs/pull/<n>/head."""
 
-    def __init__(self, sb, prs, *, checks=None, merged=(), update_head_green=True, on_checks=None):
+    def __init__(self, sb, prs, *, checks=None, merged=(), update_head_green=True, on_checks=None,
+                 mergeable_views=None):
         self.sb, self.calls = sb, []
         self.prs = {p["number"]: p for p in prs}
         self.checks = dict(checks or {})
@@ -541,6 +542,7 @@ class FakeGitHub:
         self.merge_commits = {}
         self.update_head_green = update_head_green
         self.on_checks = on_checks  # side effect while the steward waits on CI
+        self.mergeable_views = {n: list(v) for n, v in (mergeable_views or {}).items()}
 
     def og(self, *args, env=None):
         return git("--git-dir", str(self.sb.origin), *args, env=env)
@@ -558,6 +560,9 @@ class FakeGitHub:
             return done(0, json.dumps(list(self.prs.values())))
         if args[:2] == ["pr", "merge"]:
             return self.merge(int(args[2]), args)
+        if args[:2] == ["pr", "view"] and args[-2:] == ["--json", "mergeable"]:
+            views = self.mergeable_views.get(int(args[2])) or ["UNKNOWN"]
+            return done(0, json.dumps({"mergeable": views.pop(0) if len(views) > 1 else views[0]}))
         if args[:2] == ["pr", "view"]:
             return done(0, json.dumps({"state": "MERGED",
                                        "mergeCommit": {"oid": self.merge_commits.get(int(args[2]), "")}}))
@@ -683,8 +688,20 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.merges(gh), [])
         self.assertIn("CONFLICTING", packet["pending"][0]["reason"])
         self.assertNotIn("needs_carter", packet["pending"][0])
-        packet, _ = self.merge([pr(5, mergeable="UNKNOWN", age_hours=24 + 72 + 1)])
+        packet, gh = self.merge([pr(5, mergeable="UNKNOWN", age_hours=24 + 72 + 1)])
+        self.assertIn("UNKNOWN", packet["pending"][0]["reason"])
         self.assertTrue(packet["pending"][0]["needs_carter"])
+        rereads = [c for c in gh.calls if c[:3] == ["pr", "view", "5"]]
+        self.assertEqual(len(rereads), code_pickup.MERGEABLE_RECHECKS)
+
+    def test_unknown_mergeable_is_reread_until_github_computes_it(self):
+        p = self.good_pr(mergeable="UNKNOWN")
+        packet, gh = self.merge([p], mergeable_views={5: ["UNKNOWN", "MERGEABLE"]})
+        self.assertEqual([m["number"] for m in packet["merged"]], [5], packet)
+        packet, gh = self.merge([pr(6, mergeable="UNKNOWN")],
+                                mergeable_views={6: ["CONFLICTING"]})
+        self.assertEqual(self.merges(gh), [])
+        self.assertIn("CONFLICTING", packet["pending"][0]["reason"])
 
     def test_at_most_one_merge_per_night_including_earlier_runs(self):
         a, b = self.good_pr(5, age_hours=40), pr(6, age_hours=30)
