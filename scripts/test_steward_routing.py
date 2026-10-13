@@ -302,6 +302,18 @@ class DocFixTests(SandboxTest):
         self.assertEqual(self.sb.model_calls, [])
         self.assertEqual(git("-C", str(self.sb.notes), "log", "-1", "--format=%s"), "dup")
 
+    def test_second_report_of_an_already_fixed_line_is_done_not_carters(self):
+        first = self.one("agents-md-truth", self.doc_fix())
+        self.assertEqual(first["status"], "done", first)
+        head = git("-C", str(self.sb.notes), "rev-parse", "HEAD")
+        calls = len(self.sb.model_calls)
+        again = self.one("docs-accuracy", self.doc_fix())
+        self.assertEqual(again["status"], "done", again)
+        self.assertIn("already has the corrected text", again["summary"])
+        self.assertEqual(again["commit"], "")
+        self.assertEqual(len(self.sb.model_calls), calls)
+        self.assertEqual(git("-C", str(self.sb.notes), "rev-parse", "HEAD"), head)
+
     def test_dirty_file_is_refused(self):
         dirty = self.sb.notes / "docs" / "homelab" / "dirty.md"
         dirty.write_text("Old fact here.\nCarter's uncommitted line.\n")

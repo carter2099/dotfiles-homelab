@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -545,6 +545,76 @@ def test_recent_coverage_ledger_blocks_other_section_repeats() -> None:
             == ["Genuinely new agent story", "Outside window story"],
             f"recently covered stories re-entered another section: {fresh!r}",
         )
+
+
+def test_recent_coverage_blocks_same_event_from_new_outlet() -> None:
+    """Another outlet's report of a recently covered event cannot re-enter.
+
+    Regression for 2026-10-09/10: AI & Tech ran Google's Gemini agent launch
+    (TechCrunch); the next day Agents led with it via dataconomy, a URL no
+    artifact held. Phase 2b's Jev-"same" rows for it carried covered URLs.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        today = "2026-10-10"
+        run_dir = root / catalog.TOPICS["agentic-platform"]["category"] / today
+        run_dir.mkdir(parents=True)
+        prior = root / catalog.TOPICS["ai-tech"]["category"] / "2026-10-09"
+        prior.mkdir(parents=True)
+        techcrunch = "https://techcrunch.com/2026/10/08/google-brings-agentic-ai-to-gemini-starting-with-businesses/"
+        sibling = "https://9to5google.com/2026/10/08/gemini-agent-google-cloud/"
+        blog = "https://cloud.google.com/blog/products/ai-machine-learning/welcome-to-gemini-at-work-2026"
+        (prior / "06-curated.json").write_text(json.dumps({"fresh": [{
+            "url": techcrunch,
+            "attention": {"status": "ok", "evidence": {
+                "same_event_urls": [{"url": sibling, "domain": "9to5google.com",
+                                     "title": "Gemini agent", "source": "panel"}],
+                "same_event_keys": ["neowin.net/news/google-gemini-agent-for-work"],
+            }},
+        }]}))
+        (prior / "referenced-urls.json").write_text(json.dumps({
+            "schema_version": catalog.REFERENCED_URLS_SCHEMA_VERSION,
+            "generated_at": "2026-10-09T08:00:00+00:00",
+            "stories": [{"url": techcrunch, "referenced_urls": [blog]}],
+        }))
+        # Today, World already selected a story another candidate's evidence names.
+        world_today = root / catalog.TOPICS["world"]["category"] / today
+        world_today.mkdir(parents=True)
+        (world_today / "06-curated.json").write_text(json.dumps({
+            "fresh": [{"url": "https://www.cnbc.com/2026/10/10/trump-putin-russian-diesel.html"}],
+        }))
+
+        ledger = contracts.load_recent_coverage_ledger(root, date(2026, 10, 10), research.CROSS_DAY_DEDUP_DAYS)
+        check(contracts.coverage_key(sibling) in ledger, sorted(ledger))
+        check("neowin.net/news/google-gemini-agent-for-work" in ledger, sorted(ledger))
+
+        def candidate(title: str, url: str, keys: list[str]) -> dict:
+            return {
+                "title": title, "url": url, "editorial_significance": "high", "date_published": "2026-10-09",
+                "attention": {"status": "ok", "evidence": {"same_event_keys": keys}},
+            }
+
+        dataconomy = "https://dataconomy.com/2026/10/09/google-unveils-unified-gemini-ai-agent"
+        fresh = [
+            candidate("Google unveils unified Gemini AI agent", dataconomy, [
+                contracts.coverage_key(dataconomy), contracts.coverage_key(blog),
+            ]),
+            candidate("Diesel deal reaction", "https://example.com/2026/10/10/diesel-deal-reaction",
+                      ["cnbc.com/2026/10/10/trump-putin-russian-diesel.html"]),
+            candidate("Genuinely new agent story", "https://example.com/new-agent-story",
+                      ["example.com/new-agent-story", "other.example/2026/10/10/new-agent-coverage"]),
+        ]
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(catalog.TOPICS["agentic-platform"], fresh, run_dir)
+        check([item["title"] for item in queue] == ["Genuinely new agent story"], f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        rejected = {entry["url"]: entry for entry in artifact["recent_coverage_rejected"]}
+        check(rejected[dataconomy]["matched_keys"] == [contracts.coverage_key(blog)], rejected)
+        check("previous" in rejected[dataconomy]["rejection_reason"], rejected)
+        diesel = rejected["https://example.com/2026/10/10/diesel-deal-reaction"]
+        check("another digest today" in diesel["rejection_reason"], diesel)
+        check(len(rejected) == 2, rejected)
+
 
 
 def _shared_url_findings(today: str) -> tuple[str, list[dict]]:
@@ -2875,6 +2945,7 @@ def main() -> None:
         test_rank_resume_fingerprint_includes_cross_topic_urls,
         test_phase_two_cross_day_dedup_window_contract,
         test_recent_coverage_ledger_blocks_other_section_repeats,
+        test_recent_coverage_blocks_same_event_from_new_outlet,
         test_phase_two_shared_url_findings_keep_their_own_metadata,
         test_phase_two_drops_unidentified_shared_url_finding,
         test_phase_two_restores_approvals_with_altered_urls,

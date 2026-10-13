@@ -496,6 +496,9 @@ def measured_attention(
             "adjudication": evidence.get("adjudication") or {},
             # Jev-"same" publisher articles; Phase 3 swaps one in for a hard-paywalled URL.
             "same_event_urls": evidence.get("same_event_urls") or [],
+            # Coverage keys of every Jev-"same" row; Phase 3 drops the story when
+            # one is already in the recent-coverage ledger or another section today.
+            "same_event_keys": evidence.get("same_event_keys") or [],
         },
     }
     if not measured:

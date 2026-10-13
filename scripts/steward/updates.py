@@ -106,6 +106,35 @@ from .runtime import (
 P1_APT_TIMEOUT = 900
 _P1_FAILURE_STATUSES = frozenset({"failed", "error", "timeout", "started"})
 
+# Registries throttle bursts with `toomanyrequests` (GHCR: a shared per-namespace
+# limit, retry-after in microseconds) right after a popular release.  One such
+# Open WebUI pull failed the whole 2026-10-11 run although nothing had changed
+# and the next night's pull succeeded.  Retry a rate limit a few times; if it
+# persists the caller reports a warning (degraded) and retries next night.
+PULL_RATE_LIMIT_DELAYS = (30, 120)
+
+
+def _pull_rate_limited(exc):
+    """True when a failed `docker pull` was refused by a registry rate limit."""
+    if not isinstance(exc, subprocess.CalledProcessError):
+        return False
+    text = f"{_p1_output_text(exc.stderr)}\n{_p1_output_text(exc.stdout)}".lower()
+    return "toomanyrequests" in text or "429 too many requests" in text
+
+
+def _docker_pull(ref, *, timeout):
+    """`docker pull ref`, retrying registry rate limits; raises like run()."""
+    delays = (0, *PULL_RATE_LIMIT_DELAYS)
+    for attempt, delay in enumerate(delays):
+        if delay:
+            time.sleep(delay)
+        try:
+            return run(["docker", "pull", ref], capture_output=True, text=True, timeout=timeout)
+        except subprocess.CalledProcessError as exc:
+            if attempt == len(delays) - 1 or not _pull_rate_limited(exc):
+                raise
+
+
 
 def _p1_output_text(value):
     if value is None:
@@ -417,13 +446,15 @@ def _p1_freshrss_update(tags=None):
     new_ref = f"freshrss/freshrss:{latest_tag}@{target['digest']}"
     print(f"  freshrss: {current_tag} -> {latest_tag}")
     try:
-        run(["docker", "pull", new_ref], capture_output=True, text=True, timeout=300)
+        _docker_pull(new_ref, timeout=300)
     except Exception as exc:
         # Nothing in production changed yet: report without touching compose.
         msg = str(exc)
         if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
             msg += f" | stderr: {exc.stderr[-500:]}"
-        return {"step": "freshrss", "status": "failed", "reason": "pull failed",
+        limited = _pull_rate_limited(exc)
+        return {"step": "freshrss", "status": "warning" if limited else "failed",
+                "reason": "pull rate-limited by the registry" if limited else "pull failed",
                 "current_tag": current_tag, "latest_tag": latest_tag, "error": msg}
     try:
         FRESHRSS_COMPOSE.write_text(compose_text.replace(old_ref, new_ref, 1))
@@ -750,10 +781,12 @@ def _owui_transaction(current_tag, target_tag, compose_text, common):
         return skip(f"preflight: {space}")
 
     # Preload and verify the exact image while the old container serves.
-    out, err, code = run_capture_ok(["docker", "pull", image_new], timeout=900)
-    if code != 0:
-        return {**common, "status": "failed",
-                "error": f"image pull failed: {(err or out).strip()[-300:]}"}
+    try:
+        _docker_pull(image_new, timeout=900)
+    except Exception as exc:
+        detail = exc.stderr if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        return {**common, "status": "warning" if _pull_rate_limited(exc) else "failed",
+                "error": f"image pull failed: {_p1_output_text(detail).strip()[-300:]}"}
     label, digest, image_id = _owui_image_identity(image_new)
     if label != target_tag or not digest:
         return {**common, "status": "failed",
@@ -1574,7 +1607,7 @@ def _p1_searxng_update(tags=None, now=None):
     new_text = compose_text.replace(old_ref, target_ref, 1)
     print(f"    bumping searxng: {current_tag} -> {target_tag}")
     try:
-        run(["docker", "pull", target_ref], capture_output=True, text=True, timeout=300)
+        _docker_pull(target_ref, timeout=300)
         compose.write_text(new_text)
         run(["docker", "compose", "-f", str(compose), "up", "-d"],
             cwd=compose.parent, capture_output=True, text=True, timeout=180)

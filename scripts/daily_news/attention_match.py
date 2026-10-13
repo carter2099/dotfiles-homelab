@@ -382,6 +382,7 @@ def measure(
         "recent": {key: value for key, value in sorted(recent.items()) if value},
         "samples": samples,
         "same_event_urls": same_event_urls(docs, index, own),
+        "same_event_keys": same_event_keys(docs, index),
         "first_seen": first_seen,
         "adjudication": {
             "documents": len(docs), "accepted": len(accepted),
@@ -433,3 +434,23 @@ def same_event_urls(docs: list[dict[str, Any]], index: Index, own: str) -> list[
                     "title": (row.get("title") or "")[:160], "source": row["src"],
                 })
     return [entry for _, entry in sorted(best.values(), key=lambda pair: pair[0])][:MAX_SAME_EVENT_URLS]
+
+
+def same_event_keys(docs: list[dict[str, Any]], index: Index) -> list[str]:
+    """Coverage keys of every row Jev judged to report the candidate's exact event.
+
+    Any source counts, uncapped, but only a row's primary URLs: aggregator ``more``
+    lists (Kagi clusters, Techmeme) can span developments. Short paths are skipped
+    as in ``Index``. Phase 3 matches these against the recent-coverage ledger.
+    """
+    keys: set[str] = set()
+    for doc in docs:
+        if doc.get("relation") != "same":
+            continue
+        for row_index in doc["rows"]:
+            row = index.rows[row_index]
+            for url in row.get("urls") or ([row["url"]] if row.get("url") else []):
+                key = coverage_key(url)
+                if key and len(key.split("/", 1)[-1]) > 8:
+                    keys.add(key)
+    return sorted(keys)

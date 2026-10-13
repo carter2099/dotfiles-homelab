@@ -353,8 +353,11 @@ def load_recent_coverage_ledger(digests_root: Path, today: date, days: int) -> s
     One ledger spans every category so a story cannot repeat under a different
     section the next day (2026-09-16/17: Salesforce AIforce ran in AI & Tech
     and then Agents). Per category and day it reads:
-      1. <category>/<date>/06-curated.json — structured fresh URLs
-         (authoritative; run dirs are auto-cleaned after 14 days);
+      1. <category>/<date>/06-curated.json — structured fresh URLs plus each
+         story's Phase 2b same-event evidence (``same_event_urls`` and
+         ``same_event_keys``, Jev-"same" articles about the covered event), so
+         another outlet's report of it is blocked (authoritative; run dirs are
+         auto-cleaned after 14 days);
       2. <category>/<date>/referenced-urls.json — canonical/source links the
          covered articles cited, so the same event under another URL is blocked;
       3. <category>/<date>.md — archived Phase 9 Markdown links, only when the
@@ -379,6 +382,14 @@ def load_recent_coverage_ledger(digests_root: Path, today: date, days: int) -> s
                     for story in data.get("fresh", []):
                         if isinstance(story, dict):
                             add(story.get("url", ""))
+                            evidence = (story.get("attention") or {}).get("evidence") or {}
+                            for entry in evidence.get("same_event_urls") or []:
+                                if isinstance(entry, dict):
+                                    add(entry.get("url", ""))
+                            covered.update(
+                                key for key in evidence.get("same_event_keys") or []
+                                if isinstance(key, str) and key
+                            )
                     structured = True
             except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
                 pass

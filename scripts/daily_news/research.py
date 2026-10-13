@@ -887,6 +887,28 @@ def phase_3_rank(
         item for item in fresh
         if coverage_key(item.get("url", "")) not in other_topic_urls
     ]
+    # Event-level dedup: a new outlet's URL slips past the URL checks above, but
+    # Phase 2b's Jev-"same" rows often carry an already-covered article's URL
+    # (10-10 Agents repeated the 10-09 Gemini agent launch via dataconomy).
+    recent_coverage_rejected = []
+    kept_fresh = []
+    for item in eligible_fresh:
+        evidence = (item.get("attention") or {}).get("evidence") or {}
+        keys = set(evidence.get("same_event_keys") or [])
+        matched = sorted(keys & recent_coverage)
+        reason = f"same event covered in the previous {CROSS_DAY_DEDUP_DAYS} days"
+        if not matched:
+            matched = sorted(keys & other_topic_urls)
+            reason = "same event already selected by another digest today"
+        if not matched:
+            kept_fresh.append(item)
+            continue
+        recent_coverage_rejected.append({
+            "url": item.get("url", ""), "title": item.get("title", ""),
+            "matched_keys": matched, "rejection_reason": reason,
+        })
+        print(f"  [Phase 3 event dedup] dropped {item.get('url', '')}: {reason} ({', '.join(matched[:3])})")
+    eligible_fresh = kept_fresh
     # URL-host validation: a candidate whose URL sits on a publisher asset CDN
     # (e.g. assets.theregister.com) is not an article and must never reach
     # fetch or curation (digest-quality audit 2026-08-24: research invented
@@ -934,6 +956,7 @@ def phase_3_rank(
         "phase_4_queue": phase_4_queue,
         "pool_a": pool_a,
         "cross_topic_rejected": cross_topic_rejected,
+        "recent_coverage_rejected": recent_coverage_rejected,
         "paywall_substituted": paywall_substituted,
         "paywall_dropped": paywall_dropped,
         "status": "ok" if phase_4_queue else "empty",

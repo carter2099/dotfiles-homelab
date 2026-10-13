@@ -1879,7 +1879,7 @@ class OpenWebUIUpdateTests(unittest.TestCase):
                 "published_at": published, "body": body}
 
     def _run(self, tmp, *, verify=(("", {}),), db_state=None, dry_run=False,
-             release=None):
+             release=None, pull=None):
         """Run the full guarded transaction against fakes; return (result, calls)."""
         compose = Path(tmp) / "docker-compose.yml"
         compose.write_text(self.OLD)
@@ -1909,6 +1909,7 @@ class OpenWebUIUpdateTests(unittest.TestCase):
             patch.object(updates, "_owui_api_version", return_value="0.11.1"),
             patch.object(updates, "_owui_free_space_problem", return_value=""),
             patch.object(updates, "run_capture_ok", return_value=("", "", 0)),
+            patch.object(updates, "_docker_pull", side_effect=pull),
             patch.object(updates, "_owui_image_identity",
                          return_value=("0.11.3", "ghcr.io/open-webui/open-webui@sha256:ab", "id")),
             patch.object(updates, "_owui_sqlite", return_value=("", "", 0)),
@@ -1936,6 +1937,39 @@ class OpenWebUIUpdateTests(unittest.TestCase):
         self.assertEqual(recorded["status"], "ok")
         archive = next(args for args in calls["sudo"] if "-czpf" in args)
         self.assertIn("--exclude=./cache", archive)
+
+    def test_rate_limited_pull_is_a_warning_and_mutates_nothing(self):
+        limited = subprocess.CalledProcessError(
+            1, ["docker", "pull"], stderr="toomanyrequests: retry-after: 402.569µs, allowed: 44000/minute")
+        with tempfile.TemporaryDirectory() as tmp:
+            result, calls, compose = self._run(tmp, pull=limited)
+        self.assertEqual(result["status"], "warning")
+        self.assertIn("toomanyrequests", result["error"])
+        self.assertEqual(compose, self.OLD)
+        self.assertEqual(calls, {"compose": [], "sudo": [], "verify": []})
+        p1 = updates._finish_p1(None, {"steps": [result]}, progress=lambda data: None)
+        self.assertEqual(p1["phase_status"], "degraded")
+        with tempfile.TemporaryDirectory() as tmp:
+            result, _, _ = self._run(tmp, pull=subprocess.CalledProcessError(
+                1, ["docker", "pull"], stderr="manifest unknown"))
+        self.assertEqual(result["status"], "failed")
+
+    def test_docker_pull_retries_only_registry_rate_limits(self):
+        limited = subprocess.CalledProcessError(1, ["docker", "pull"], stderr="toomanyrequests")
+        other = subprocess.CalledProcessError(1, ["docker", "pull"], stderr="manifest unknown")
+        with patch.object(updates.time, "sleep") as sleep:
+            with patch.object(updates, "run", side_effect=[limited, "pulled"]) as run:
+                self.assertEqual(updates._docker_pull("img:1", timeout=5), "pulled")
+            self.assertEqual(run.call_count, 2)
+            sleep.assert_called_once_with(updates.PULL_RATE_LIMIT_DELAYS[0])
+            with patch.object(updates, "run", side_effect=other) as run:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    updates._docker_pull("img:1", timeout=5)
+            self.assertEqual(run.call_count, 1)
+            with patch.object(updates, "run", side_effect=limited) as run:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    updates._docker_pull("img:1", timeout=5)
+            self.assertEqual(run.call_count, 1 + len(updates.PULL_RATE_LIMIT_DELAYS))
 
     def test_failed_gate_restores_image_pin_and_data(self):
         with tempfile.TemporaryDirectory() as tmp:

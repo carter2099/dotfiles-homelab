@@ -367,6 +367,12 @@ def execute_doc_fix(section, finding, ctx):
         except UnicodeDecodeError:
             raise RouteRejected(f"{doc} is not UTF-8 text") from None
         count = content.count(old_text)
+        if count == 0 and content.count(new_text) == 1:
+            # Two audit sections often report the same stale line; once the first
+            # route fixes it, the second must not ask Carter about a solved problem.
+            return _row(section, finding, "done",
+                        f"{doc.name} already has the corrected text; nothing needed changing.",
+                        "replacement text already present (e.g. applied by an earlier route this run)")
         if count != 1:
             raise RouteRejected(
                 f"the text to replace occurs {count} times in {doc.name}; it must occur exactly once"

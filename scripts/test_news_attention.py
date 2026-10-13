@@ -6,6 +6,7 @@ import io
 import json
 import zipfile
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from daily_news import attention_match, attention_sources
 from daily_news.attention import (
@@ -212,6 +213,49 @@ def test_same_event_urls_are_jev_same_publisher_articles_only() -> None:
           "a document without a Jev relation was offered as an alternate")
 
 
+def test_same_event_keys_cover_every_same_row() -> None:
+    rows = [
+        {"src": "hn", "t": END_S - 900, "id": "9", "url": "https://cloud.example/blog/products/quasar-9-launch",
+         "title": "Quasar 9 is here", "points": 2, "comments": 1},
+        {"src": "jetstream", "t": END_S - 800, "author": "a9", "url": "https://social-pick.example/quasar-9-story",
+         "urls": ["https://social-pick.example/quasar-9-story",
+                  "https://www.review.example/q9-hands-on-review/?utm_source=bsky"],
+         "title": "Quasar 9 ships", "text": ""},
+        # A cluster's lead article counts; its `more` links can span other developments.
+        {"src": "kagi", "t": END_S - 700, "url": "https://kagi-lead.example/quasar-nine-lead",
+         "more": ["https://cluster-sibling.example/acme-earnings-preview"], "unique_domains": 20,
+         "title": "Acme ships Quasar 9"},
+        {"src": "techmeme", "t": END_S - 600, "rank": 3, "url": "https://tm-lead.example/2026/09/24/quasar-9",
+         "more": ["https://tm-more.example/2026/09/24/acme-ceo-interview"], "title": "Acme ships Quasar 9"},
+        # Too short a path to identify one article.
+        {"src": "gkg", "t": END_S - 500, "domain": "short.example", "url": "https://short.example/q9",
+         "title": "Quasar 9"},
+        {"src": "gkg", "t": END_S - 400, "domain": "related.example",
+         "url": "https://related.example/2026/09/24/quasar-9-analysis", "title": "What Quasar 9 means"},
+    ]
+    relations = ["same", "same", "same", "same", "same", "related"]
+    index = attention_match.Index(rows)
+    documents = [{"key": f"doc{i}", "rows": [i], "score": 0.5, "band": "strong", "src": row["src"],
+                  "title": row["title"], "relation": relation, "decided_by": "jev"}
+                 for i, (row, relation) in enumerate(zip(rows, relations))]
+    found = attention_match.measure(CANDIDATE, documents, index, window_end_s=END_S, sample_fraction=0.05)
+    check(found["same_event_keys"] == [
+        "cloud.example/blog/products/quasar-9-launch",
+        "kagi-lead.example/quasar-nine-lead",
+        "review.example/q9-hands-on-review",
+        "social-pick.example/quasar-9-story",
+        "tm-lead.example/2026/09/24/quasar-9",
+    ], found["same_event_keys"])
+    attention, _ = measured_attention(found, section="ai-tech", measured_sources=ALL_SOURCES,
+                                      references={}, window_end=WINDOW_END, first_seen=found["first_seen"])
+    check(attention["evidence"]["same_event_keys"] == found["same_event_keys"], attention["evidence"])
+    # Evidence measured before the field existed reads as no keys.
+    legacy = {key: value for key, value in found.items() if key != "same_event_keys"}
+    attention, _ = measured_attention(legacy, section="ai-tech", measured_sources=ALL_SOURCES,
+                                      references={}, window_end=WINDOW_END, first_seen=found["first_seen"])
+    check(attention["evidence"]["same_event_keys"] == [], attention["evidence"])
+
+
 def test_a_failed_adjudication_is_reported_per_story_and_stops_during_an_outage() -> None:
     class DownFor:
         def __init__(self, headline: str | None) -> None:
@@ -255,6 +299,31 @@ def test_measured_zero_is_not_unavailable() -> None:
     check(zero["status"] == "no_matches", zero)
     check(zero["attention_now"] == 0 and zero["digest_prominence"] == 0 and zero["confidence"] > 0, zero)
     check(set(zero["normalized_signals"]) == set(section_sources("world")), zero)
+
+
+def test_quiet_publisher_sitemap_is_a_measured_zero_not_a_failure() -> None:
+    ns = b'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
+    pages = {
+        "https://www.quiet.example/robots.txt": b"Sitemap: https://www.quiet.example/googlenews.xml\n"
+                                                b"Sitemap: https://www.quiet.example/news-archive.xml\n",
+        "https://www.quiet.example/googlenews.xml": b"<urlset " + ns + b"></urlset>",
+        "https://www.quiet.example/news-archive.xml": b"<sitemapindex " + ns + b"><sitemap>"
+            b"<loc>https://www.quiet.example/2023.xml</loc></sitemap></sitemapindex>",
+        "https://www.quiet.example/2023.xml": b"<urlset " + ns + b"><url><loc>https://www.quiet.example/old"
+                                              b"</loc></url></urlset>",
+        "https://www.broken.example/robots.txt": b"Sitemap: https://www.broken.example/news.xml\n",
+        "https://www.broken.example/news.xml": b"<urlset " + ns + b"><url><loc>https://www.broken.example/x"
+                                               b"</loc></url></urlset>",
+    }
+    ctx = SimpleNamespace(get=lambda url, params=None: (200, pages[url]) if url in pages else (404, b""))
+    check(attention_sources._panel_publisher(ctx, "quiet.example", "sitemap", None) == [],
+          "an empty news urlset means the publisher posted nothing in the window")
+    try:
+        attention_sources._panel_publisher(ctx, "broken.example", "sitemap", None)
+    except RuntimeError:
+        pass
+    else:
+        check(False, "a sitemap whose entries carry no news titles is still a failed publisher")
 
 
 def test_a_missing_source_is_left_out_instead_of_counted_as_zero() -> None:
@@ -468,8 +537,10 @@ def main() -> None:
         test_same_event_counts_once_per_write_up_and_excludes_wires_and_self,
         test_related_coverage_counts_at_half_weight,
         test_same_event_urls_are_jev_same_publisher_articles_only,
+        test_same_event_keys_cover_every_same_row,
         test_a_failed_adjudication_is_reported_per_story_and_stops_during_an_outage,
         test_measured_zero_is_not_unavailable,
+        test_quiet_publisher_sitemap_is_a_measured_zero_not_a_failure,
         test_a_missing_source_is_left_out_instead_of_counted_as_zero,
         test_failed_jev_importance_leaves_only_that_story_at_editorial_points,
         test_reference_scales_follow_history_once_it_is_deep_enough,

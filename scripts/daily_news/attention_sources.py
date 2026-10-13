@@ -287,6 +287,14 @@ def parse_news_sitemap(body: bytes, domain: str) -> tuple[list[Row], list[str]]:
     return rows, []
 
 
+def _is_empty_urlset(body: bytes) -> bool:
+    """True for a parseable sitemap <urlset> that lists no URLs."""
+    if body[:2] == b"\x1f\x8b":
+        body = gzip.decompress(body)
+    root = ET.fromstring(body)
+    return _local(root.tag) == "urlset" and not any(_local(child.tag) == "url" for child in root)
+
+
 def parse_feed(body: bytes, domain: str) -> list[Row]:
     """Rows from an RSS 2.0, RDF, or Atom feed."""
     root = ET.fromstring(body)
@@ -423,6 +431,7 @@ def _panel_publisher(ctx: _Context, domain: str, kind: str, url: str | None) -> 
             link for link in re.findall(r"(?im)^\s*sitemap:\s*(\S+)", text)
             if re.search(r"news|google", link, re.I)
         ][:3]
+    empty = False
     for sitemap in candidates:
         status, body = ctx.get(sitemap)
         if status != 200:
@@ -436,6 +445,12 @@ def _panel_publisher(ctx: _Context, domain: str, kind: str, url: str | None) -> 
                 break
         if rows:
             return rows
+        empty = empty or _is_empty_urlset(body)
+    if empty:
+        # A well-formed news sitemap that lists nothing is a measured zero (a
+        # publisher quiet for the whole window), not a failed source; failing it
+        # turned the whole panel `partial` on quiet weekends.
+        return []
     raise RuntimeError("no parseable news sitemap")
 
 

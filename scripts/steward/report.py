@@ -418,6 +418,7 @@ def _p1_status_label(status):
         "started": "STARTED (INCOMPLETE)",
         "error": "ERROR",
         "reverted": "ROLLED BACK",
+        "warning": "DEFERRED",
     }.get(status, "FAILED")
 
 
@@ -452,6 +453,8 @@ def _openwebui_update_text(step):
         return f"open-webui: {pre} -> {post}", "#2a2a36"
     if status == "rolled_back":
         return f"open-webui: update to {latest} rolled back — {detail}", "#e65100"
+    if status == "warning":
+        return f"open-webui: update to {latest} deferred — {detail}", "#e65100"
     if status in _P1_FAILURE_STATUSES:
         return f"open-webui: {_p1_status_label(status)} — {detail}", "#c62828"
     return "", ""
@@ -692,8 +695,9 @@ def _html_updates(applied_data):
             if status == "bumped":
                 lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
                              f'freshrss: {s.get("current_tag")} -> {s.get("latest_tag")}</p>')
-            elif status in _P1_FAILURE_STATUSES | {"reverted"}:
-                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
+            elif status in _P1_FAILURE_STATUSES | {"reverted", "warning"}:
+                color = "#e65100" if status == "warning" else "#c62828"
+                lines.append(f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
                              f'freshrss: {_p1_status_label(status)} — '
                              f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
 
