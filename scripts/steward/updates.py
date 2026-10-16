@@ -496,6 +496,11 @@ OPENWEBUI_REQUIRED_TABLES = (
 )
 OPENWEBUI_EXTRA_TABLES = ("auth", "chat_message", "folder")
 OPENWEBUI_HEALTH_TIMEOUT = 180
+# A docker-ce upgrade restarts the daemon minutes before this step; on
+# 2026-10-15 the container still read health=starting and the preflight
+# skipped the update.  Give a starting container this long to turn healthy.
+OPENWEBUI_PREFLIGHT_STARTING_TIMEOUT = 120
+OPENWEBUI_PREFLIGHT_POLL = 5
 OPENWEBUI_TAR_TIMEOUT = 1800
 _OWUI_LOG_ERROR = re.compile(
     r"(?im)^.*(?:traceback \(most recent call last\)"
@@ -771,6 +776,11 @@ def _owui_transaction(current_tag, target_tag, compose_text, common):
 
     # Preflight: never touch a deployment that is not already healthy.
     state = _owui_container_state()
+    deadline = time.monotonic() + OPENWEBUI_PREFLIGHT_STARTING_TIMEOUT
+    while (state.get("status") == "running" and state.get("health") == "starting"
+           and time.monotonic() < deadline):
+        time.sleep(OPENWEBUI_PREFLIGHT_POLL)
+        state = _owui_container_state()
     if state.get("status") != "running" or state.get("health") != "healthy":
         return skip(f"preflight: open-webui is not running+healthy ({state or 'not found'})")
     running = _owui_api_version()

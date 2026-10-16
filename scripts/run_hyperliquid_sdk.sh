@@ -15,7 +15,7 @@
 #   5  the run moved HEAD but HEAD is not on origin/dev (unpushed commit), or
 #      origin/dev could not be fetched to prove it
 #   6  the clone gate failed: a fresh clone of origin/dev is red under
-#      `RBENV_VERSION=3.4.10 BUNDLE_FROZEN=true bundle exec rake` (no key)
+#      `RBENV_VERSION=3.4.11 BUNDLE_FROZEN=true bundle exec rake` (no key)
 #   other  omp's own non-zero exit status (pipefail)
 # Post-conditions 4-6 run outside the model and have no skip switch; the
 # offline verifier (verify-hyperliquid-guard.sh) exercises them against a
@@ -179,8 +179,8 @@ log_line "clone gate: origin/dev ${gate_sha:0:12} in $CLONE_DIR/hyperliquid"
 if ! (
     cd "$CLONE_DIR/hyperliquid" \
         && env -u HYPERLIQUID_PRIVATE_KEY -u BUNDLE_GEMFILE -u RUBYOPT \
-            RBENV_VERSION=3.4.10 BUNDLE_FROZEN=true bundle exec rake
+            RBENV_VERSION=3.4.11 BUNDLE_FROZEN=true bundle exec rake
 ); then
-    fail_with 6 "FATAL: clone gate red: RBENV_VERSION=3.4.10 BUNDLE_FROZEN=true bundle exec rake failed on a fresh clone of origin/dev ${gate_sha:0:12}"
+    fail_with 6 "FATAL: clone gate red: RBENV_VERSION=3.4.11 BUNDLE_FROZEN=true bundle exec rake failed on a fresh clone of origin/dev ${gate_sha:0:12}"
 fi
 log_line "ok: clone gate green on origin/dev ${gate_sha:0:12}"

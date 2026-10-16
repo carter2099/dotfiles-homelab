@@ -769,19 +769,40 @@ def auto_merge_eligibility(ctx, repo_name, nwo, branch, cwd=None):
     rows = runs.get("workflow_runs") if isinstance(runs, Mapping) else None
     if not isinstance(rows, list):
         return False, "could not read recent workflow runs"
-    evidence, newer_workflows = [], set()
+    evidence, newer_workflows, green_shas, later_greens = [], set(), {}, {}
     for row in rows:  # newest first
-        workflow = row.get("workflow_id") if isinstance(row, Mapping) else None
-        superseded = (isinstance(row, Mapping) and row.get("conclusion") == "cancelled"
+        if not isinstance(row, Mapping):
+            evidence.append(row)
+            continue
+        workflow = row.get("workflow_id")
+        superseded = (row.get("conclusion") == "cancelled"
                       and workflow is not None and workflow in newer_workflows)
         if workflow is not None:
             newer_workflows.add(workflow)
         if not superseded:
             evidence.append(row)
+            later_greens[id(row)] = list(green_shas.get(workflow, ()))
+        if workflow is not None and row.get("conclusion") == "success" and row.get("head_sha"):
+            green_shas.setdefault(workflow, []).append(row["head_sha"])
+
+    def recovered(row):
+        # A red run fixed forward: a newer run of the same workflow succeeded on a
+        # commit that contains the red one.  herdr-web-client 519a0f0 (2026-10-09)
+        # was fixed by the next commit, yet stayed in the window; with no merges
+        # there were no new push runs to clear it, so Dependabot PRs deadlocked.
+        # The newest run of each workflow has no newer green, so it must pass.
+        bad_sha = row.get("head_sha")
+        for good_sha in later_greens.get(id(row), ()) if bad_sha else ():
+            compare = _gh_json(ctx, ["api", f"repos/{nwo}/compare/{bad_sha}...{good_sha}"], cwd)
+            if isinstance(compare, Mapping) and compare.get("status") in ("ahead", "identical"):
+                return True
+        return False
+
     rows = evidence[:AUTO_MERGE_RECENT_RUNS]
     if len(rows) < AUTO_MERGE_RECENT_RUNS:
         return False, f"fewer than {AUTO_MERGE_RECENT_RUNS} completed push runs on {branch}"
-    bad = [r for r in rows if not isinstance(r, Mapping) or r.get("conclusion") != "success"]
+    bad = [r for r in rows if not isinstance(r, Mapping)
+           or (r.get("conclusion") != "success" and not recovered(r))]
     if bad:
         return False, f"{len(bad)} of the last {AUTO_MERGE_RECENT_RUNS} {branch} push runs did not succeed"
     return True, "required checks, auto-merge setting, and recent CI all pass"

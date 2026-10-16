@@ -286,8 +286,68 @@ class CitedExcerptTests(unittest.TestCase):
         self.assertIn("### scripts/x.py:1-2\n0001| one\n0002| two", text)
         self.assertIn("### digests/steward/2026-10-01/01-applied.json:1-1\n0001| applied", text)
         _, records = audit._build_cited_excerpts(
-            [_finding(evidence="01-applied.json:1")], None)
-        self.assertEqual(records[0]["status"], "not found")
+            [_finding(evidence="01-applied.json:1"), _finding(evidence="02-missing.json:1")], None)
+        # Without run_dir the bare name falls back to unique suffix resolution.
+        self.assertEqual(records[0], {
+            "path": "digests/steward/2026-10-01/01-applied.json", "start": 1, "end": 1,
+            "status": "ok", "cited": "01-applied.json",
+        })
+        self.assertEqual(records[1]["status"], "not found")
+
+    def test_bare_citation_resolves_via_sibling_citation_directory(self):
+        pub = "digests/news/publications"
+        self._write(f"{pub}/2026-10-13/world.json", ["{", '  "dup": 1,', '  "dup": 1', "}"])
+        self._write(f"{pub}/2026-10-13/tech.json", ["{}"])
+        self._write(f"{pub}/2026-10-12/world.json", ["older"])
+        findings = [_finding(evidence=f"{pub}/2026-10-13/tech.json:1 world.json:2-3")]
+        text, records = audit._build_cited_excerpts(findings)
+        self.assertEqual(records[1], {
+            "path": f"{pub}/2026-10-13/world.json", "start": 2, "end": 3,
+            "status": "ok", "cited": "world.json",
+        })
+        self.assertIn(f"### {pub}/2026-10-13/world.json:1-4\n0001| {{\n0002|   \"dup\": 1,", text)
+        self.assertNotIn("older", text)
+
+    def test_ambiguous_bare_citation_stays_unresolved(self):
+        pub = "digests/news/publications"
+        self._write(f"{pub}/2026-10-13/world.json", ["new"])
+        self._write(f"{pub}/2026-10-12/world.json", ["old"])
+        text, records = audit._build_cited_excerpts([_finding(evidence="world.json:1")])
+        self.assertEqual(records[0]["path"], "world.json")
+        self.assertTrue(records[0]["status"].startswith("ambiguous: 2 files end with world.json"))
+        self.assertIn(f"{pub}/2026-10-12/world.json", records[0]["status"])
+        self.assertNotIn("cited", records[0])
+        self.assertIn("- world.json:1-1 — ambiguous", text)
+
+    def test_suffix_resolved_citation_disambiguates_a_later_one(self):
+        # 2026-10-14: research.py resolved only by suffix; contracts.py exists in
+        # two repos and must follow research.py into scripts/daily_news.
+        self._write("scripts/daily_news/research.py", ["r"])
+        self._write("scripts/daily_news/contracts.py", ["live"])
+        self._write("dev/bench/src/contracts.py", ["other"])
+        text, records = audit._build_cited_excerpts(
+            [_finding(evidence="contracts.py:1 research.py:1")])
+        self.assertEqual([r["path"] for r in records],
+                         ["scripts/daily_news/contracts.py", "scripts/daily_news/research.py"])
+        self.assertEqual({r["status"] for r in records}, {"ok"})
+        self.assertNotIn("other", text)
+
+    def test_shortened_citation_resolves_under_digests(self):
+        self._write("digests/ai-hardware/2026-10-13/03-urls-ranked.json", ["[", '  "url"', "]"])
+        self._write("digests/ai-hardware/2026-10-13/other.json", ["{}"])
+        text, records = audit._build_cited_excerpts(
+            [_finding(evidence="ai-hardware/2026-10-13/03-urls-ranked.json:2")])
+        self.assertEqual(records[0]["path"], "digests/ai-hardware/2026-10-13/03-urls-ranked.json")
+        self.assertEqual(records[0]["status"], "ok")
+        self.assertIn("### digests/ai-hardware/2026-10-13/03-urls-ranked.json:1-3", text)
+
+    def test_suffix_resolved_sensitive_path_is_still_refused(self):
+        self._write("digests/secrets/2026-10-13/world.json", ["private-resolved-line"])
+        text, records = audit._build_cited_excerpts(
+            [_finding(evidence="2026-10-13/world.json:1")])
+        self.assertEqual(records[0]["path"], "digests/secrets/2026-10-13/world.json")
+        self.assertEqual(records[0]["status"], "sensitive file name")
+        self.assertNotIn("private-", text)
 
     def test_sensitive_and_out_of_home_citations_are_unreadable_only(self):
         self._write(".ssh/config", ["Host private-ssh-line"])

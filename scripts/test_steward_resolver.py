@@ -536,6 +536,54 @@ class ResolverTests(unittest.TestCase):
                 else:
                     self.assertEqual(len(model.prompts), 2)
 
+    def _home_doc_fix_setup(self, rel: str) -> Path:
+        """A committed home file in the dotfiles fixture with an origin, and a finding naming it."""
+        origin = self.fx.root / "dotfiles-origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        self.fx.write(rel, "k3s runs on nodeA.\n")
+        self.fx.git("add", "--", rel)
+        self.fx.git("commit", "-q", "-m", "doc")
+        self.fx.git("remote", "add", "origin", str(origin))
+        (self.fx.run_dir / "07b-fixes.json").write_text(json.dumps({"routes": [{
+            "section": "docs-accuracy", "finding_id": "finding-1", "status": "needs_carter",
+            "claim": f"{rel} k3s host is stale"}]}), encoding="utf-8")
+        (self.fx.run_dir / "07-audit.json").write_text(json.dumps({"sections": [{
+            "name": "docs-accuracy", "verdict": "DRIFT", "judge_confirmed": [{
+                "id": "finding-1", "claim": f"{rel} k3s host is stale", "evidence": "k3s now runs on nodeB",
+                "target": {"doc": f"~/{rel}"}}]}]}), encoding="utf-8")
+        return origin
+
+    def test_doc_fix_applies_to_allowlisted_doc_file_outside_doc_roots(self) -> None:
+        origin = self._home_doc_fix_setup("AGENTS.md")
+        edit = {"doc": "~/AGENTS.md", "old_text": "nodeA", "new_text": "nodeB"}
+        recheck = ('```json\n{"verdict":"pass","supported_by_evidence":true,"changes_only_target":true,'
+                   '"system_should_change":false,"reason":"ok"}\n```')
+        model = FakeModel(model_reply("doc_fix", doc_edit=edit), recheck)
+        _, items = self.fx.resolve(omp_call=model, jev_client=FakeJev(0.999))
+        record = items["docs-accuracy-finding-1"]
+        self.assertEqual(record["status"], "done", record["reason"])
+        self.assertIn("~/AGENTS.md", model.prompts[0])
+        self.assertEqual(len(model.prompts), 2, "the doc-fix executor ran its re-check")
+        self.assertEqual((self.fx.home / "AGENTS.md").read_text(), "k3s runs on nodeB.\n")
+        self.assertEqual(record["commit"], self.fx.head())
+        self.assertEqual(self.fx.git("show", "--name-only", "--format=", "HEAD").split(), ["AGENTS.md"])
+        pushed = subprocess.run(["git", f"--git-dir={origin}", "rev-parse", "main"],
+                                check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(pushed, record["commit"])
+
+    def test_doc_fix_outside_doc_roots_and_doc_files_is_rejected(self) -> None:
+        self._home_doc_fix_setup("README.md")
+        before = self.fx.head()
+        edit = {"doc": "~/README.md", "old_text": "nodeA", "new_text": "nodeB"}
+        model = FakeModel(model_reply("doc_fix", doc_edit=edit))
+        _, items = self.fx.resolve(omp_call=model, jev_client=FakeJev(0.999))
+        record = items["docs-accuracy-finding-1"]
+        self.assertEqual(record["status"], "unknown")
+        self.assertIn("README.md is outside the doc roots and doc files", record["reason"])
+        self.assertNotIn("executed", record)
+        self.assertEqual((self.fx.home / "README.md").read_text(), "k3s runs on nodeA.\n")
+        self.assertEqual(self.fx.head(), before)
+
     def test_revert_failing_midway_is_partial_with_full_undo(self) -> None:
         (self.fx.run_dir / "07b-fixes.json").write_text(json.dumps({"routes": [{
             "section": "config-doc-drift", "finding_id": "finding-1", "status": "needs_carter",

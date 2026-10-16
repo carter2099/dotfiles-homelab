@@ -48,7 +48,9 @@ ENDPOINTS = {
     "freshrss": "http://127.0.0.1:30149/i/",
 }
 STEWARD_MODEL = "anthropic/claude-opus-5-5:medium"
-STEWARD_PATH = "/home/carter/.rbenv/shims:/home/carter/.rbenv/versions/4.0.6/bin:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# rbenv shims resolve Ruby tools (bundle-audit) through the global version; no
+# per-version bin dir, which went stale with every Ruby upgrade (4.0.6 until 2026-10-15).
+STEWARD_PATH = "/home/carter/.rbenv/shims:/home/carter/.local/bin:/home/carter/.bun/bin:/home/carter/.local/share/fnm:/home/carter/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # fnm's default Node (the version interactive shells use), if one is set. Picking
 # the newest-modified version directory instead ran an older Node than the default.

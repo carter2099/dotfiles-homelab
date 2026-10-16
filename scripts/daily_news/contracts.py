@@ -209,9 +209,25 @@ def load_cross_topic_urls(
         if not isinstance(data, dict):
             continue
         for story in data.get("fresh", []):
+            if not isinstance(story, dict):
+                continue
             normalized = coverage_key(story.get("url", ""))
             if normalized:
                 blocked.add(normalized)
+            # Event-level dedup: also block the earlier pick's Phase 2b Jev-"same"
+            # evidence, mirroring load_recent_coverage_ledger, so a later section's
+            # candidate sharing a same-event key is dropped by Phase 3 (World
+            # repeated 10-13 Maia 300 and 10-14 Apple HomeView).
+            evidence = (story.get("attention") or {}).get("evidence") or {}
+            for entry in evidence.get("same_event_urls") or []:
+                if isinstance(entry, dict):
+                    normalized = coverage_key(entry.get("url", ""))
+                    if normalized:
+                        blocked.add(normalized)
+            blocked.update(
+                key for key in evidence.get("same_event_keys") or []
+                if isinstance(key, str) and key
+            )
         # Same-event dedup: later topics also block the canonical/related links
         # recorded from earlier topics' selected stories, so the same event
         # under a different URL is not curated twice (digest-quality audit

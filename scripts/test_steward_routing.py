@@ -411,7 +411,7 @@ class CleanupTests(SandboxTest):
 
 class FakeGh:
     def __init__(self, *, allow=True, protection=None, rules=None, runs=None, merge_rc=0,
-                 methods=None):
+                 methods=None, ancestry=()):
         self.calls = []
         self.allow = allow
         self.protection = protection
@@ -419,6 +419,7 @@ class FakeGh:
         self.runs = runs if runs is not None else ["success"] * 5
         self.merge_rc = merge_rc
         self.methods = {"allow_rebase_merge": True} if methods is None else methods
+        self.ancestry = set(ancestry)  # (older_sha, newer_sha) pairs where newer contains older
 
     def __call__(self, args, cwd=None):
         self.calls.append(list(args))
@@ -434,6 +435,9 @@ class FakeGh:
                 return cp(0, json.dumps(self.protection)) if self.protection else cp(1, "", "Branch not protected")
             if "/rules/branches/" in path:
                 return cp(0, json.dumps(self.rules))
+            if "/compare/" in path:
+                older, newer = path.split("/compare/")[1].split("...")
+                return cp(0, json.dumps({"status": "ahead" if (older, newer) in self.ancestry else "diverged"}))
             if "/actions/runs" in path:
                 return cp(0, json.dumps({"workflow_runs": [
                     c if isinstance(c, dict) else {"conclusion": c} for c in self.runs]}))
@@ -493,6 +497,28 @@ class AutoMergeTests(unittest.TestCase):
         # Superseded runs do not stretch a short history into five.
         short = [run("success"), run("cancelled"), run("success"), run("success"), run("success")]
         self.assertFalse(self.check(FakeGh(protection=CLASSIC, runs=short))[0])
+
+    def test_red_run_fixed_forward_by_same_workflow_is_recovered(self):
+        def run(conclusion, sha, workflow=7):
+            return {"conclusion": conclusion, "workflow_id": workflow, "head_sha": sha}
+        # herdr-web-client 2026-10-09: 519a0f0 failed static analysis, 1376b52 (its
+        # child) fixed it; with no merges afterwards the gate deadlocked Dependabot.
+        herdr = [run("success", "1376b52"), run("failure", "519a0f0"), run("success", "68ff02b"),
+                 run("success", "d360e22"), run("success", "9825904")]
+        gh = FakeGh(protection=CLASSIC, runs=herdr, ancestry={("519a0f0", "1376b52")})
+        self.assertEqual(self.check(gh), (True, "required checks, auto-merge setting, and recent CI all pass"))
+        # Not a descendant (e.g. a revert on another line): still red.
+        ok, reason = self.check(FakeGh(protection=CLASSIC, runs=herdr))
+        self.assertFalse(ok)
+        self.assertIn("1 of the last 5", reason)
+        # A newer green of a different workflow does not recover it.
+        other = [run("success", "1376b52", workflow=8)] + herdr[1:]
+        self.assertFalse(self.check(FakeGh(protection=CLASSIC, runs=other,
+                                           ancestry={("519a0f0", "1376b52")}))[0])
+        # The newest run of a workflow has nothing newer, so its failure always blocks.
+        newest = [run("failure", "aaa")] + herdr[:4]
+        self.assertFalse(self.check(FakeGh(protection=CLASSIC, runs=newest,
+                                           ancestry={("519a0f0", "1376b52")}))[0])
 
     def test_excluded_and_non_candidate_repos(self):
         for name in ("llm-proxy", "homelab-backup", "random-app"):

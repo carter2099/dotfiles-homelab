@@ -616,6 +616,54 @@ def test_recent_coverage_blocks_same_event_from_new_outlet() -> None:
         check(len(rejected) == 2, rejected)
 
 
+def test_cross_topic_blocks_earlier_sections_same_event_evidence() -> None:
+    """A later section cannot rerun an event another section picked today.
+
+    Regression for 2026-10-13/14: AI Hardware ran Microsoft's Maia 300 (CNBC)
+    and Apple HomeView (Forbes); World then ran each via another outlet. The two
+    picks' URLs never matched, but their Phase 2b same-event keys overlapped.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        today = "2026-10-13"
+        hardware = root / catalog.TOPICS["ai-hardware"]["category"] / today
+        hardware.mkdir(parents=True)
+        cnbc = "https://www.cnbc.com/2026/10/12/microsoft-homegrown-ai-chips-maia-300.html"
+        neowin = "https://www.neowin.net/news/microsoft-unveils-maia-300/"
+        (hardware / "06-curated.json").write_text(json.dumps({"fresh": [{
+            "url": cnbc,
+            "attention": {"status": "ok", "evidence": {
+                "same_event_urls": [{"url": neowin, "domain": "neowin.net",
+                                     "title": "Maia 300", "source": "panel"}],
+                "same_event_keys": ["hpcwire.com/2026/10/12/microsoft-maia-300-inference"],
+            }},
+        }]}))
+        run_dir = root / catalog.TOPICS["world"]["category"] / today
+        run_dir.mkdir(parents=True)
+        blocked = contracts.load_cross_topic_urls(catalog.TOPICS["world"], run_dir, digests_dir=root)
+        check({contracts.coverage_key(cnbc), contracts.coverage_key(neowin),
+               "hpcwire.com/2026/10/12/microsoft-maia-300-inference"} <= blocked, sorted(blocked))
+
+        upi = "https://www.upi.com/Science_News/2026/10/12/microsoft-azure-maia-300/"
+        fresh = [
+            {"title": "Microsoft announces new AI chip Azure Maia 300", "url": upi,
+             "editorial_significance": "high", "date_published": "2026-10-12",
+             "attention": {"status": "ok", "evidence": {"same_event_keys": [
+                 contracts.coverage_key(upi), "hpcwire.com/2026/10/12/microsoft-maia-300-inference"]}}},
+            {"title": "Unrelated world story", "url": "https://example.com/2026/10/12/world-story",
+             "editorial_significance": "high", "date_published": "2026-10-12",
+             "attention": {"status": "ok", "evidence": {"same_event_keys": [
+                 "example.com/2026/10/12/world-story"]}}},
+        ]
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(catalog.TOPICS["world"], fresh, run_dir)
+        check([item["title"] for item in queue] == ["Unrelated world story"], f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["url"] == upi and "another digest today" in rejected["rejection_reason"], rejected)
+
+
+
 
 def _shared_url_findings(today: str) -> tuple[str, list[dict]]:
     """Two distinct raw findings the research model attributed to one URL."""
@@ -2946,6 +2994,7 @@ def main() -> None:
         test_phase_two_cross_day_dedup_window_contract,
         test_recent_coverage_ledger_blocks_other_section_repeats,
         test_recent_coverage_blocks_same_event_from_new_outlet,
+        test_cross_topic_blocks_earlier_sections_same_event_evidence,
         test_phase_two_shared_url_findings_keep_their_own_metadata,
         test_phase_two_drops_unidentified_shared_url_finding,
         test_phase_two_restores_approvals_with_altered_urls,

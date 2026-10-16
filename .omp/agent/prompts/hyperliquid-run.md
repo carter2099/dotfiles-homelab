@@ -7,7 +7,7 @@ description: Autonomous scheduled maintenance for the Hyperliquid Ruby SDK — r
 Repo: `~/dev/hyperliquid` (dev branch)
 State file: `~/agent-state/hyperliquid-sdk.md`
 Private key: `~/.config/hyperliquid-agent/env`
-Ruby: always use `RBENV_VERSION=3.4.10`
+Ruby: always use `RBENV_VERSION=3.4.11`
 
 ## Step 1: Read state
 
@@ -29,7 +29,7 @@ cd ~/dev/hyperliquid
 git status --short
 git checkout dev
 git pull --ff-only origin dev
-RBENV_VERSION=3.4.10 bundle install --quiet
+RBENV_VERSION=3.4.11 bundle install --quiet
 git status --short
 ```
 
@@ -43,7 +43,7 @@ Then run the baseline gate on the untouched tip (every run, no-op included):
 ```bash
 cd ~/dev/hyperliquid
 git rev-parse --short HEAD
-RBENV_VERSION=3.4.10 bundle exec rake
+RBENV_VERSION=3.4.11 bundle exec rake
 ```
 
 Copy the rspec summary line (`N examples, 0 failures`) and RuboCop's result
@@ -141,7 +141,7 @@ Update the upstream SHA and scan date in the state file for any source actually 
 **rbsecp256k1 release watch** — run only while `~/dev/hyperliquid/Gemfile` contains `carter2099/rbsecp256k1`:
 
 ```bash
-RBENV_VERSION=3.4.10 ruby ~/agent-state/hyperliquid-sdk-fixtures/check_rbsecp256k1_release.rb
+RBENV_VERSION=3.4.11 ruby ~/agent-state/hyperliquid-sdk-fixtures/check_rbsecp256k1_release.rb
 ```
 
 - `RBSECP256K1_TRIGGER=none|soaking|unsafe …` → copy the line and today's date into Plan Queue row RB's **Last check:** field; nothing else.
@@ -206,7 +206,7 @@ For each selected API gap:
    `CHANGELOG.md`.
 5. Run the new spec file and the docs gate before moving on:
    ```bash
-   cd ~/dev/hyperliquid && RBENV_VERSION=3.4.10 bundle exec rspec spec/path/to/new_spec.rb spec/docs_coverage_spec.rb
+   cd ~/dev/hyperliquid && RBENV_VERSION=3.4.11 bundle exec rspec spec/path/to/new_spec.rb spec/docs_coverage_spec.rb
    ```
 6. Mark the gap 🔵 in_progress in the state file, then ✅ done once the tests pass.
 
@@ -219,7 +219,7 @@ docs, integration script, commit message, state-file updates); where the plan
 file is more specific than this prompt, the plan file wins. API rows also follow
 items 1–6 above. For a docs-only row (D1/D2), change only `docs/`, `README.md`,
 `CLAUDE.md`, `example.rb`, `spec/docs_coverage_spec.rb`, and comment lines
-under `lib/`, and run `RBENV_VERSION=3.4.10 bundle exec rspec spec/docs_coverage_spec.rb`
+under `lib/`, and run `RBENV_VERSION=3.4.11 bundle exec rspec spec/docs_coverage_spec.rb`
 before Step 7.
 
 ### Dependabot scope
@@ -255,9 +255,9 @@ For selected `bundler` entries:
    ```bash
    cd ~/dev/hyperliquid
    cp Gemfile.lock .dependabot.Gemfile.lock
-   RBENV_VERSION=3.4.10 BUNDLE_GEMFILE=.dependabot.Gemfile bundle lock --update <all-selected-bundler-dependencies> --conservative
+   RBENV_VERSION=3.4.11 BUNDLE_GEMFILE=.dependabot.Gemfile bundle lock --update <all-selected-bundler-dependencies> --conservative
    cp .dependabot.Gemfile.lock Gemfile.lock
-   RBENV_VERSION=3.4.10 bundle install
+   RBENV_VERSION=3.4.11 bundle install
    rm .dependabot.Gemfile .dependabot.Gemfile.lock
    ```
    The normal `bundle install` restores the real Gemfile requirements in the
@@ -279,7 +279,7 @@ close any PR.
 
 ```bash
 cd ~/dev/hyperliquid
-RBENV_VERSION=3.4.10 bundle exec rake
+RBENV_VERSION=3.4.11 bundle exec rake
 ```
 
 `rake` (specs, RuboCop, and `rubocop:scripts`) must be green: `0 failures` and
@@ -294,7 +294,7 @@ First decide whether the change is docs-only (mechanically, never by eye):
 
 ```bash
 cd ~/dev/hyperliquid
-RBENV_VERSION=3.4.10 bundle exec rake verify:docs_only
+RBENV_VERSION=3.4.11 bundle exec rake verify:docs_only
 ```
 
 Exit 0 (it prints `DOCS_ONLY=yes`): skip integration and record that exact
@@ -304,7 +304,7 @@ other result (`DOCS_ONLY=no path=…`, or an error) means run integration:
 ```bash
 cd ~/dev/hyperliquid
 source ~/.config/hyperliquid-agent/env
-HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY RBENV_VERSION=3.4.10 bundle exec rake integration
+HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY RBENV_VERSION=3.4.11 bundle exec rake integration
 ```
 
 The runner's final line, `INTEGRATION GATE: PASS|FAIL total=N pass=a
@@ -318,7 +318,7 @@ final line, or `rake integration` exiting 2 (key not loaded), is a failed gate.
   TIMEOUT, or NOT_RUN blocks the commit. There is no waiver list: a name match
   against an old state-file note proves nothing. Read the failing script's
   output and fix the cause (a wallet precondition is fixed with
-  `HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY RBENV_VERSION=3.4.10 bundle exec ruby scripts/testnet_wallet_check.rb --fix`,
+  `HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY RBENV_VERSION=3.4.11 bundle exec ruby scripts/testnet_wallet_check.rb --fix`,
   then rerun; exit 2 means underfunded — report it, do not commit).
   - API-gap or Plan Queue row run: the failure is a regression this run must
     fix before committing (then rerun `rake` and `rake integration`); if it
@@ -384,7 +384,7 @@ Co-Authored-By: hyperliquid-run agent <noreply@carter2099.com>"
 ```bash
 cd ~/dev/hyperliquid
 git status --porcelain                         # must print nothing
-RBENV_VERSION=3.4.10 bundle exec rake verify   # rake, then rake again in a clean clone of the commit with BUNDLE_FROZEN=true
+RBENV_VERSION=3.4.11 bundle exec rake verify   # rake, then rake again in a clean clone of the commit with BUNDLE_FROZEN=true
 git push origin dev
 git rev-parse HEAD @{upstream}                 # the two SHAs must be identical
 ```

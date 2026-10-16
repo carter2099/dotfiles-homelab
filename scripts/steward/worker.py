@@ -11,6 +11,9 @@ under refs/steward-review without changing HEAD, the index, or the checkout.
 """
 from __future__ import annotations
 
+import ast
+import builtins
+import copy
 import fcntl
 import hashlib
 import json
@@ -32,6 +35,10 @@ HEADLESS_CONFIG = HOME / ".omp" / "agent" / "headless-override.yml"
 DEV_ROOT = Path(os.environ.get("STEWARD_DEV_ROOT", "/home/carter/dev"))
 MAX_FINDINGS = 32
 MAX_PATHS_PER_REPOSITORY = 64
+# Existing test files that import a repaired module may receive an
+# additive-only regression test (see _check_additive_test_change).
+MAX_COMPANION_TESTS = 3
+_TEST_FILE_RE = re.compile(r"^(?:test_.*|.*_test)\.py$")
 MAX_DIFF_BYTES = 768 * 1024
 MAX_COMMAND_OUTPUT = 4000
 MAX_VALIDATION_SECONDS = 900
@@ -570,7 +577,10 @@ def _target_plans(findings: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str,
         return [], errors or ["finding does not identify an allowed ~/dev repository/file"]
 
     by_repo: dict[str, dict[str, Any]] = {
-        str(root): {"source": str(root), "base_sha": _base_sha(root), "allowed_paths": [], "findings": []}
+        str(root): {
+            "source": str(root), "base_sha": _base_sha(root), "allowed_paths": [],
+            "companion_test_paths": [], "findings": [],
+        }
         for root in all_repos
     }
     for finding in findings:
@@ -653,26 +663,33 @@ def _target_plans(findings: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str,
     for bucket in by_repo.values():
         root = Path(bucket["source"])
         try:
-            status = _git_status(root)
-            _validation_plan(root, bucket["allowed_paths"])
+            if _git_status(root):
+                return [], [f"repository has pre-existing changes; refusing to publish: {root}"]
+            # Read from the clean checkout, so the files equal the base commit.
+            bucket["companion_test_paths"] = _companion_tests(root, bucket["allowed_paths"])
+            _validation_plan(root, bucket["allowed_paths"], bucket["companion_test_paths"])
         except WorkerPolicyError as exc:
             return [], [str(exc)]
-        if status:
-            return [], [f"repository has pre-existing changes; refusing to publish: {root}"]
         plans.append(bucket)
     return plans, []
 
 
-def _validation_plan(root: Path, allowed_paths: Sequence[str]) -> list[list[str]]:
+def _validation_plan(
+    root: Path, allowed_paths: Sequence[str], companion_test_paths: Sequence[str] = (),
+) -> list[list[str]]:
     """Select trusted argv checks from project files, never from audit prose."""
-    commands = [["git", "diff", "--no-ext-diff", "--no-textconv", "--check", "HEAD", "--", *allowed_paths]]
+    checked = [*allowed_paths, *companion_test_paths]
+    commands = [["git", "diff", "--no-ext-diff", "--no-textconv", "--check", "HEAD", "--", *checked]]
     if repo_kind(root) == REPO_KIND_STEWARD_CODE:
         # The full offline gate for every touched area, run inside the
         # isolated snapshot of the dotfiles clone (fix and judge copies).
+        # Keyed on the source paths: _companion_tests only admits a companion
+        # whose area adds no verifier, so the set equals the one the pre-PR
+        # gate derives from whichever of those paths the patch changes.
         return commands + steward_code_validation_commands(allowed_paths)
     suffixes = {Path(path).suffix.lower() for path in allowed_paths}
     if ".py" in suffixes:
-        commands.append(["python3", "-m", "compileall", "-q", *[p for p in allowed_paths if p.endswith(".py")]])
+        commands.append(["python3", "-m", "compileall", "-q", *[p for p in checked if p.endswith(".py")]])
         if any(root.glob("test*.py")) or (root / "tests").is_dir():
             commands.append(["python3", "-m", "unittest", "discover"])
     if ".go" in suffixes and (root / "go.mod").exists():
@@ -688,6 +705,332 @@ def _validation_plan(root: Path, allowed_paths: Sequence[str]) -> list[list[str]
     if len(commands) == 1:
         raise WorkerPolicyError("no executable validation family for the selected paths")
     return commands
+
+
+# --------------------- companion regression-test files ---------------------
+
+
+def _module_names(source: str, test_path: str) -> tuple[set[str], set[str]]:
+    """Dotted (module, package) names by which ``test_path`` may import ``source``.
+
+    Import roots are the repository root, the test file's directory, and its
+    parent: e.g. scripts/test_digest_pipeline.py imports
+    scripts/daily_news/contracts.py as ``daily_news.contracts``.
+    """
+    parts = Path(source).with_suffix("").parts
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    test_dir = Path(test_path).parent.parts
+    modules: set[str] = set()
+    packages: set[str] = set()
+    for prefix in {(), test_dir, test_dir[:-1]}:
+        if len(prefix) >= len(parts) or parts[:len(prefix)] != prefix:
+            continue
+        rest = parts[len(prefix):]
+        modules.add(".".join(rest))
+        if len(rest) > 1:
+            packages.add(".".join(rest[:-1]))
+    return modules, packages
+
+
+def _imported_names(tree: ast.AST) -> set[str]:
+    """Absolute dotted names imported anywhere in ``tree`` (``from a import b`` -> a, a.b)."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module)
+            names.update(f"{node.module}.{alias.name}" for alias in node.names if alias.name != "*")
+    return names
+
+
+def _companion_tests(root: Path, allowed_paths: Sequence[str]) -> list[str]:
+    """Existing test files that import a repaired Python module, best first.
+
+    A companion must be tracked, named test_*.py/*_test.py, repairable under
+    the same path policy as a target (so protected steward tests never
+    qualify), and, in a steward-code clone, must not add a verifier.  Rank:
+    imports the module itself before only its package; then same directory
+    or a top-level tests/ directory; then path.
+    """
+    sources = [path for path in allowed_paths if path.endswith(".py")]
+    room = min(MAX_COMPANION_TESTS, MAX_PATHS_PER_REPOSITORY - len(allowed_paths))
+    if not sources or room <= 0:
+        return []
+    kind = repo_kind(root)
+    verifiers = steward_code_verifiers(allowed_paths) if kind == REPO_KIND_STEWARD_CODE else None
+    ranked: list[tuple[tuple[int, int], str]] = []
+    for path in sorted(_tracked_paths(root)):
+        if path in allowed_paths or not _TEST_FILE_RE.fullmatch(Path(path).name):
+            continue
+        try:
+            _safe_relpath(path, kind=kind)
+        except WorkerPolicyError:
+            continue
+        if verifiers is not None and steward_code_verifiers([*allowed_paths, path]) != verifiers:
+            continue
+        candidate = root / path
+        try:
+            if candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size > MAX_DIFF_BYTES:
+                continue
+            imported = _imported_names(ast.parse(candidate.read_text(encoding="utf-8"), filename=path))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        keys = []
+        for source in sources:
+            modules, packages = _module_names(source, path)
+            if any(name == m or name.startswith(m + ".") for name in imported for m in modules):
+                reference = 0
+            elif any(name == p or name.startswith(p + ".") for name in imported for p in packages):
+                reference = 1
+            else:
+                continue
+            near = Path(path).parent == Path(source).parent or Path(path).parts[0] in {"tests", "test"}
+            keys.append((reference, 0 if near else 1))
+        if keys:
+            ranked.append((min(keys), path))
+    return [path for _, path in sorted(ranked)[:room]]
+
+
+def _companion_paths(values: Any, allowed: Sequence[str], kind: str) -> list[str]:
+    """Validate a request's companion test paths; sorted."""
+    if values is None:
+        return []
+    if not isinstance(values, (list, tuple)):
+        raise WorkerPolicyError("companion test paths are not a list")
+    paths = sorted(_safe_relpath(path, kind=kind) for path in values)
+    if (
+        len(paths) > MAX_COMPANION_TESTS or len(set(paths)) != len(paths)
+        or set(paths) & set(allowed)
+        or not all(_TEST_FILE_RE.fullmatch(Path(path).name) for path in paths)
+    ):
+        raise WorkerPolicyError("invalid companion test paths")
+    return paths
+
+
+# Additive-only policy for a changed companion.  Definition-time code in an
+# added def/class (decorators, defaults, annotations, class bodies) runs at
+# import, before any existing test; added bodies run between existing tests.
+# Neither may alter what existing tests see, so both are kept inert.
+_TEST_DECORATOR_ROOTS = frozenset({"unittest", "mock", "patch", "pytest"})
+_STATE_CALLS = frozenset({"setattr", "delattr", "exec", "eval", "globals", "__import__"})
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _dotted(node: ast.AST) -> list[str] | None:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    return [node.id, *reversed(parts)] if isinstance(node, ast.Name) else None
+
+
+def _is_literal(node: ast.AST) -> bool:
+    try:
+        ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+    return True
+
+
+def _inert_decorator(node: ast.AST) -> bool:
+    call = node if isinstance(node, ast.Call) else None
+    name = _dotted(call.func if call else node)
+    if not name or name[0] not in _TEST_DECORATOR_ROOTS:
+        return False
+    return call is None or all(
+        isinstance(arg, ast.Lambda) or _dotted(arg) is not None or _is_literal(arg)
+        for arg in [*call.args, *(keyword.value for keyword in call.keywords)]
+    )
+
+
+def _signature_reason(node: ast.AST) -> str | None:
+    """Why a def's definition-time expressions could run code; None if inert."""
+    if not all(_inert_decorator(item) for item in node.decorator_list):
+        return "decorators may only be unittest/mock/pytest helpers with literal, name or lambda arguments"
+    if not isinstance(node, _DEFS):
+        return None
+    args = node.args
+    if not all(_is_literal(item) or _dotted(item) is not None
+               for item in [*args.defaults, *(d for d in args.kw_defaults if d is not None)]):
+        return "default arguments must be literals or names"
+    annotations = [
+        item.annotation for item in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg)
+        if item is not None and item.annotation is not None
+    ] + ([node.returns] if node.returns is not None else [])
+    if not all(isinstance(item, ast.Constant) or _dotted(item) is not None for item in annotations):
+        return "annotations must be names or strings"
+    return None
+
+
+def _added_definition_reason(node: ast.AST, module_names: set[str]) -> str | None:
+    """Why an added def/class could change existing behaviour; None if it cannot."""
+    reason = _signature_reason(node)
+    if reason:
+        return reason
+    if isinstance(node, ast.ClassDef):
+        if not all(_dotted(item) is not None for item in [*node.bases, *(k.value for k in node.keywords)]):
+            return "class bases must be names"
+        for item in node.body:
+            if isinstance(item, _DEFS):
+                reason = _signature_reason(item)
+                if reason:
+                    return f"method {item.name}: {reason}"
+            elif not (
+                isinstance(item, ast.Pass)
+                or (isinstance(item, ast.Expr) and isinstance(item.value, ast.Constant))
+                or (isinstance(item, ast.Assign) and _is_literal(item.value)
+                    and all(isinstance(target, ast.Name) for target in item.targets))
+            ):
+                return "class body may hold only methods, literal attributes and a docstring"
+    for sub in ast.walk(node):
+        if isinstance(sub, (ast.Global, ast.Nonlocal)):
+            return "declares global/nonlocal"
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in _STATE_CALLS:
+            return f"calls {sub.func.id}()"
+        if isinstance(sub, (ast.Attribute, ast.Subscript)) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+            base = sub
+            while isinstance(base, (ast.Attribute, ast.Subscript)):
+                base = base.value
+            if isinstance(base, ast.Name) and base.id in module_names:
+                return f"assigns into module-level object {base.id!r} (use unittest.mock.patch)"
+    return None
+
+
+def _bound_names(stmt: ast.AST) -> set[str]:
+    """Module-level names a top-level statement binds."""
+    if isinstance(stmt, (*_DEFS, ast.ClassDef)):
+        return {stmt.name}
+    if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+        return {alias.asname or alias.name.split(".")[0] for alias in stmt.names if alias.name != "*"}
+    names: set[str] = set()
+    stack: list[ast.AST] = [stmt]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (*_DEFS, ast.ClassDef, ast.Import, ast.ImportFrom)):
+            names |= _bound_names(node)
+            continue
+        if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+        stack.extend(ast.iter_child_nodes(node))
+    return names
+
+
+def _check_additive_test_change(path: str, before: str, after: str) -> None:
+    """Accept a companion test change only if it purely adds tests.
+
+    Every base top-level statement must survive in order and AST-identical,
+    except that an existing def/class may gain new nested functions (classes:
+    new ``test_*`` methods) and its list/tuple literals may gain bare names of
+    newly added top-level test functions (runner registration).  New
+    top-level statements may only be fresh defs/classes, imports, or literal
+    assignments to fresh names; nothing may rebind a pre-existing name; and at
+    least one new ``test_*`` function or method must be added.
+    """
+    def reject(reason: str) -> None:
+        raise WorkerPolicyError(f"companion test {path} is not an additive-only change: {reason}")
+
+    try:
+        base = ast.parse(before, filename=path)
+        new = ast.parse(after, filename=path)
+    except (SyntaxError, ValueError) as exc:
+        reject(f"base or new file does not parse ({exc.__class__.__name__})")
+    reserved = set(dir(builtins))
+    for stmt in base.body:
+        reserved |= _bound_names(stmt)
+    # Any identifier the base uses (it may resolve to a module global).
+    reserved |= {node.id for node in ast.walk(base) if isinstance(node, ast.Name)}
+    module_names: set[str] = set()
+    for stmt in new.body:
+        module_names |= _bound_names(stmt)
+    fresh_tests = {
+        stmt.name for stmt in new.body
+        if isinstance(stmt, _DEFS) and stmt.name.startswith("test_") and stmt.name not in reserved
+    }
+    added_tests = 0
+
+    def counterpart(old: ast.AST, cand: ast.AST) -> bool:
+        """True if ``cand`` is ``old`` plus permitted additions; raise if it is a modified ``old``."""
+        nonlocal added_tests
+        if ast.dump(old) == ast.dump(cand):
+            return True
+        if not (isinstance(old, (*_DEFS, ast.ClassDef)) and type(old) is type(cand) and old.name == cand.name):
+            return False
+        known = {
+            node.name if isinstance(node, (*_DEFS, ast.ClassDef))
+            else node.id if isinstance(node, ast.Name) else node.arg
+            for node in ast.walk(old) if isinstance(node, (*_DEFS, ast.ClassDef, ast.Name, ast.arg))
+        }
+        stripped = copy.deepcopy(cand)
+        kept = []
+        for item in stripped.body:
+            if isinstance(item, _DEFS) and item.name not in known:
+                if isinstance(old, ast.ClassDef) and not item.name.startswith("test_"):
+                    reject(f"new method {old.name}.{item.name} is not a test_* method")
+                reason = _added_definition_reason(item, module_names)
+                if reason:
+                    reject(f"{old.name}.{item.name}: {reason}")
+                if isinstance(old, ast.ClassDef):
+                    added_tests += 1
+                continue
+            kept.append(item)
+        stripped.body = kept
+        for node in ast.walk(stripped):
+            if isinstance(node, (ast.List, ast.Tuple)):
+                node.elts = [
+                    elt for elt in node.elts
+                    if not (isinstance(elt, ast.Name) and isinstance(elt.ctx, ast.Load) and elt.id in fresh_tests)
+                ]
+        if ast.dump(old) != ast.dump(stripped):
+            reject(f"existing {old.name} (line {old.lineno}) was modified beyond adding tests")
+        return True
+
+    additions: list[ast.stmt] = []
+    position = 0
+    for old in base.body:
+        while position < len(new.body):
+            cand = new.body[position]
+            position += 1
+            if counterpart(old, cand):
+                break
+            additions.append(cand)
+        else:
+            reject(f"existing top-level {type(old).__name__} at line {old.lineno} was modified, moved or removed")
+    additions.extend(new.body[position:])
+
+    bound_by_additions: set[str] = set()
+    for stmt in additions:
+        where = f"new top-level {type(stmt).__name__} at line {stmt.lineno}"
+        if isinstance(stmt, (*_DEFS, ast.ClassDef)):
+            reason = _added_definition_reason(stmt, module_names)
+            if reason:
+                reject(f"{stmt.name}: {reason}")
+            if isinstance(stmt, ast.ClassDef):
+                added_tests += sum(isinstance(item, _DEFS) and item.name.startswith("test_") for item in stmt.body)
+            elif stmt.name.startswith("test_"):
+                added_tests += 1
+        elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            if any(alias.name == "*" for alias in stmt.names):
+                reject(f"{where} is a star import")
+        elif isinstance(stmt, ast.Assign):
+            if not all(isinstance(target, ast.Name) for target in stmt.targets) or not _is_literal(stmt.value):
+                reject(f"{where} must assign a literal to plain names")
+        else:
+            reject(f"{where} is not a def, class, import or literal assignment")
+        names = _bound_names(stmt)
+        clash = names & (reserved | bound_by_additions)
+        if clash:
+            reject(f"{where} rebinds existing name(s) {sorted(clash)}")
+        bound_by_additions |= names
+    if not added_tests:
+        reject("no new test_* function or method was added")
 
 
 def _safe_request_findings(findings: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -786,7 +1129,10 @@ def run_fix(
             "source": plan["source"],
             "base_sha": plan["base_sha"],
             "allowed_paths": sorted(plan["allowed_paths"]),
-            "validation_commands": _validation_plan(Path(plan["source"]), plan["allowed_paths"]),
+            "companion_test_paths": sorted(plan.get("companion_test_paths") or []),
+            "validation_commands": _validation_plan(
+                Path(plan["source"]), plan["allowed_paths"], plan.get("companion_test_paths") or [],
+            ),
             "findings": _safe_request_findings(plan.get("findings", [])),
         }
         for plan in plans
@@ -844,7 +1190,10 @@ def run_fix(
         },
         "repositories": outputs,
         "_trusted_repositories": [
-            {key: repository[key] for key in ("source", "base_sha", "allowed_paths", "validation_commands")}
+            {
+                key: repository[key]
+                for key in ("source", "base_sha", "allowed_paths", "companion_test_paths", "validation_commands")
+            }
             for repository in repositories
         ],
     }
@@ -888,7 +1237,8 @@ def _stage_snapshot(source: Path, base: str, workspace: Path) -> None:
 def _validate_result_paths(
     repository: Mapping[str, Any],
     trusted: Mapping[str, Mapping[str, Any]],
-) -> tuple[Path, list[str], list[str]]:
+) -> tuple[Path, list[str], list[str], list[str]]:
+    """Returns (root, changed, accepted paths, companion test paths)."""
     source_text = str(repository.get("source") or "")
     expected = trusted.get(source_text)
     if not expected:
@@ -904,13 +1254,17 @@ def _validate_result_paths(
     expected_allowed = sorted(str(path) for path in expected.get("allowed_paths") or [])
     if sorted(allowed) != expected_allowed:
         raise WorkerPolicyError("worker result allowed paths differ from the trusted request")
+    companions = _companion_paths(repository.get("companion_test_paths"), allowed, kind)
+    if companions != sorted(str(path) for path in expected.get("companion_test_paths") or []):
+        raise WorkerPolicyError("worker result companion test paths differ from the trusted request")
+    accepted = sorted({*allowed, *companions})
     changed = [_safe_relpath(path, kind=kind) for path in repository.get("changed_paths") or []]
     if len(set(changed)) != len(changed):
         raise WorkerPolicyError("worker result contains duplicate changed paths")
-    if not set(changed).issubset(set(allowed)):
-        extra = sorted(set(changed) - set(allowed))
+    if not set(changed).issubset(accepted):
+        extra = sorted(set(changed) - set(accepted))
         raise WorkerPolicyError(f"worker changed disallowed paths: {extra}")
-    return root, changed, allowed
+    return root, changed, accepted, companions
 
 
 def _commit_env() -> dict[str, str]:
@@ -958,6 +1312,26 @@ def _actual_diff_paths(root: Path, diff: str) -> list[str]:
     if not paths:
         raise WorkerPolicyError("worker diff has no inspectable paths")
     return sorted(paths)
+
+
+def _check_companion_diff(root: Path, base: str, diff: str, paths: Sequence[str]) -> None:
+    """Apply ``diff`` to ``base`` in a private index and check each changed companion."""
+    if not paths:
+        return
+    with tempfile.TemporaryDirectory(prefix="steward-companion-") as temporary:
+        env = _commit_env()
+        env["GIT_INDEX_FILE"] = str(Path(temporary) / "index")
+
+        def git(*args: str, input_text: str | None = None) -> str:
+            cp = _run(_git_args(root, *args), env=env, timeout=90, input_text=input_text)
+            if cp.returncode != 0:
+                raise WorkerPolicyError(f"companion test Git operation failed: {(cp.stderr or cp.stdout)[:500]}")
+            return cp.stdout
+
+        git("read-tree", base)
+        git("apply", "--cached", input_text=diff)
+        for path in paths:
+            _check_additive_test_change(path, git("cat-file", "blob", f"{base}:{path}"), git("cat-file", "blob", f":{path}"))
 
 
 def _review_commit(root: Path, base: str, diff: str, section: str, *, dry_run: bool) -> dict[str, Any]:
@@ -1033,11 +1407,13 @@ def _publish_validated_result_unlocked(
                 raise WorkerPolicyError("trusted repository binding is not an object")
             source = str(raw.get("source") or "")
             base = str(raw.get("base_sha") or "")
-            allowed = sorted(_safe_relpath(path, kind=repo_kind(source)) for path in raw.get("allowed_paths") or [])
+            kind = repo_kind(source)
+            allowed = sorted(_safe_relpath(path, kind=kind) for path in raw.get("allowed_paths") or [])
             if not source.startswith("/") or not re.fullmatch(r"[0-9a-f]{40}", base) or not allowed or source in trusted:
                 raise WorkerPolicyError("invalid or duplicate trusted repository binding")
             trusted[source] = {
                 "base_sha": base, "allowed_paths": allowed,
+                "companion_test_paths": _companion_paths(raw.get("companion_test_paths"), allowed, kind),
                 "validation_commands": raw.get("validation_commands"),
             }
         sources = [item.get("source") for item in repositories if isinstance(item, Mapping)]
@@ -1045,7 +1421,7 @@ def _publish_validated_result_unlocked(
             raise WorkerPolicyError("worker repositories differ from the trusted request")
         candidates = []
         for item in repositories:
-            root, changed, allowed = _validate_result_paths(item, trusted)
+            root, changed, accepted, companions = _validate_result_paths(item, trusted)
             base = str(item["base_sha"])
             if _base_sha(root) != base:
                 raise WorkerPolicyError(f"repository advanced while worker ran: {root}")
@@ -1059,8 +1435,10 @@ def _publish_validated_result_unlocked(
             if "\x00" in diff or "GIT binary patch" in diff or _sha256_text(diff) != item.get("diff_sha256"):
                 raise WorkerPolicyError("binary or hash-mismatched worker diff")
             actual = _actual_diff_paths(root, diff)
-            if set(actual) != set(changed) or not set(actual).issubset(allowed):
+            if set(actual) != set(changed) or not set(actual).issubset(accepted):
                 raise WorkerPolicyError("actual diff paths differ from the trusted allowed paths")
+            # Existing tests may only gain tests; never be weakened.
+            _check_companion_diff(root, base, diff, sorted(set(actual) & set(companions)))
             if not isinstance(item.get("validation"), list) or not item["validation"] or any(
                 not isinstance(record, Mapping) or type(record.get("returncode")) is not int or record["returncode"] != 0
                 for record in item["validation"]
@@ -1268,7 +1646,11 @@ def _status_paths(root: Path) -> tuple[list[str], list[str]]:
     return changed, untracked
 
 
-def _snapshot_diff(root: Path, allowed_paths: Sequence[str]) -> tuple[str, list[str]]:
+def _snapshot_diff(
+    root: Path, allowed_paths: Sequence[str], companion_test_paths: Sequence[str] = (),
+) -> tuple[str, list[str]]:
+    # Companions are existing files, so they can never be created untracked.
+    accepted = [*allowed_paths, *companion_test_paths]
     changed, untracked = _status_paths(root)
     for path in changed:
         if (root / path).is_symlink():
@@ -1289,8 +1671,19 @@ def _snapshot_diff(root: Path, allowed_paths: Sequence[str]) -> tuple[str, list[
             raise WorkerExecutionError(f"could not register new worker path: {path}")
         changed.append(path)
     changed = sorted(set(changed))
-    if not set(changed).issubset(set(allowed_paths)):
-        raise WorkerPolicyError(f"worker changed disallowed paths: {sorted(set(changed) - set(allowed_paths))}")
+    if not set(changed).issubset(set(accepted)):
+        raise WorkerPolicyError(f"worker changed disallowed paths: {sorted(set(changed) - set(accepted))}")
+    for path in sorted(set(changed) & set(companion_test_paths)):
+        before = _run(
+            ["/usr/bin/git", "cat-file", "blob", f"HEAD:{path}"], cwd=root, env=_minimal_env(), timeout=30,
+        )
+        if before.returncode != 0:
+            raise WorkerExecutionError(f"could not read base companion test: {path}")
+        try:
+            after = (root / path).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise WorkerPolicyError(f"worker deleted companion test: {path}")
+        _check_additive_test_change(path, before.stdout, after)
     cp = _run(
         [
             "/usr/bin/git",
@@ -1303,7 +1696,7 @@ def _snapshot_diff(root: Path, allowed_paths: Sequence[str]) -> tuple[str, list[
             "--full-index",
             "HEAD",
             "--",
-            *allowed_paths,
+            *accepted,
         ],
         cwd=root,
         env=_minimal_env(),
@@ -1325,7 +1718,7 @@ def _snapshot_diff(root: Path, allowed_paths: Sequence[str]) -> tuple[str, list[
             "--check",
             "HEAD",
             "--",
-            *allowed_paths,
+            *accepted,
         ],
         cwd=root,
         env=_minimal_env(),
@@ -1374,11 +1767,29 @@ def _run_validations(root: Path, commands: Sequence[Sequence[str]], home: Path) 
     return records
 
 
-def _fix_prompt(section: str, findings: Sequence[Mapping[str, Any]], allowed: Sequence[str], iteration: int) -> str:
+def _fix_prompt(
+    section: str, findings: Sequence[Mapping[str, Any]], allowed: Sequence[str], iteration: int,
+    companions: Sequence[str] = (),
+) -> str:
+    companion_text = (
+        "Companion test files (existing tests that import the affected code; additions only):\n"
+        f"{json.dumps(list(companions))}\n"
+        "You MAY add a regression test to one of these files that fails without your fix and passes with it. "
+        "Only additions are allowed: new test functions (def test_...) or new test_* methods, registering a new "
+        "test function in an existing runner list (e.g. tests = [...] in main()), new imports, and new literal "
+        "constants. Existing tests must not be modified: do not change, reorder, remove or rename any existing "
+        "test, assertion, helper, statement or list element, and do not rebind an existing name. New tests must "
+        "not mutate module-level state (no global/nonlocal, setattr/delattr, or assignment into imported modules; "
+        "use unittest.mock.patch/patch.object instead) and may only use unittest/mock/pytest decorators. "
+        "Any other change to these files is rejected automatically.\n"
+        if companions else ""
+    )
     return (
         f"You are the bounded P7b code-repair worker for audit section {section!r}.\n\n"
         f"This is retry iteration {iteration}. Work ONLY in the supplied disposable Git worktree.\n"
-        f"Allowed files (exact relative paths; no other file may change): {json.dumps(list(allowed))}\n"
+        f"Allowed files (exact relative paths; no other file may change"
+        f"{' except the companion test files below' if companions else ''}): {json.dumps(list(allowed))}\n"
+        f"{companion_text}"
         f"Findings:\n{json.dumps(list(findings), indent=2, default=str)[:24000]}\n\n"
         "Rules:\n"
         "- Repair only a concrete application-code finding whose affected path is listed above.\n"
@@ -1400,6 +1811,7 @@ def _judge_prompt(section: str, findings: Sequence[Mapping[str, Any]], fix_packe
         f"VALIDATION:\n{json.dumps(list(validations), indent=2, default=str)[:10000]}\n\n"
         f"DIFF:\n{diff[:30000]}\n\n"
         "Reject unrelated paths, incomplete fixes, failed/missing validation, guessed behavior, or any infrastructure/security/credential change.\n"
+        "If the diff adds tests, fail the fix if any added test does not exercise the fixed behaviour, or could pass without the fix (i.e. would also pass on the unpatched base).\n"
         "Return ONLY this fenced JSON shape, using the exact finding claim text or id so the parent can match rows:\n"
         '{"verdict":"pass|partial|fail","reviewed":[{"finding":"...","ok":true,"note":"independent evidence"}],"summary":"one sentence"}'
     )
@@ -1454,6 +1866,7 @@ def _worker_repository(
     allowed = [_safe_relpath(path, kind=kind) for path in repository.get("allowed_paths") or []]
     if not allowed:
         raise WorkerPolicyError("worker repository has no allowed paths")
+    companions = _companion_paths(repository.get("companion_test_paths"), allowed, kind)
     if not workspace.is_absolute() or not workspace.is_dir():
         raise WorkerPolicyError(f"worker workspace missing: {workspace}")
     _initialise_snapshot(workspace)
@@ -1471,7 +1884,7 @@ def _worker_repository(
     ).stdout.strip()
     if not base_before:
         raise WorkerExecutionError("worker snapshot has no base commit")
-    fix_text = _omp_call(_fix_prompt(section, findings, allowed, iteration), workspace, timeout)
+    fix_text = _omp_call(_fix_prompt(section, findings, allowed, iteration, companions), workspace, timeout)
     fix_packet = _validate_fix_packet(_extract_json(fix_text))
     try:
         if git_config.read_bytes() != config_before:
@@ -1491,7 +1904,7 @@ def _worker_repository(
         for path in hooks.iterdir()
     ):
         raise WorkerPolicyError("worker created a Git hook")
-    diff, changed = _snapshot_diff(workspace, allowed)
+    diff, changed = _snapshot_diff(workspace, allowed, companions)
     # The judge gets a separate candidate copy so its read-only role cannot
     # alter the patch that will be handed to the parent.  The candidate itself
     # is still disposable and no changes from this second call are published.
@@ -1533,6 +1946,7 @@ def _worker_repository(
         "source": str(repository.get("source") or ""),
         "base_sha": str(repository.get("base_sha") or ""),
         "allowed_paths": allowed,
+        "companion_test_paths": companions,
         "changed_paths": changed,
         "diff": diff,
         "diff_sha256": _sha256_text(diff),

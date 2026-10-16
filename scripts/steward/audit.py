@@ -1339,6 +1339,16 @@ _CITATION_SENSITIVE_NAME_RE = re.compile(
 _CITATION_SENSITIVE_WORD_RE = re.compile(
     r"token|secret|credential|password|api[-_]?key", re.IGNORECASE
 )
+# Workers often cite bare or shortened paths (2026-10: 45 of 105 citations were
+# unopenable, e.g. `world.json:469-488`). Unopenable relative citations are
+# resolved by unique path-suffix match among bounded walks of these roots:
+# (home-relative root, max directory depth, max files).
+_CITATION_SEARCH_ROOTS = (
+    ("scripts", 6, 5000), ("notes/docs", 6, 5000), ("digests", 6, 10000), ("dev", 3, 3000),
+)
+_CITATION_SEARCH_SKIP_DIRS = frozenset(
+    ("node_modules", "__pycache__", "venv", "target", "dist", "build")
+)
 
 
 def _parse_finding_citations(findings):
@@ -1435,19 +1445,116 @@ def _read_citation_lines(raw, run_dir):
     return rel, data.decode("utf-8", errors="replace").splitlines(), None
 
 
+def _citation_file_index():
+    """Basename -> paths for bounded walks of _CITATION_SEARCH_ROOTS (newest dirs first)."""
+    home = Path(HOME)
+    index = {}
+    for root_rel, max_depth, max_files in _CITATION_SEARCH_ROOTS:
+        root = home / root_rel
+        count = 0
+        for dirpath, dirnames, filenames in os.walk(root):
+            depth = len(Path(dirpath).relative_to(root).parts)
+            dirnames[:] = sorted(
+                (name for name in dirnames
+                 if not name.startswith(".") and name not in _CITATION_SEARCH_SKIP_DIRS),
+                reverse=True,
+            ) if depth < max_depth else []
+            for name in filenames[:max_files - count]:
+                index.setdefault(name, []).append(Path(dirpath) / name)
+            count += len(filenames)
+            if count >= max_files:
+                break
+    return index
+
+
+def _resolve_citation_suffix(raw, sibling_dirs, index):
+    """Resolve a relative cited path by unique path-component suffix match.
+
+    Candidates are files under ``sibling_dirs`` (directories of citations that
+    did resolve) or their ancestors inside HOME, plus ``index``. Returns
+    (absolute path, None) or (None, "ambiguous: ...") or (None, None).
+    """
+    parts = Path(os.path.normpath(raw)).parts
+    if not parts or ".." in parts or raw.startswith(("/", "~")):
+        return None, None
+    home_real = Path(HOME).resolve()
+    matches = {}
+
+    def add(path):
+        if path.is_file():
+            matches.setdefault(path.resolve(), Path(os.path.normpath(path)))
+
+    for directory in sibling_dirs:
+        for ancestor in (directory, *directory.parents):
+            if ancestor != home_real and home_real not in ancestor.parents:
+                break
+            add(ancestor.joinpath(*parts))
+    for path in index.get(parts[-1], ()):
+        if path.parts[-len(parts):] == parts:
+            add(path)
+    if len(matches) == 1:
+        return next(iter(matches.values())), None
+    if not matches:
+        return None, None
+    preferred = [
+        path for real, path in matches.items() if any(d in real.parents for d in sibling_dirs)
+    ]
+    if len(preferred) == 1:
+        return preferred[0], None
+    names = sorted(
+        real.relative_to(home_real).as_posix() if home_real in real.parents else str(real)
+        for real in matches
+    )
+    shown = ", ".join(names[:3]) + (", …" if len(names) > 3 else "")
+    return None, f"ambiguous: {len(names)} files end with {raw} ({shown})"
+
+
 def _build_cited_excerpts(findings, run_dir=None):
     """Read the worker's file:line citations for the no-tools judge.
 
     Returns (text, citations): the CITED EXCERPTS prompt block and one
-    {"path", "start", "end", "status"} record per citation ("ok" or a reason).
+    {"path", "start", "end", "status"} record per citation ("ok" or a reason);
+    suffix-resolved citations also carry "cited", the path as the worker wrote it.
     """
     records = []
     seen = set()
     files = {}
     reads = {}
-    for raw, start, end in _parse_finding_citations(findings)[:_CITATION_MAX_COUNT]:
+    citations = _parse_finding_citations(findings)[:_CITATION_MAX_COUNT]
+    for raw, _, _ in citations:
         if raw not in reads:
             reads[raw] = _read_citation_lines(raw, run_dir)
+    # Unopenable bare/shortened citations: resolve by unique suffix match, then
+    # re-read the full path so it passes every sensitive-path check again.
+    sibling_dirs = sorted({
+        (Path(HOME).resolve() / label).parent
+        for label, lines, reason in reads.values() if reason is None
+    })
+    resolved_from = {}
+    index = None
+    pending = [raw for raw, (_, _, reason) in reads.items()
+               if reason == "not found" and not raw.startswith(("/", "~"))]
+    # Two passes: a citation resolved by suffix in the first pass becomes a
+    # sibling that can disambiguate another (research.py fixes contracts.py).
+    for _ in range(2):
+        progressed = False
+        for raw in list(pending):
+            if index is None:
+                index = _citation_file_index()
+            label = reads[raw][0]
+            path, ambiguity = _resolve_citation_suffix(raw, sibling_dirs, index)
+            if ambiguity:
+                reads[raw] = (label, None, ambiguity)
+            elif path is not None:
+                reads[raw] = _read_citation_lines(str(path), run_dir)
+                resolved_from[raw] = reads[raw][0]
+                pending.remove(raw)
+                if reads[raw][2] is None:
+                    sibling_dirs = sorted({*sibling_dirs, (Path(HOME).resolve() / reads[raw][0]).parent})
+                    progressed = True
+        if not progressed or not pending:
+            break
+    for raw, start, end in citations:
         label, lines, reason = reads[raw]
         if (label, start, end) in seen:
             continue
@@ -1455,6 +1562,8 @@ def _build_cited_excerpts(findings, run_dir=None):
         if lines is not None and start > len(lines):
             reason = f"line {start} beyond end of file ({len(lines)} lines)"
         record = {"path": label, "start": start, "end": end, "status": reason or "ok"}
+        if raw in resolved_from:
+            record["cited"] = raw
         records.append(record)
         if reason:
             continue
@@ -1541,6 +1650,10 @@ SECTION GUIDANCE:
 Rules:
 - Ground every claim in the collected evidence or in files you read yourself
   (cite specific file:line or evidence key).
+- Cite every file by its full home-relative path (e.g.
+  `digests/news/publications/2026-10-13/world.json:469`) or absolute path — never
+  a bare filename (`world.json:469`) or an abbreviated path missing its leading
+  directories (`ai-hardware/...` for `digests/ai-hardware/...`).
 - Your only tools are read, grep, and glob. You cannot run commands, use the
   network, or change anything; when a fact is neither in the evidence nor in a
   readable file, mark it UNVERIFIABLE instead of guessing.

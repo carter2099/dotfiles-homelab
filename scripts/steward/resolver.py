@@ -13,12 +13,14 @@ is recorded.  A ``--no-tools`` model call with the evidence inlined picks one
 action from the item class's fixed menu and must cite evidence; atomic Jev Noul
 questions then gate it:
 
-* every answer certain >= 0.9 on the "yes" side -> act (commit/revert/doc_fix
-  only, within the hard limits below);
-* >= 0.6 -> Needs You with the recommendation and one ``steward-approve``
-  command;
-* lower, a "no" answer, or any Jev/model failure -> unknown (Needs You as
-  before, with the evidence summary).
+* every answer "yes" with Jev certainty >= 0.9 -> act (commit/revert/doc_fix
+  only, within the hard limits below).  Certainty is ``|2p - 1|`` of each
+  answer's probability p, taking the minimum over all answers, so acting
+  needs every answer at p >= 0.95;
+* every answer at p >= 0.8 (certainty >= 0.6) -> Needs You with the
+  recommendation and one ``steward-approve`` command;
+* lower, a "no" answer (p <= 0.5), or any Jev/model failure -> unknown (Needs
+  You as before, with the evidence summary).
 
 Hard limits live in code: secret scans, private publish globs, paths owned by
 an active interactive session, fingerprinted steward source/policy, network/
@@ -50,7 +52,7 @@ from typing import Any, Callable, Iterable, Mapping
 import jev
 
 from . import dotfiles, public_dotfiles, routing, runtime
-from .config import HOME, P7B_REPORT_ONLY_SECTIONS, STEWARD_MODEL
+from .config import DOC_FIX_FILES, HOME, P7B_REPORT_ONLY_SECTIONS, STEWARD_MODEL
 from .runtime import atomic_write_json, run_capture_ok
 
 ARTIFACT = "07c-resolve.json"
@@ -128,7 +130,7 @@ AUTONOMOUS_ACTIONS = frozenset({"commit", "revert", "doc_fix"})
 ACTION_MEANING = {
     "commit": "commit the exact modified tracked path(s) to the private dotfiles repo as they are now",
     "revert": "restore the tracked path(s) to the committed version, discarding the uncommitted edit",
-    "doc_fix": "replace one exact passage in a doc under ~/notes/docs with corrected text",
+    "doc_fix": "replace one exact passage with corrected text in a doc {doc_scope}",
     "patch": "edit a config/code file (exact OLD -> NEW); only ever applied by Carter's approval command",
     "hold": "do nothing; leave the item for Carter",
 }
@@ -316,6 +318,8 @@ class ResolveContext:
     session_root: Path | None = None
     memoir_root: Path | None = None
     doc_roots: tuple[Path, ...] | None = None
+    # Exact files P7b's doc route also accepts (config.DOC_FIX_FILES, rebased onto ``home``).
+    doc_files: tuple[Path, ...] | None = None
     policy_path: Path | None = None
     protected_paths: frozenset[str] = frozenset()
     omp_call: Callable[..., str] | None = None
@@ -337,6 +341,9 @@ class ResolveContext:
         self.session_root = Path(self.session_root or self.home / ".omp" / "agent" / "sessions")
         self.memoir_root = Path(self.memoir_root or self.home / "notes" / "logs" / "sessions")
         self.doc_roots = tuple(Path(p) for p in (self.doc_roots or (self.home / "notes" / "docs",)))
+        if self.doc_files is None:
+            self.doc_files = tuple(self.home / Path(p).relative_to(HOME) for p in DOC_FIX_FILES)
+        self.doc_files = tuple(Path(p) for p in self.doc_files)
         self.policy_path = Path(self.policy_path or self.home / public_dotfiles.POLICY_REL)
         if self.deadline is None:
             self.deadline = time.monotonic() + PHASE_SECONDS
@@ -980,15 +987,34 @@ def _rig_sha256_over_ssh(dest: str) -> str | None:
 # ── decision ─────────────────────────────────────────────────────────
 
 
-def _decision_prompt(item: Item, ev: Evidence, menu: tuple[str, ...]) -> str:
+def _tilde(path: Path, home: Path) -> str:
+    try:
+        return "~/" + Path(path).relative_to(home).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _doc_scope(ctx: ResolveContext) -> str:
+    """Where doc_fix may edit: under the doc roots or one of the exact doc files."""
+    scope = "under " + " or ".join(_tilde(r, ctx.home) for r in ctx.doc_roots)
+    if ctx.doc_files:
+        scope += " or one of these files: " + ", ".join(_tilde(f, ctx.home) for f in ctx.doc_files)
+    return scope
+
+
+def _action_meaning(action: str, ctx: ResolveContext) -> str:
+    return ACTION_MEANING[action].format(doc_scope=_doc_scope(ctx)) if action == "doc_fix" else ACTION_MEANING[action]
+
+
+def _decision_prompt(item: Item, ev: Evidence, menu: tuple[str, ...], ctx: ResolveContext) -> str:
     evidence = "\n\n".join(
         f"[{e['label']}] ({e['kind']}; {e['source']})\n{e['text']}" for e in ev.entries
     )
-    options = "\n".join(f"- {name}: {ACTION_MEANING[name]}" for name in menu)
+    options = "\n".join(f"- {name}: {_action_meaning(name, ctx)}" for name in menu)
     extra = ""
     if "doc_fix" in menu:
         extra += (
-            '\nFor doc_fix also return "doc_edit": {"doc": "<path under ~/notes/docs>", '
+            f'\nFor doc_fix also return "doc_edit": {{"doc": "<~/ path of a doc {_doc_scope(ctx)}>", '
             '"old_text": "<exact current text, occurring once>", "new_text": "<replacement>"}.'
         )
     if "patch" in menu:
@@ -1024,8 +1050,11 @@ def _exact_edit(raw: Any, ctx: ResolveContext, *, doc: bool, is_private: Callabl
     if not rel:
         raise Unknown("the proposed edit names no file under home")
     path = ctx.home / rel
-    if doc and not any(path.resolve().is_relative_to(r.resolve()) for r in ctx.doc_roots):
-        raise Unknown(f"{rel} is outside the doc roots")
+    if doc and not (
+        any(path.resolve().is_relative_to(r.resolve()) for r in ctx.doc_roots)
+        or path.resolve() in {f.resolve() for f in ctx.doc_files}
+    ):
+        raise Unknown(f"{rel} is outside the doc roots and doc files")
     if is_private(rel) or dotfiles._is_sensitive(rel):
         raise Unknown(f"{rel} is private or credential-like")
     old, new = raw.get("old_text"), raw.get("new_text")
@@ -1048,7 +1077,7 @@ def _exact_edit(raw: Any, ctx: ResolveContext, *, doc: bool, is_private: Callabl
 
 def decide(ctx: ResolveContext, item: Item, ev: Evidence, menu: tuple[str, ...],
            is_private: Callable[[str], bool]) -> dict[str, Any]:
-    prompt = _decision_prompt(item, ev, menu)
+    prompt = _decision_prompt(item, ev, menu, ctx)
     hit = secret_reason(prompt)
     if hit:
         raise SecretHold(f"the assembled model prompt failed the secret scan ({hit}); nothing was sent")
@@ -1078,7 +1107,8 @@ def decide(ctx: ResolveContext, item: Item, ev: Evidence, menu: tuple[str, ...],
     return decision
 
 
-def _jev_state(item: Item, ev: Evidence, decision: Mapping[str, Any], diffs: Mapping[str, str]) -> dict[str, Any]:
+def _jev_state(ctx: ResolveContext, item: Item, ev: Evidence, decision: Mapping[str, Any],
+               diffs: Mapping[str, str]) -> dict[str, Any]:
     action = decision["action"]
     if action in ("commit", "revert"):
         proposal: Any = {rel: diffs.get(rel, "") for rel in item.paths}
@@ -1089,7 +1119,7 @@ def _jev_state(item: Item, ev: Evidence, decision: Mapping[str, Any], diffs: Map
         "item_class": item.klass,
         "claim": item.claim,
         "proposed_action": action,
-        "action_meaning": ACTION_MEANING[action],
+        "action_meaning": _action_meaning(action, ctx),
         "proposal": proposal,
         "resolver_rationale": decision.get("rationale", ""),
         "evidence": [f"[{e['label']}] ({e['kind']}; {e['source']}) {e['text']}" for e in ev.entries
@@ -1280,7 +1310,8 @@ def execute_doc_fix(ctx: ResolveContext, item: Item, edit: Mapping[str, Any]) ->
     })
     route_ctx = routing.RouteContext(
         dry_run=False, run_dir=ctx.run_dir, home=ctx.home,
-        doc_roots=tuple(ctx.doc_roots), doc_files=(), omp_call=ctx.omp_call,
+        doc_roots=tuple(ctx.doc_roots), doc_files=tuple(ctx.doc_files),
+        dotfiles_git_dir=ctx.git_dir, omp_call=ctx.omp_call,
     )
     row = routing.execute_doc_fix(item.section, finding, route_ctx)
     if row.get("status") != "done":
@@ -1437,7 +1468,7 @@ def resolve_item(ctx: ResolveContext, item: Item, *, statuses: Mapping[str, str]
             blocked[edit["path"]] = owner
     else:
         record["proposal"] = {"hashes": hashes}
-    gate = jev_gate(ctx, _jev_state(item, ev, decision, diffs), decision["action"])
+    gate = jev_gate(ctx, _jev_state(ctx, item, ev, decision, diffs), decision["action"])
     record["jev"] = gate
     record["tier"] = gate["tier"]
     record["certainty"] = gate.get("certainty", 0.0)
@@ -1783,6 +1814,7 @@ def _cli(argv: list[str] | None = None) -> int:
             session_root=HOME / ".omp" / "agent" / "sessions",
             memoir_root=HOME / "notes" / "logs" / "sessions",
             doc_roots=(HOME / "notes" / "docs",),
+            doc_files=DOC_FIX_FILES,
             policy_path=HOME / public_dotfiles.POLICY_REL,
         )
     if args.as_of:

@@ -453,7 +453,13 @@ def _openwebui_update_text(step):
         return f"open-webui: {pre} -> {post}", "#2a2a36"
     if status == "rolled_back":
         return f"open-webui: update to {latest} rolled back — {detail}", "#e65100"
-    if status == "warning":
+    # A newer release held back by the transaction's own guards waits for the
+    # next night; release-type, dry-run and "current" skips are not deferrals.
+    newer_skipped = (
+        status == "skipped" and str(step.get("reason") or "").startswith(("preflight:", "baseline:"))
+        and step.get("latest_tag") and step["latest_tag"] != pre
+    )
+    if status == "warning" or newer_skipped:
         return f"open-webui: update to {latest} deferred — {detail}", "#e65100"
     if status in _P1_FAILURE_STATUSES:
         return f"open-webui: {_p1_status_label(status)} — {detail}", "#c62828"
@@ -1296,6 +1302,42 @@ def _audit_incomplete_summary(payload):
     )
 
 
+def _audit_unverifiable_summary(payload):
+    """Deterministic wording for UNVERIFIABLE sections; zero confirmed findings is not a pass."""
+    label = payload["name"].replace("_", " ")
+    rejected = payload.get("rejected") or []
+    count = len(rejected) or payload.get("n_worker_findings") or 0
+    items = []
+    for r in rejected[:3]:
+        item = _clip(r.get("claim"), 200)
+        reason = _clip(r.get("reason"), 160)
+        if item and reason:
+            item += f" (not verified: {reason})"
+        if item:
+            items.append(item)
+    head = (
+        f"The {label} audit could not verify {count} finding(s)"
+        if count else f"The {label} audit could not verify its findings"
+    )
+    if items:
+        head += ": " + "; ".join(items)
+    if len(rejected) > len(items):
+        head += f"; {len(rejected) - len(items)} more"
+    error = str(payload.get("error") or "").strip().split("\n", 1)[0][:180]
+    if error:
+        head += f" ({error})"
+    return (
+        f"{head}. Nothing was confirmed or ruled out; the section runs again next night."
+    )
+
+
+def _audit_section_deterministic(verdict):
+    """Sections whose wording must not come from the summary model."""
+    base = str(verdict or "").removeprefix("cached-")
+    return str(verdict or "").endswith("-failed") or base == "UNVERIFIABLE"
+
+
+
 def _summarize_audit_sections(section_payloads):
     """One LLM call → {section_name: summary_text}. Falls back per-section."""
     if not section_payloads:
@@ -1378,6 +1420,8 @@ def _html_audit(audit_data, fixes_data=None):
             "verdict": verdict,
             "findings": _section_findings_text(sec, date_str),
             "routes": routes_by_section.get(name, []),
+            "rejected": [r for r in sec.get("judge_rejected") or [] if isinstance(r, dict)],
+            "n_worker_findings": len(sec.get("worker_findings") or []),
             "error": (
                 sec.get("error")
                 or sec.get("worker_error")
@@ -1390,7 +1434,7 @@ def _html_audit(audit_data, fixes_data=None):
         return '<p style="margin:0; color:#888; font-size:13px;">All audit sections clear.</p>'
 
     summaries = _summarize_audit_sections([
-        p for p in payloads if not p["verdict"].endswith("-failed")
+        p for p in payloads if not _audit_section_deterministic(p["verdict"])
     ])
 
     out = []
@@ -1406,6 +1450,8 @@ def _html_audit(audit_data, fixes_data=None):
         )
         if p["verdict"].endswith("-failed"):
             summary = _audit_incomplete_summary(p)
+        elif _audit_section_deterministic(p["verdict"]):
+            summary = _audit_unverifiable_summary(p)
         else:
             summary = summaries.get(name) or _route_section_summary(p["routes"], p["findings"])
         out.append(

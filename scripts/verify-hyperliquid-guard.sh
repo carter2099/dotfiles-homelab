@@ -105,7 +105,7 @@ run_artifact_check() {
 # After the state check it must also fail on a dirty checkout (exit 4), on a
 # commit that is not on origin/dev (exit 5), and when a fresh clone of
 # origin/dev is red (exit 6); the clone gate must run `bundle exec rake` with
-# RBENV_VERSION=3.4.10 and BUNDLE_FROZEN=true, without the private key, inside
+# RBENV_VERSION=3.4.11 and BUNDLE_FROZEN=true, without the private key, inside
 # a clone of the pushed tip rather than the checkout.
 # The wrapper never emails a failure itself: the unit's OnFailure= does, so no
 # case may reach the mailer stub. Runs against a throwaway HOME (whose
@@ -287,7 +287,7 @@ MD
       origin_tip="$(fixture_git --git-dir="$fixture_origin" rev-parse dev)"
       if [[ ! -f "$bundle_log" ]] \
         || ! grep -qx 'args=exec rake' "$bundle_log" \
-        || ! grep -qx 'env=RBENV_VERSION:3.4.10 BUNDLE_FROZEN:true signing_key:' "$bundle_log" \
+        || ! grep -qx 'env=RBENV_VERSION:3.4.11 BUNDLE_FROZEN:true signing_key:' "$bundle_log" \
         || ! grep -qx "sha=$origin_tip" "$bundle_log" \
         || grep -q "^cwd=$fixture_home/dev/hyperliquid" "$bundle_log"; then
         printf 'FATAL: wrapper %s clone gate did not run rake on a fresh key-less clone of origin/dev %s:\n%s\n' \

@@ -5,7 +5,7 @@ description: Release the Hyperliquid Ruby SDK — merges dev into main, bumps ve
 # hyperliquid-release
 
 Repo: `~/dev/hyperliquid`
-Ruby: always use `RBENV_VERSION=3.4.10` (plus the required `RBENV_VERSION=3.3.12` leg in Step 2)
+Ruby: always use `RBENV_VERSION=3.4.11` (plus the required `RBENV_VERSION=3.3.12` leg in Step 2)
 
 ## Operating principles (bake these in — do not ask Carter to repeat them)
 
@@ -46,7 +46,7 @@ Wait for Carter's confirmation (or override) before continuing.
 
 ```bash
 cd ~/dev/hyperliquid
-RBENV_VERSION=3.4.10 bundle exec rake verify   # specs + RuboCop, then again in a clean clone of HEAD with BUNDLE_FROZEN=true
+RBENV_VERSION=3.4.11 bundle exec rake verify   # specs + RuboCop, then again in a clean clone of HEAD with BUNDLE_FROZEN=true
 RBENV_VERSION=3.3.12 bundle exec rake          # Ruby 3.3 is a required CI leg (`Ruby 3.3`)
 ```
 
@@ -57,7 +57,7 @@ Both must pass (`0 failures`, no offenses). If anything fails, stop and surface 
 ```bash
 cd ~/dev/hyperliquid
 source ~/.config/hyperliquid-agent/env
-HL_GATE_STRICT=1 HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY RBENV_VERSION=3.4.10 bundle exec rake integration
+HL_GATE_STRICT=1 HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY RBENV_VERSION=3.4.11 bundle exec rake integration
 ```
 
 The final `INTEGRATION GATE: …` line and `tmp/integration-summary.json` are
@@ -70,7 +70,7 @@ If the gate is not PASS:
 1. List every non-PASS script by name with its status and `result_line` from
    `tmp/integration-summary.json`.
 2. For each FAIL/TIMEOUT, re-run that script alone to capture its exact error
-   (`HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY RBENV_VERSION=3.4.10 bundle exec ruby scripts/test_NN_name.rb`).
+   (`HYPERLIQUID_PRIVATE_KEY=$HYPERLIQUID_PRIVATE_KEY RBENV_VERSION=3.4.11 bundle exec ruby scripts/test_NN_name.rb`).
 3. Check `git log <previous-tag>..HEAD -- <relevant lib file>` to see whether this release touched the affected code.
 4. Present every non-PASS script to Carter by name with your diagnosis (regression or not, and why), and ask whether to waive or abort. **Never waive unilaterally.**
 
@@ -97,7 +97,7 @@ Edit `lib/hyperliquid/version.rb` to set the new version string.
 
 ```bash
 cd ~/dev/hyperliquid
-RBENV_VERSION=3.4.10 bundle install
+RBENV_VERSION=3.4.11 bundle install
 ```
 
 Confirm the lockfile now shows `hyperliquid (X.Y.Z)` matching the new version.
@@ -123,7 +123,7 @@ the workflow's):
 
 ```bash
 cd ~/dev/hyperliquid
-v=$(RBENV_VERSION=3.4.10 ruby -Ilib -rhyperliquid/version -e 'print Hyperliquid::VERSION')
+v=$(RBENV_VERSION=3.4.11 ruby -Ilib -rhyperliquid/version -e 'print Hyperliquid::VERSION')
 awk '
   /^## \[[0-9]/ { count++; if (count == 2) exit }
   count == 1 { print }
@@ -165,7 +165,7 @@ git commit -m "version to X.Y.Z"
 ## Step 10: Run tests one final time on main
 
 ```bash
-RBENV_VERSION=3.4.10 bundle exec rake
+RBENV_VERSION=3.4.11 bundle exec rake
 ```
 
 Must pass. If anything broke in the merge, fix it now.
@@ -220,7 +220,7 @@ Then build and check the package:
 ```bash
 cd ~/dev/hyperliquid
 git ls-files -z | xargs -0 chmod a+r
-RBENV_VERSION=3.4.10 bundle exec rake build
+RBENV_VERSION=3.4.11 bundle exec rake build
 v=X.Y.Z; gem="$HOME/dev/hyperliquid/pkg/hyperliquid-$v.gem"
 # every packaged entry world-readable: must print nothing
 tar -xOf "$gem" data.tar.gz | tar -tvz | grep -vE '^.{7}r'
@@ -246,9 +246,9 @@ signing only; no request is sent):
 ```bash
 v=X.Y.Z; gem="$HOME/dev/hyperliquid/pkg/hyperliquid-$v.gem"
 t=$(mktemp -d); cd "$t"
-env -u BUNDLE_GEMFILE -u RUBYOPT GEM_HOME="$t/gems" GEM_PATH="$t/gems" RBENV_VERSION=3.4.10 \
+env -u BUNDLE_GEMFILE -u RUBYOPT GEM_HOME="$t/gems" GEM_PATH="$t/gems" RBENV_VERSION=3.4.11 \
   gem install --no-document "$gem"
-env -u BUNDLE_GEMFILE -u RUBYOPT GEM_HOME="$t/gems" GEM_PATH="$t/gems" RBENV_VERSION=3.4.10 ruby -e '
+env -u BUNDLE_GEMFILE -u RUBYOPT GEM_HOME="$t/gems" GEM_PATH="$t/gems" RBENV_VERSION=3.4.11 ruby -e '
 v = ARGV.fetch(0)
 require "hyperliquid"
 abort "VERSION #{Hyperliquid::VERSION} != #{v}" unless Hyperliquid::VERSION == v
@@ -279,7 +279,7 @@ RubyGems OTPs expire in ~30 s, so the OTP request must be the very last thing be
 
 ```bash
 cd ~/dev/hyperliquid
-RBENV_VERSION=3.4.10 gem push pkg/hyperliquid-X.Y.Z.gem --otp <OTP>
+RBENV_VERSION=3.4.11 gem push pkg/hyperliquid-X.Y.Z.gem --otp <OTP>
 ```
 
 Confirm success (`Successfully registered gem: hyperliquid (X.Y.Z)`). If the push fails, **stop**: do not tag and do not create a GitHub Release. Report the error. If credentials are missing (`Invalid credentials / 401`), tell Carter: "No RubyGems credentials on this host. Either push from another machine or run `gem signin` here first, then give me a fresh OTP." For an expired/invalid OTP, ask for a new one — always a fresh OTP after any detour.

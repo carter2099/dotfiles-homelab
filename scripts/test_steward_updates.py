@@ -498,6 +498,31 @@ class DelayedUpdateTests(unittest.TestCase):
         self.assertEqual(facts["n_sections_open"], 0)
         self.assertEqual(facts["n_sections_incomplete"], 1)
 
+    def test_unverifiable_audit_section_gets_fixed_text_not_model_summary(self):
+        audit_data = {"sections": [{
+            "name": "digest-quality",
+            "verdict": "UNVERIFIABLE",
+            "judge_confirmed": [],
+            "judge_error": "",
+            "worker_findings": [{"id": "finding-1", "claim": "Maia 300 duplicated"}],
+            "judge_rejected": [{
+                "id": "finding-1",
+                "claim": "The 2026-10-13 edition carries Microsoft's Maia 300 launch twice.",
+                "reason": "Every citation the duplicate depends on is unreadable.",
+            }],
+        }]}
+        model = Mock(return_value=(
+            '```json\n{"summaries": {"digest-quality": "No problems were found."}}\n```'))
+        with patch.object(report, "_call_omp_p", model):
+            rendered = report._html_audit(audit_data, {"sections": []})
+        model.assert_not_called()
+        self.assertNotIn("No problems were found", rendered)
+        self.assertIn("Audit incomplete", rendered)
+        self.assertIn("could not verify 1 finding(s)", rendered)
+        self.assertIn("Maia 300 launch twice", rendered)
+        self.assertIn("citation the duplicate depends on is unreadable", rendered)
+        self.assertIn("runs again next night", rendered)
+
     def test_version_currency_is_report_only(self):
         sections = [
             {
@@ -1879,7 +1904,7 @@ class OpenWebUIUpdateTests(unittest.TestCase):
                 "published_at": published, "body": body}
 
     def _run(self, tmp, *, verify=(("", {}),), db_state=None, dry_run=False,
-             release=None, pull=None):
+             release=None, pull=None, container_states=None):
         """Run the full guarded transaction against fakes; return (result, calls)."""
         compose = Path(tmp) / "docker-compose.yml"
         compose.write_text(self.OLD)
@@ -1905,6 +1930,7 @@ class OpenWebUIUpdateTests(unittest.TestCase):
             patch.object(updates, "OPENWEBUI_COMPOSE", compose),
             patch.object(updates, "OPENWEBUI_RECOVERY_ROOT", Path(tmp) / "recovery"),
             patch.object(updates, "_owui_container_state",
+                         side_effect=container_states,
                          return_value={"status": "running", "health": "healthy"}),
             patch.object(updates, "_owui_api_version", return_value="0.11.1"),
             patch.object(updates, "_owui_free_space_problem", return_value=""),
@@ -2023,6 +2049,51 @@ class OpenWebUIUpdateTests(unittest.TestCase):
         self.assertEqual((result["status"], result["reason"]), ("skipped", "current"))
         self.assertEqual(compose, self.OLD)
         self.assertEqual(calls, {"compose": [], "sudo": [], "verify": []})
+
+    def test_preflight_waits_for_starting_container_to_turn_healthy(self):
+        starting = {"status": "running", "health": "starting"}
+        states = iter([starting, starting])
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(updates.time, "sleep") as sleep:
+                result, _, compose = self._run(
+                    tmp, container_states=lambda: next(
+                        states, {"status": "running", "health": "healthy"}))
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("open-webui:0.11.3", compose)
+        self.assertEqual(
+            [c.args for c in sleep.call_args_list[:2]],
+            [(updates.OPENWEBUI_PREFLIGHT_POLL,)] * 2)
+
+    def test_preflight_skips_container_that_stays_starting(self):
+        starting = {"status": "running", "health": "starting"}
+        clock = iter(range(0, 10_000, updates.OPENWEBUI_PREFLIGHT_POLL))
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(updates.time, "sleep") as sleep,
+                patch.object(updates.time, "monotonic", side_effect=lambda: next(clock)),
+            ):
+                result, calls, compose = self._run(
+                    tmp, container_states=lambda: starting)
+        self.assertEqual(result["status"], "skipped")
+        self.assertTrue(result["reason"].startswith(
+            "preflight: open-webui is not running+healthy"))
+        self.assertEqual(compose, self.OLD)
+        self.assertEqual(calls, {"compose": [], "sudo": [], "verify": []})
+        self.assertGreater(sleep.call_count, 1)
+        sleep.assert_called_with(updates.OPENWEBUI_PREFLIGHT_POLL)
+
+    def test_skipped_newer_release_renders_deferred_but_current_is_silent(self):
+        deferred = {"step": "openwebui_update", "status": "skipped",
+                    "pre_version": "0.12.1", "post_version": "0.12.1",
+                    "latest_tag": "0.12.2",
+                    "reason": "preflight: open-webui is not running+healthy "
+                              "({'status': 'running', 'health': 'starting'})"}
+        text, color = report._openwebui_update_text(deferred)
+        self.assertTrue(text.startswith(
+            "open-webui: update to 0.12.2 deferred — preflight: open-webui is not running+healthy"))
+        self.assertEqual(color, "#e65100")
+        current = {**deferred, "latest_tag": "0.12.1", "reason": "current"}
+        self.assertEqual(report._openwebui_update_text(current), ("", ""))
 
     def test_previous_image_removed_only_after_health_pass(self):
         images = {"ghcr.io/open-webui/open-webui:0.11.1": "sha256:old"}
