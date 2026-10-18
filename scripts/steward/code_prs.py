@@ -27,7 +27,7 @@ from typing import Any, Mapping, Sequence
 
 from .code_pickup import BRANCH_PREFIX, HOLD_LABEL, LABEL, OBJECTION_WINDOW, PR_MARKER
 from .config import DOTFILES_REPO
-from .dotfiles import scan_diff_for_secrets
+from .public_dotfiles import scan_diff
 from .worker import steward_code_path_reason, steward_code_validation_commands
 
 MAX_PRS_PER_NIGHT = 1
@@ -207,7 +207,10 @@ def gate(ctx, repo, base, commit, section_result):
         raise StewardCodeRejected(f"patch changes {changed} lines (cap {MAX_CHANGED_LINES})")
     diff = _must(_git(ctx, repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
                       base, commit), "diff")
-    secrets = scan_diff_for_secrets(diff)
+    # The publication scanner (also used by dotfiles-commit) is a superset of
+    # P9b's rules but exempts plain URLs from the entropy heuristic; P9b's flagged
+    # every long public URL in a test fixture (2026-10-17 changelog fix blocked).
+    secrets = scan_diff(diff, mac=False)
     if secrets:
         where = ", ".join(f"{s.get('path')}:{s.get('line')} ({s.get('rule')})" for s in secrets[:5])
         raise StewardCodeRejected(f"secret scan flagged {where}")

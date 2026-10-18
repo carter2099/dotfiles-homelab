@@ -1052,7 +1052,9 @@ def _ci_green(github, sha, *, allow_pending=False):
     success/neutral/skipped conclusion (statuses: state success).  With
     ``allow_pending`` a set GitHub has not fully created/concluded yet returns
     ``(None, detail)`` — pending, not a red verdict — so the caller can re-read
-    it; a completed failure still returns ``(False, detail)``.
+    it; a run cancelled by a newer push (``cancel-in-progress`` concurrency) is
+    no verdict either and is pending too.  A completed failure still returns
+    ``(False, detail)``.
     """
     env = user_env()
     out, err, code = run_capture_ok(
@@ -1089,8 +1091,11 @@ def _ci_green(github, sha, *, allow_pending=False):
         f"{status.get('context')}: {status.get('state')}"
         for status in statuses if status.get("state") not in ("success", "pending")
     ]
-    if problems:
+    cancelled = [problem for problem in problems if problem.endswith("/cancelled")]
+    if problems and not (allow_pending and len(cancelled) == len(problems)):
         return False, "; ".join(problems[:6])
+    if cancelled:
+        return None, "; ".join((cancelled + incomplete)[:6])
     if not runs and not statuses:
         return (None if allow_pending else False), "no CI checks reported"
     if incomplete:
@@ -1109,7 +1114,10 @@ def _p1_app_deploy(service, spec, dry_run=False, *, sleep=time.sleep):
     ``version_cmd`` reports for services deployed as a built artifact.  A
     commit merged by this run's dependabot_merge step can still be waiting on
     its first check run, so that case is re-read for a bounded interval
-    instead of being reported as a not-green commit.
+    instead of being reported as a not-green commit; when origin/main moves
+    meanwhile to a descendant (whose push cancelled the target's CI), that
+    descendant becomes the target within the same interval and the row
+    records ``superseded_from``.
     """
     print(f"  [1k] app deploy: {service}")
     env = user_env()
@@ -1158,16 +1166,50 @@ def _p1_app_deploy(service, spec, dry_run=False, *, sleep=time.sleep):
         return skip(f"canonical checkout {repo} has uncommitted changes"
                     if code == 0 else f"git status failed in {repo}: {err}")
     local, _, _ = git(repo, "rev-parse", "HEAD")
-    if git(repo, "merge-base", "--is-ancestor", local, target)[2] != 0:
-        return skip(f"canonical main {local[:7]} cannot fast-forward to origin/main {target[:7]}")
-    if git(repo, "merge-base", "--is-ancestor", pre, target)[2] != 0:
-        return skip(f"production HEAD {pre[:7]} is not an ancestor of origin/main {target[:7]}")
+
+    def ancestry_gate(sha):
+        if git(repo, "merge-base", "--is-ancestor", local, sha)[2] != 0:
+            return f"canonical main {local[:7]} cannot fast-forward to origin/main {sha[:7]}"
+        if git(repo, "merge-base", "--is-ancestor", pre, sha)[2] != 0:
+            return f"production HEAD {pre[:7]} is not an ancestor of origin/main {sha[:7]}"
+        return None
+
+    def newer_descendant(sha):
+        """origin/main re-read, when it moved to a commit descending from ``sha``."""
+        if git(repo, "fetch", "--prune", "origin", "main", timeout=120)[2] != 0:
+            return None
+        head, _, code = git(repo, "rev-parse", "--verify", "origin/main^{commit}")
+        if code != 0 or not head or head == sha:
+            return None
+        if git(repo, "merge-base", "--is-ancestor", sha, head)[2] != 0:
+            return None
+        return head
+
+    reason = ancestry_gate(target)
+    if reason:
+        return skip(reason)
     age = _commit_age_seconds(repo, target)
     green, detail = _ci_green(spec["github"], target,
                              allow_pending=age is not None and age < CI_PENDING_MAX_AGE)
+    # While the target has no verdict yet, a newer descendant on origin/main
+    # (several auto-merges landing together) can cancel its CI run before any
+    # check exists; wait on that newer commit instead, within the same budget.
+    superseded = []
     if green is None:
         for _ in range(CI_CHECK_RECHECKS):
             sleep(CI_CHECK_RECHECK_SECONDS)
+            green, detail = _ci_green(spec["github"], target, allow_pending=True)
+            if green is not None:
+                break  # a verdict on the target itself (a red one is never bypassed)
+            newer = newer_descendant(target)
+            if not newer:
+                continue
+            reason = ancestry_gate(newer)
+            if reason:
+                return skip(reason)
+            superseded.append(target)
+            target = newer
+            row.update({"target_version": target, "superseded_from": list(superseded)})
             green, detail = _ci_green(spec["github"], target, allow_pending=True)
             if green is not None:
                 break
@@ -1175,13 +1217,16 @@ def _p1_app_deploy(service, spec, dry_run=False, *, sleep=time.sleep):
         green, detail = False, (
             f"no check run completed within "
             f"{CI_CHECK_RECHECKS * CI_CHECK_RECHECK_SECONDS}s: {detail}")
+    if superseded:
+        detail += "; superseded " + ", ".join(sha[:7] for sha in superseded)
     row["ci"] = detail
     if not green:
         return skip(f"origin/main {target[:7]} is not CI-green: {detail}")
     if dry_run:
         return skip(f"dry run: would deploy {pre[:7]} -> {target[:7]}")
     if local != target:
-        _, err, code = git(repo, "merge", "--ff-only", "origin/main", timeout=120)
+        # The exact commit verified above: origin/main may have moved since.
+        _, err, code = git(repo, "merge", "--ff-only", target, timeout=120)
         if code != 0:
             return skip(f"fast-forward of canonical main failed: {err}")
 

@@ -1321,7 +1321,8 @@ def _apply_deterministic_audit_guards(section_name, evidence, verdict, confirmed
 _CITATION_RE = re.compile(
     r"(?<![\w.@+~/-])"
     r"(?P<path>~?/?(?:[\w.@+-]+/)*[\w.@+-]+)"
-    r":(?P<ranges>\d+(?:[-–]\d+)?(?:,\d+(?:[-–]\d+)?)*)(?!\d)"
+    # `(?!\.\d)`: `open-webui:0.12.3` is an image tag, not line 0 of a file.
+    r":(?P<ranges>\d+(?:[-–]\d+)?(?:,\d+(?:[-–]\d+)?)*)(?!\d|\.\d)"
 )
 _CITATION_EXTENSION_RE = re.compile(r"\.[A-Za-z][\w-]*$")
 _CITATION_CONTEXT_LINES = 2

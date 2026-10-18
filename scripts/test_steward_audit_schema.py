@@ -259,7 +259,8 @@ class CitedExcerptTests(unittest.TestCase):
     def test_parses_single_line_ranges_lists_and_punctuation(self):
         findings = [
             _finding(evidence="see `scripts/x.py:3-4`, then (notes/a.json:7).",
-                     claim="'b.py:1-2,10-12' differs; localhost:8080 is unrelated",
+                     claim="'b.py:1-2,10-12' differs; localhost:8080 is unrelated; image "
+                           "ghcr.io/open-webui/open-webui:0.12.3 is not a citation",
                      fix='edit "~/c.md:5"'),
             _finding(evidence="again scripts/x.py:3-4"),
         ]

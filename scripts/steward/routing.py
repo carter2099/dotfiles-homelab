@@ -284,21 +284,41 @@ def _push(repo, ctx, sha, branch):
 # ── doc_fix ──────────────────────────────────────────────────────────
 
 
+def _repo_top(ctx, directory):
+    """The plain git work tree containing ``directory``, or None."""
+    if not directory.is_dir():
+        return None
+    cp = ctx.run(["git", "-C", str(directory), "rev-parse", "--show-toplevel"])
+    if cp.returncode != 0 or not cp.stdout.strip():
+        return None
+    return Path(cp.stdout.strip()).resolve()
+
+
 def _doc_repo(ctx, doc):
-    """Resolve the doc allowlist; returns (repo, relpath) or raises."""
+    """Resolve the doc allowlist; returns (repo, relpath) or raises.
+
+    An allowlisted file inside the repository that holds a doc root (the notes
+    repo, e.g. ~/notes/INDEX.md) commits there; other allowlisted files
+    (~/AGENTS.md) belong to the dotfiles repo.
+    """
+    roots = [Path(r).expanduser().resolve() for r in ctx.doc_roots]
     resolved_files = {Path(p).expanduser().resolve() for p in ctx.doc_files}
     if doc in resolved_files:
+        for root in roots:
+            top = _repo_top(ctx, root)
+            if top is not None and _under(doc, top):
+                return _plain_repo(ctx, top), str(doc.relative_to(top))
         return _dotfiles_repo(ctx), str(doc.relative_to(Path(ctx.home).resolve()))
-    for root in ctx.doc_roots:
-        root = Path(root).expanduser().resolve()
+    for root in roots:
         if _under(doc, root) and doc != root:
-            cp = ctx.run(["git", "-C", str(doc.parent), "rev-parse", "--show-toplevel"])
-            if cp.returncode != 0 or not cp.stdout.strip():
+            top = _repo_top(ctx, doc.parent)
+            if top is None:
                 raise RouteRejected(f"{doc} is not inside a git repository")
-            top = Path(cp.stdout.strip()).resolve()
             return _plain_repo(ctx, top), str(doc.relative_to(top))
+    allowed = [f"{_home_display(r, ctx.home)}/" for r in ctx.doc_roots]
+    allowed += [_home_display(f, ctx.home) for f in ctx.doc_files]
     raise RouteRejected(
-        f"doc {doc} is outside the doc-fix allowlist (~/notes/docs/ or ~/AGENTS.md)"
+        f"doc {doc} is outside the doc-fix allowlist ({' or '.join(allowed)})"
     )
 
 

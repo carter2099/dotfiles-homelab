@@ -70,6 +70,7 @@ class Sandbox:
         self.doc = docs / "backup.md"
         self.doc.write_text("# Backup\n\nThe backup runs at 02:00 UTC.\nRetention is 7 days.\n")
         (docs / "dirty.md").write_text("Old fact here.\n")
+        (self.notes / "INDEX.md").write_text("# Index\n\nk3s runs on node A.\n")
         self._commit(self.notes, "seed")
         # dotfiles bare repo tracking ~/AGENTS.md and ~/.gitignore
         self.dot_git = self.home / ".dotfiles-homelab"
@@ -135,7 +136,7 @@ class Sandbox:
             home=self.home,
             dev_root=self.dev,
             doc_roots=(self.notes / "docs",),
-            doc_files=(self.home / "AGENTS.md",),
+            doc_files=(self.home / "AGENTS.md", self.notes / "INDEX.md"),
             dotfiles_git_dir=self.dot_git,
             omp_call=self.fake_model,
             gh=lambda args, cwd=None: cp(1, "", "gh disabled in test"),
@@ -360,6 +361,14 @@ class DocFixTests(SandboxTest):
         row = self.one("docs-accuracy", self.doc_fix(doc=link))
         self.assertEqual(row["status"], "needs_carter")
         self.assertIn("allowlist", row["detail"])
+        # Tracked by dotfiles but not allowlisted: still refused.
+        (self.sb.home / "secret.txt").write_text("The backup runs at 02:00 UTC.\n")
+        git(*self.sb.dot, "commit", "-qam", "secret fact")
+        dot_head = git(*self.sb.dot, "rev-parse", "HEAD")
+        secret = self.one("docs-accuracy", self.doc_fix(doc=self.sb.home / "secret.txt"))
+        self.assertEqual(secret["status"], "needs_carter")
+        self.assertIn("allowlist", secret["detail"])
+        self.assertEqual(git(*self.sb.dot, "rev-parse", "HEAD"), dot_head)
         same = self.one("docs-accuracy", self.doc_fix(new="The backup runs at 02:00 UTC."))
         self.assertEqual(same["status"], "needs_carter")
 
@@ -372,6 +381,20 @@ class DocFixTests(SandboxTest):
                          f"git --git-dir=$HOME/.dotfiles-homelab --work-tree=$HOME revert {sha}")
         self.assertEqual(git("--git-dir", str(self.sb.dot_origin), "rev-parse", "main"), sha)
         self.assertEqual(git(*self.sb.dot, "show", "--name-only", "--format=", sha), "AGENTS.md")
+
+    def test_notes_index_uses_notes_repo(self):
+        dot_head = git(*self.sb.dot, "rev-parse", "HEAD")
+        index = self.sb.notes / "INDEX.md"
+        row = self.one("docs-accuracy", self.doc_fix(
+            doc=index, old="k3s runs on node A.", new="k3s was removed."))
+        self.assertEqual(row["status"], "done", row)
+        self.assertIn("k3s was removed.", index.read_text())
+        sha = git("-C", str(self.sb.notes), "rev-parse", "HEAD")
+        self.assertEqual(row["commit"], sha)
+        self.assertEqual(row["revert"], f"git -C ~/notes revert {sha}")
+        self.assertEqual(git("--git-dir", str(self.sb.notes_origin), "rev-parse", "main"), sha)
+        self.assertEqual(git("-C", str(self.sb.notes), "show", "--name-only", "--format=", sha), "INDEX.md")
+        self.assertEqual(git(*self.sb.dot, "rev-parse", "HEAD"), dot_head)
 
 
 class CleanupTests(SandboxTest):

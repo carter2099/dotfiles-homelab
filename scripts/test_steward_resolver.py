@@ -563,6 +563,7 @@ class ResolverTests(unittest.TestCase):
         record = items["docs-accuracy-finding-1"]
         self.assertEqual(record["status"], "done", record["reason"])
         self.assertIn("~/AGENTS.md", model.prompts[0])
+        self.assertIn("~/notes/INDEX.md", model.prompts[0], "config.DOC_FIX_FILES reaches the doc scope")
         self.assertEqual(len(model.prompts), 2, "the doc-fix executor ran its re-check")
         self.assertEqual((self.fx.home / "AGENTS.md").read_text(), "k3s runs on nodeB.\n")
         self.assertEqual(record["commit"], self.fx.head())

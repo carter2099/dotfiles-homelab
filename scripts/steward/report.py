@@ -1,6 +1,8 @@
 """HTML report rendering, TL;DR generation, and archive handling."""
 from __future__ import annotations
 
+import sqlite3
+
 from .config import (
     AUTO_PKGS,
     DEFAULT_TEMPLATE,
@@ -73,6 +75,7 @@ from .runtime import (
     REBOOT_RECORD_NAME,
     atomic_write_text,
     _current_boot_id,
+    _own_cgroup_dir,
     _assistant_text_from_message,
     _balanced_json_slice,
     _call_omp_p,
@@ -563,6 +566,107 @@ def _host_reboot_status(run_dir):
             "kernel_before": kernel_before, "kernel_after": kernel_after}
 
 
+_STEWARD_WORKFLOW = "homelab-steward"  # workflow.WORKFLOW_NAME (report cannot import workflow)
+STEWARD_MEMORY_HIGH_FALLBACK_MIB = 6144  # homelab-steward.service MemoryHigh=6G
+
+
+def _parse_utc(text):
+    """Parse an ISO-8601 timestamp ('Z' or offset; naive = UTC), or None."""
+    try:
+        parsed = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _workflow_run_created_at(run_dir):
+    """When this run started: its workflow_runs.created_at (run_id = run dir date), or None."""
+    environment_db = os.environ.get("WORKFLOW_STATE_DB")
+    db = Path(environment_db) if environment_db else Path(run_dir) / "workflow-state.sqlite3"
+    if not db.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            row = connection.execute(
+                "SELECT created_at FROM workflow_runs WHERE workflow = ? AND run_id = ?",
+                (_STEWARD_WORKFLOW, Path(run_dir).name),
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
+    return _parse_utc(row[0]) if row and row[0] else None
+
+
+def _run_timing(run_dir, elapsed_s, now=None):
+    """(duration_s, wall_s) for runs.jsonl; wall_s is None when the start is unknown.
+
+    duration_s is active time. After a reboot resume this process's elapsed time
+    misses the pre-reboot segment, so add workflow_runs.created_at -> reboot.json
+    requested_at when that request predates this process's start.
+    """
+    now = now or datetime.now(timezone.utc)
+    duration = float(elapsed_s)
+    start = _workflow_run_created_at(run_dir)
+    try:
+        record = read_json(Path(run_dir) / REBOOT_RECORD_NAME)
+    except (OSError, ValueError):
+        record = None
+    requested = _parse_utc(record.get("requested_at")) if isinstance(record, dict) else None
+    process_start = now - timedelta(seconds=duration)
+    if start and requested and start <= requested <= process_start:
+        duration += (requested - start).total_seconds()
+    wall = round((now - start).total_seconds()) if start else None
+    return round(duration), wall
+
+
+def _memory_mib(memory):
+    """memory.json byte maxima as the *_mib dict runs.jsonl records."""
+    return {
+        key.replace("_bytes", "_mib"): round(int(value) / 1048576)
+        for key, value in (memory if isinstance(memory, dict) else {}).items()
+        if key.endswith("_bytes") and isinstance(value, (int, float))
+    }
+
+
+def _read_memory_mib(run_dir):
+    try:
+        return _memory_mib(read_json(Path(run_dir) / "memory.json"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _steward_memory_high_mib(cgroup_dir=None):
+    """The steward unit's MemoryHigh in MiB from its cgroup's memory.high (fallback 6 GiB)."""
+    cgroup_dir = cgroup_dir if cgroup_dir is not None else _own_cgroup_dir()
+    if cgroup_dir is not None:
+        try:
+            value = int((Path(cgroup_dir) / "memory.high").read_text().strip())
+        except (OSError, ValueError):  # "max" means no MemoryHigh
+            value = 0
+        if value > 0:
+            return round(value / 1048576)
+    return STEWARD_MEMORY_HIGH_FALLBACK_MIB
+
+
+def _steward_memory_note(memory_mib, memory_high_mib):
+    """(text, warn) for the run's own memory maxima, or None before any sample.
+
+    peak_mib is mostly reclaimable page cache; only anonymous memory over half
+    of MemoryHigh is a warning.
+    """
+    anon = (memory_mib or {}).get("max_anon_mib")
+    if anon is None:
+        return None
+    text = f"{anon} MiB anonymous peak"
+    peak = memory_mib.get("peak_mib")
+    if peak is not None:
+        text += f", {peak} MiB total peak"
+    text += f" (MemoryHigh {memory_high_mib} MiB)"
+    return text, anon > memory_high_mib / 2
+
+
 def _omp_db_repair_text(step):
     """(text, color) for the OMP SQLite self-repair row; ("", "") when all DBs are ok."""
     status = str(step.get("status") or "")
@@ -802,8 +906,13 @@ def _mini_bar(pct, color="#37474f"):
     )
 
 
-def _html_health(validation_data, hb_data, applied_data=None):
-    """Merged update/validation health section with system status."""
+def _html_health(validation_data, hb_data, applied_data=None, memory_mib=None,
+                 memory_high_mib=None):
+    """Merged update/validation health section with system status.
+
+    memory_mib is the run's own memory.json maxima (_memory_mib); memory_high_mib
+    defaults to the steward cgroup's MemoryHigh.
+    """
     out = []
 
     if _p1_phase_failed(applied_data):
@@ -924,6 +1033,15 @@ def _html_health(validation_data, hb_data, applied_data=None):
     mem_avail = mem.get("available", "")
     if mem_avail:
         sys_rows.append(("Memory", mem_avail))
+
+    # Steward memory (this run's own cgroup maxima)
+    note = _steward_memory_note(
+        memory_mib,
+        memory_high_mib if memory_high_mib is not None else _steward_memory_high_mib(),
+    ) if memory_mib else None
+    if note:
+        text, warn = note
+        sys_rows.append(("Steward memory", (_dot("warn") if warn else "") + html.escape(text)))
 
     # Backup
     bt = (hb_data.get("backup", {}) or {}).get("last_run", "")
@@ -2621,7 +2739,12 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
         .replace("{{ACTIONS}}", actions_html)
         .replace("{{UPDATES}}", _html_updates(applied))
         .replace("{{TROUBLESHOOT}}", troubleshoot_html)
-        .replace("{{HEALTH}}", _html_health(validation, heartbeat, applied))
+        .replace("{{HEALTH}}", _html_health(
+            validation, heartbeat, applied,
+            # The sampler persists memory.json every ~60 s and finally only before
+            # P9, so the email shows the samples persisted by P8 time.
+            memory_mib=_read_memory_mib(run_dir),
+        ))
         .replace("{{AUDIT}}", _html_audit(audit, fixes))
         .replace("{{QUEUE}}", _html_queue(queue))
         .replace("{{USAGE}}", _html_usage(usage))
@@ -2738,6 +2861,12 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
     ep_ok = all(c.get("status") == "ok" for c in validation.get("checks", [])
                 if c.get("name", "").startswith("endpoint_"))
     lines.append(f"- Endpoints: {'all passed' if ep_ok else 'SOME FAILED'}")
+    memory_mib = _read_memory_mib(run_dir)
+    memory_note = _steward_memory_note(memory_mib, _steward_memory_high_mib())
+    if memory_note:
+        text, warn = memory_note
+        lines.append(f"- Steward memory: {text}"
+                     + (" — anonymous memory above 50% of MemoryHigh" if warn else ""))
 
     lines.append("")
     lines.append("## Audit")
@@ -2772,18 +2901,12 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
     route_counts = {}
     for row in routes:
         route_counts[row.get("status")] = route_counts.get(row.get("status"), 0) + 1
-    try:
-        memory = read_json(run_dir / "memory.json")
-    except (OSError, ValueError):
-        memory = {}
-    memory_mib = {
-        key.replace("_bytes", "_mib"): round(int(value) / 1048576)
-        for key, value in (memory if isinstance(memory, dict) else {}).items()
-        if key.endswith("_bytes") and isinstance(value, (int, float))
-    }
+    now = datetime.now(timezone.utc)
+    duration_s, wall_s = _run_timing(run_dir, elapsed_s, now=now)
     runs_entry = {
-        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "duration_s": round(elapsed_s),
+        "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "duration_s": duration_s,
+        **({"wall_s": wall_s} if wall_s is not None else {}),
         "maintenance_status": applied.get("phase_status", "unknown"),
         **(
             {"maintenance_failure": _p1_failure_detail(applied)}

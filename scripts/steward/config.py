@@ -77,7 +77,7 @@ FINDING_ACTIONS = (
 FINDING_SEVERITIES = ("high", "medium", "low")
 LOW_DEFAULT_SEVERITY_SECTIONS = {"version-currency", "docs-accuracy"}
 DOC_FIX_ROOTS = (HOME / "notes" / "docs",)
-DOC_FIX_FILES = (HOME / "AGENTS.md",)
+DOC_FIX_FILES = (HOME / "AGENTS.md", HOME / "notes" / "INDEX.md")
 CLEANUP_PATTERNS = ("nltk_data/", ".omp/agent/custom-session-files/")
 # Services the P1 app-deploy step may ship when production is behind a
 # CI-green origin default branch. The deploy script owns health and rollback.

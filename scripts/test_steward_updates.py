@@ -2369,7 +2369,7 @@ class OmpUpdateTests(unittest.TestCase):
 
 
 class AppDeployTests(unittest.TestCase):
-    PRE, NEW, LOCAL = "a" * 40, "b" * 40, "c" * 40
+    PRE, NEW, LOCAL, OTHER = "a" * 40, "b" * 40, "c" * 40, "d" * 40
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -2409,11 +2409,12 @@ class AppDeployTests(unittest.TestCase):
             if args[:2] == ["merge-base", "--is-ancestor"]:
                 return "", "", 1 if args[2] in state["not_ancestors"] else 0
             if args[:2] == ["merge", "--ff-only"]:
-                state["local"] = state["origin"]
+                state["local"] = args[2]
             return "", "", 0
         if cmd[0] == "gh":
             if cmd[2].endswith("check-runs?per_page=100"):
-                runs = state["runs"]
+                sha = cmd[2].split("/")[-2]
+                runs = state.get("runs_by_sha", {}).get(sha, state["runs"])
                 return json.dumps({"total_count": len(runs), "check_runs": runs}), "", 0
             return json.dumps({"state": "pending", "statuses": state["statuses"]}), "", 0
         if cmd[0] == "timeout":
@@ -2528,6 +2529,84 @@ class AppDeployTests(unittest.TestCase):
         result = self._deploy()
         self.assertEqual(result["status"], "failed")
         self.assertIn("expected origin/main", result["error"])
+
+    def _deploy_waiting(self, on_sleep):
+        """Deploy a commit young enough for pending CI to be re-read."""
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            on_sleep(len(sleeps))
+
+        with patch.object(updates, "run_capture_ok", side_effect=self._fake), \
+                patch.object(updates, "_commit_age_seconds", return_value=30):
+            result = updates._p1_app_deploy("blog", self.spec, sleep=sleep)
+        return result, sleeps
+
+    def test_pending_target_is_superseded_by_a_green_descendant(self):
+        # 4 auto-merges land together: the fetched commit's push run is
+        # cancelled (or never created) and a later origin/main is green.
+        cases = {"no-runs": [],
+                 "cancelled": [{"name": "ci", "status": "completed",
+                                "conclusion": "cancelled"}]}
+        base = dict(self.state)
+        for name, target_runs in cases.items():
+            with self.subTest(name):
+                self.state = {**base, "runs_by_sha": {self.NEW: target_runs},
+                              "deploy_moves_to": self.OTHER}
+                self.commands = []
+
+                def advance(polls):
+                    if polls == 2:
+                        self.state["origin"] = self.OTHER
+
+                result, sleeps = self._deploy_waiting(advance)
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(len(sleeps), 2)
+                self.assertEqual(result["target_version"], self.OTHER)
+                self.assertEqual(result["post_version"], self.OTHER)
+                self.assertEqual(result["superseded_from"], [self.NEW])
+                self.assertIn(f"superseded {self.NEW[:7]}", result["reason"])
+                self.assertIn(["merge", "--ff-only", self.OTHER],
+                              [cmd[3:] for cmd in self.commands if cmd[0] == "git"])
+                # The new target passed the fast-forward and ancestor gates itself.
+                ancestry = [cmd[5:] for cmd in self.commands
+                            if cmd[0] == "git" and cmd[3:5] == ["merge-base", "--is-ancestor"]]
+                self.assertIn([self.PRE, self.OTHER], ancestry)
+                self.assertIn([self.NEW, self.OTHER], ancestry)
+
+    def test_origin_moving_to_a_non_descendant_is_not_a_new_target(self):
+        self.state.update({"runs_by_sha": {self.NEW: []}, "not_ancestors": {self.NEW}})
+
+        def rewrite(polls):
+            self.state["origin"] = self.OTHER  # green, but does not descend from NEW
+
+        result, sleeps = self._deploy_waiting(rewrite)
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(len(sleeps), updates.CI_CHECK_RECHECKS)
+        self.assertIn(f"origin/main {self.NEW[:7]} is not CI-green: no check run completed",
+                      result["reason"])
+        self.assertEqual(result["target_version"], self.NEW)
+        self.assertNotIn("superseded_from", result)
+        self.assertFalse(self._deployed())
+
+    def test_red_target_is_never_bypassed_by_a_newer_commit(self):
+        self.state.update({"runs_by_sha": {self.NEW: [
+            {"name": "test", "status": "in_progress", "conclusion": None}]}})
+
+        def fail_and_advance(polls):
+            self.state["runs_by_sha"][self.NEW] = [
+                {"name": "test", "status": "completed", "conclusion": "failure"}]
+            self.state["origin"] = self.OTHER  # a green descendant
+
+        result, sleeps = self._deploy_waiting(fail_and_advance)
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(len(sleeps), 1)
+        self.assertIn(f"origin/main {self.NEW[:7]} is not CI-green: test: completed/failure",
+                      result["reason"])
+        self.assertEqual(result["target_version"], self.NEW)
+        self.assertNotIn("superseded_from", result)
+        self.assertFalse(self._deployed())
 
 
 class PhaseOneOrderTests(unittest.TestCase):
@@ -3053,6 +3132,93 @@ class HostRebootReportTests(unittest.TestCase):
         update_status = summary.split("## Update Status\n", 1)[1].split("\n\n", 1)[0]
         self.assertIn("- ThinkPad rebooted for kernel update: 6.8.0-142-generic -> "
                       "6.8.0-146-generic (04:02 UTC, after P3); run resumed", update_status)
+
+
+class RunTimingAndMemoryTests(unittest.TestCase):
+    MIB = 1048576
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.run_dir = self.root / "2026-10-13"
+        self.run_dir.mkdir()
+        (self.root / "sessions").mkdir()
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("WORKFLOW_STATE_DB", None)
+
+    def _workflow_run(self, created_at):
+        import sqlite3
+        connection = sqlite3.connect(self.run_dir / "workflow-state.sqlite3")
+        with connection:
+            connection.execute(
+                "CREATE TABLE workflow_runs (workflow TEXT NOT NULL, run_id TEXT NOT NULL, "
+                "status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                "completed_at TEXT, error TEXT, invalid_reason TEXT, "
+                "PRIMARY KEY (workflow, run_id))")
+            connection.execute(
+                "INSERT INTO workflow_runs VALUES ('homelab-steward', '2026-10-13', 'running', "
+                "?, ?, NULL, NULL, NULL)",
+                (created_at.isoformat(timespec="microseconds"),) * 2)
+        connection.close()
+
+    def _archive(self, elapsed_s):
+        with patch.object(report, "RUNS_LOG", self.root / "runs.jsonl"), \
+                patch.object(report, "RUN_DIR_BASE", self.root), \
+                patch.object(report, "SESSION_DIR", self.root / "sessions"), \
+                patch.object(report, "_current_boot_id", return_value="boot-after"), \
+                patch.object(report, "run_capture", return_value="6.8.0-146-generic"), \
+                patch.object(report, "_steward_memory_high_mib", return_value=6144):
+            report.phase_9_archive(self.run_dir, {"date": "2026-10-13"}, elapsed_s)
+        return json.loads((self.root / "runs.jsonl").read_text().splitlines()[-1])
+
+    def test_resumed_run_counts_pre_reboot_time_and_records_wall_time(self):
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(seconds=638)  # 04:00:07 -> 04:10:45
+        requested = start + timedelta(seconds=152)  # 04:02:39
+        self._workflow_run(start)
+        (self.run_dir / "reboot.json").write_text(json.dumps({
+            "requested_at": requested.strftime("%Y-%m-%dT%H:%M:%SZ"), "phase": "P1",
+            "kernel_before": "6.8.0-142-generic", "boot_id_before": "boot-before"}))
+        entry = self._archive(283.0)
+        self.assertAlmostEqual(entry["duration_s"], 152 + 283, delta=2)
+        self.assertAlmostEqual(entry["wall_s"], 638, delta=2)
+
+    def test_normal_run_keeps_duration_and_adds_wall_time(self):
+        self._workflow_run(datetime.now(timezone.utc) - timedelta(seconds=300))
+        entry = self._archive(299.6)
+        self.assertEqual(entry["duration_s"], 300)
+        self.assertAlmostEqual(entry["wall_s"], 300, delta=2)
+
+    def test_steward_memory_row_warns_above_half_of_memory_high(self):
+        calm = report._html_health({"checks": []}, {}, {"steps": []},
+                                   memory_mib={"max_anon_mib": 391, "peak_mib": 4122},
+                                   memory_high_mib=6144)
+        self.assertIn("Steward memory", calm)
+        self.assertIn("391 MiB anonymous peak, 4122 MiB total peak (MemoryHigh 6144 MiB)", calm)
+        self.assertNotIn(report._dot("warn"), calm)
+        hot = report._html_health({"checks": []}, {}, {"steps": []},
+                                  memory_mib={"max_anon_mib": 3500, "peak_mib": 6079},
+                                  memory_high_mib=6144)
+        self.assertIn(report._dot("warn") + "3500 MiB anonymous peak", hot)
+
+    def test_summary_md_notes_steward_memory(self):
+        (self.run_dir / "memory.json").write_text(json.dumps(
+            {"samples": 9, "max_anon_bytes": 3500 * self.MIB, "peak_bytes": 6079 * self.MIB}))
+        self._archive(1.0)
+        summary = (self.run_dir / "summary.md").read_text()
+        self.assertIn("- Steward memory: 3500 MiB anonymous peak, 6079 MiB total peak "
+                      "(MemoryHigh 6144 MiB) — anonymous memory above 50% of MemoryHigh", summary)
+
+    def test_memory_high_reads_cgroup_with_fallback(self):
+        cgroup = self.root / "cgroup"
+        cgroup.mkdir()
+        (cgroup / "memory.high").write_text("max\n")
+        self.assertEqual(report._steward_memory_high_mib(cgroup), 6144)
+        (cgroup / "memory.high").write_text(f"{4096 * self.MIB}\n")
+        self.assertEqual(report._steward_memory_high_mib(cgroup), 4096)
 
 
 if __name__ == "__main__":
