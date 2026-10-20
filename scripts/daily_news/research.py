@@ -7,7 +7,7 @@ import re
 import time
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -820,6 +820,29 @@ def assign_fetch_alternates(
     for item in queue:
         item["fetch_alternates"] = _alternate_candidates(item, alternates, blocked)[:FETCH_ALTERNATE_LIMIT]
 
+def _recent_published_events(digests_root: Path, today: date) -> tuple[list[dict], Any]:
+    """Published stories from the previous CROSS_DAY_DEDUP_DAYS plus a token corpus.
+
+    The corpus spans news_publish.EVENT_CORPUS_DAYS of publications, the same
+    window the front page calibrates same-event token rarity on.
+    """
+    # Lazy import: news_publish imports this package at module load.
+    from news_publish import EVENT_CORPUS_DAYS, load_publications
+
+    editions = load_publications(digests_root / "news" / "publications")
+    recent: list[dict] = []
+    corpus: list[dict] = []
+    for day, date_editions in sorted(editions.items()):
+        age = (today - date.fromisoformat(day)).days
+        if not 0 < age <= EVENT_CORPUS_DAYS:
+            continue
+        for publication in date_editions.values():
+            for story in publication.get("fresh", []):
+                corpus.append(story)
+                if age <= CROSS_DAY_DEDUP_DAYS:
+                    recent.append(story)
+    return recent, corpus
+
 @runtime.track_phase_failure("rank")
 def phase_3_rank(
     topic: dict,
@@ -846,9 +869,14 @@ def phase_3_rank(
     research_findings = research_findings or []
     # Paywall alternates come from raw research and the attention snapshot, so
     # they must clear the previous-days coverage ledger Phase 2 applied.
+    issue_date = runtime.issue_date_for_run(run_dir)
     recent_coverage = load_recent_coverage_ledger(
-        run_dir.parent.parent, runtime.issue_date_for_run(run_dir), CROSS_DAY_DEDUP_DAYS,
+        run_dir.parent.parent, issue_date, CROSS_DAY_DEDUP_DAYS,
     )
+    # Text-level event dedup: another outlet's report of a published event can
+    # share no URL key with it (10-16 AI & Tech / 10-17 World ChatGPT Chrome
+    # extension tab control), so headline/event wording is compared too.
+    recent_stories, event_corpus = _recent_published_events(run_dir.parent.parent, issue_date)
     phase_inputs = runtime.phase_inputs(
         "rank", topic=topic,
         upstream={
@@ -856,6 +884,10 @@ def phase_3_rank(
             "cross_topic_urls": sorted(other_topic_urls),
             "research_findings": runtime.canonical_fingerprint(research_findings),
             "covered_urls": sorted(recent_coverage),
+            "covered_stories": runtime.canonical_fingerprint([
+                {key: story.get(key, "") for key in ("url", "title", "event")}
+                for story in recent_stories
+            ]),
         },
         policy={
             "ranking_schema": RANKING_SCHEMA_VERSION,
@@ -890,6 +922,11 @@ def phase_3_rank(
     # Event-level dedup: a new outlet's URL slips past the URL checks above, but
     # Phase 2b's Jev-"same" rows often carry an already-covered article's URL
     # (10-10 Agents repeated the 10-09 Gemini agent launch via dataconomy).
+    # When no key overlaps, the front page's token same-event test runs against
+    # the stories published in the previous CROSS_DAY_DEDUP_DAYS days.
+    from news_publish import _frequency_of, _same_event
+
+    event_frequency = _frequency_of([{"fresh": event_corpus + eligible_fresh}])
     recent_coverage_rejected = []
     kept_fresh = []
     for item in eligible_fresh:
@@ -900,13 +937,29 @@ def phase_3_rank(
         if not matched:
             matched = sorted(keys & other_topic_urls)
             reason = "same event already selected by another digest today"
+        matched_story = None
+        if not matched:
+            matched_story = next(
+                (story for story in recent_stories if _same_event(story, item, event_frequency)),
+                None,
+            )
+            if matched_story is not None:
+                matched = [coverage_key(matched_story.get("url", ""))]
+                reason = (f"same event published in the previous {CROSS_DAY_DEDUP_DAYS} days "
+                          "(headline/event wording)")
         if not matched:
             kept_fresh.append(item)
             continue
-        recent_coverage_rejected.append({
+        rejection = {
             "url": item.get("url", ""), "title": item.get("title", ""),
             "matched_keys": matched, "rejection_reason": reason,
-        })
+        }
+        if matched_story is not None:
+            rejection["matched_story"] = {
+                "url": matched_story.get("url", ""), "title": matched_story.get("title", ""),
+                "event": matched_story.get("event", ""),
+            }
+        recent_coverage_rejected.append(rejection)
         print(f"  [Phase 3 event dedup] dropped {item.get('url', '')}: {reason} ({', '.join(matched[:3])})")
     eligible_fresh = kept_fresh
     # URL-host validation: a candidate whose URL sits on a publisher asset CDN

@@ -663,6 +663,61 @@ def test_cross_topic_blocks_earlier_sections_same_event_evidence() -> None:
         check(rejected["url"] == upi and "another digest today" in rejected["rejection_reason"], rejected)
 
 
+def test_recent_publication_blocks_same_event_without_shared_keys() -> None:
+    """A published event cannot return the next day under unrelated URL keys.
+
+    Regression for 2026-10-16/17: AI & Tech ran the ChatGPT Chrome-extension
+    tab-control launch (The Verge); World ran it the next day via the-decoder.
+    The two stories' same-event keys shared no entry.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        today = "2026-10-17"
+        run_dir = root / catalog.TOPICS["world"]["category"] / today
+        run_dir.mkdir(parents=True)
+        verge = "https://www.theverge.com/news/ai/chatgpt-chrome-extension-tabs-agent"
+        published = root / "news" / "publications" / "2026-10-16"
+        published.mkdir(parents=True)
+        (published / f"{catalog.TOPICS['ai-tech']['web_slug']}.json").write_text(json.dumps({
+            "status": "published",
+            "fresh": [
+                {"title": "ChatGPT's Chrome extension can now read your open tabs and control them",
+                 "event": "OpenAI's ChatGPT Chrome extension gains access to open tabs and agentic tab control",
+                 "url": verge, "editorial_significance": "medium", "date_published": "2026-10-16",
+                 "attention": {"status": "ok", "evidence": {
+                     "same_event_keys": ["engadget.com/ai/chatgpt-chrome-tabs"]}}},
+                {"title": "Senate passes stopgap funding bill",
+                 "event": "US Senate passes a stopgap government funding bill",
+                 "url": "https://example.com/2026/10/16/stopgap", "editorial_significance": "high",
+                 "date_published": "2026-10-16"},
+            ],
+        }))
+        decoder = "https://the-decoder.com/openai-chatgpt-chrome-extension-tabs-work-mode/"
+        fresh = [
+            {"title": "OpenAI's ChatGPT Chrome extension now reads your tabs and works in them",
+             "event": "OpenAI adds tab-reading and agentic Work mode to ChatGPT Chrome extension",
+             "url": decoder, "editorial_significance": "high", "date_published": "2026-10-16",
+             "attention": {"status": "ok", "evidence": {"same_event_keys": [
+                 contracts.coverage_key(decoder), "testingcatalog.com/chatgpt-work-mode"]}}},
+            {"title": "OpenAI signs data center power deal in Norway",
+             "event": "OpenAI agrees a hydropower supply deal for a Norwegian data center",
+             "url": "https://example.com/2026/10/16/openai-norway-power", "editorial_significance": "high",
+             "date_published": "2026-10-16",
+             "attention": {"status": "ok", "evidence": {"same_event_keys": [
+                 "example.com/2026/10/16/openai-norway-power"]}}},
+        ]
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(catalog.TOPICS["world"], fresh, run_dir)
+        check([item["url"] for item in queue] == ["https://example.com/2026/10/16/openai-norway-power"],
+              f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["url"] == decoder, rejected)
+        check(rejected["matched_keys"] == [contracts.coverage_key(verge)], rejected)
+        check(rejected["matched_story"]["url"] == verge, rejected)
+        check("previous" in rejected["rejection_reason"], rejected)
+
+
 
 
 def _shared_url_findings(today: str) -> tuple[str, list[dict]]:
@@ -2995,6 +3050,7 @@ def main() -> None:
         test_recent_coverage_ledger_blocks_other_section_repeats,
         test_recent_coverage_blocks_same_event_from_new_outlet,
         test_cross_topic_blocks_earlier_sections_same_event_evidence,
+        test_recent_publication_blocks_same_event_without_shared_keys,
         test_phase_two_shared_url_findings_keep_their_own_metadata,
         test_phase_two_drops_unidentified_shared_url_finding,
         test_phase_two_restores_approvals_with_altered_urls,
