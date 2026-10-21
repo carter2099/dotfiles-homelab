@@ -1439,6 +1439,14 @@ def _publish_validated_result_unlocked(
                 raise WorkerPolicyError("actual diff paths differ from the trusted allowed paths")
             # Existing tests may only gain tests; never be weakened.
             _check_companion_diff(root, base, diff, sorted(set(actual) & set(companions)))
+            if repo_kind(root) == REPO_KIND_STEWARD_CODE:
+                # The pre-PR gate's diff-only checks, while fix iterations remain;
+                # the rejection note goes back to the worker as prior_judge_note.
+                from .code_prs import preflight  # code_prs imports this module
+                objections = preflight(diff, actual)
+                if objections:
+                    raise WorkerPolicyError(
+                        "the steward-code pre-PR gate would refuse this patch: " + "; ".join(objections))
             if not isinstance(item.get("validation"), list) or not item["validation"] or any(
                 not isinstance(record, Mapping) or type(record.get("returncode")) is not int or record["returncode"] != 0
                 for record in item["validation"]

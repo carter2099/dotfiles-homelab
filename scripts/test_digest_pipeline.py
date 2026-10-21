@@ -464,6 +464,54 @@ def test_phase_two_cross_day_dedup_window_contract() -> None:
         check(not call.called, "a stale-only batch reached the LLM judge")
         artifact = json.loads((stale_dir / "02-research-judged.json").read_text())
         check(artifact["fresh"] == [] and artifact["status"] == "empty", artifact)
+        check(artifact["pre_filter"]["too_old"] == 1, artifact["pre_filter"])
+        check([entry["url"] for entry in artifact["pre_filter_dropped"]] == [older["url"]],
+              artifact["pre_filter_dropped"])
+
+
+def test_phase_two_forwards_undated_findings_for_confirmation() -> None:
+    """Empty and month-only research dates reach the judge as date-unverified.
+
+    Regression for 2026-10-18 gaming: 11 of 18 raw findings (VALORANT
+    Champions final, the official Steam Next Fest page) had empty or "2026-10"
+    dates and were silently dropped as too old, leaving the section empty.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        today_date = datetime.now(timezone.utc).date()
+        run_dir = Path(temporary) / "gaming-digest" / today_date.isoformat()
+        run_dir.mkdir(parents=True)
+        base = {
+            "source_domain": "example.com", "summary": "A source-grounded event.",
+            "category": "Esports", "editorial_significance": "high",
+        }
+        undated = {**base, "title": "VALORANT Champions final", "url": "https://example.com/vct-final",
+                   "date_published": "", "event": "VALORANT Champions final decided"}
+        month_only = {**base, "title": "Steam Next Fest opens", "url": "https://example.com/next-fest",
+                      "date_published": today_date.strftime("%Y-%m"), "event": "Steam Next Fest opens"}
+        older = {**base, "title": "Old studio news", "url": "https://example.com/old",
+                 "date_published": (today_date - timedelta(days=3)).isoformat(), "event": "Old news"}
+
+        def approve_all(system: str, user: str, model: str | None = None) -> str:
+            start = user.index("## Findings to evaluate")
+            items = json.loads(user[user.index("[", start):user.index("\n\nEvaluate each finding")])
+            return json.dumps({"approved": items, "rejected": []})
+
+        with patch("daily_news.runtime._call_llm_proxy", side_effect=approve_all) as call:
+            fresh = research.phase_2_judge_research(
+                catalog.TOPICS["gaming"], copy.deepcopy([undated, month_only, older]), run_dir,
+            )
+        check(sorted(item["url"] for item in fresh) == sorted([undated["url"], month_only["url"]]), fresh)
+        check(all(item.get("date_unverified") is True and item.get("date_tag") == "unverified"
+                  for item in fresh), fresh)
+        check(not any(older["url"] in str(args) for args in call.call_args_list),
+              "a finding published before the fresh window reached the judge")
+        artifact = json.loads((run_dir / "02-research-judged.json").read_text())
+        check(artifact["pre_filter"] == {
+            "too_old": 1, "undated_forwarded": 1, "partial_date_forwarded": 1,
+            "already_covered_previous_day": 0,
+        }, artifact["pre_filter"])
+        check([(entry["url"], entry["reason"]) for entry in artifact["pre_filter_dropped"]]
+              == [(older["url"], "too_old")], artifact["pre_filter_dropped"])
 
 
 def test_recent_coverage_ledger_blocks_other_section_repeats() -> None:
@@ -716,6 +764,77 @@ def test_recent_publication_blocks_same_event_without_shared_keys() -> None:
         check(rejected["matched_keys"] == [contracts.coverage_key(verge)], rejected)
         check(rejected["matched_story"]["url"] == verge, rejected)
         check("previous" in rejected["rejection_reason"], rejected)
+
+
+def test_cross_day_wording_dedup_keeps_new_events_in_continuing_topics() -> None:
+    """Cross-day headline matching rejects re-publications, not new developments.
+
+    Regression for 2026-10-20 World: AP's "Justice Department charges more than
+    2 dozen in California sweep" (charges filed 10-19) was rejected as the
+    10-15 story on DOJ threats against California election officials through
+    shared topic words. The 10-18 AI & Tech re-run of the 10-17 Replit/Anthropic
+    story under a moved TechCrunch slug must still be rejected.
+    """
+    from news_publish import _frequency_of, _same_event
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        publications = root / "news" / "publications"
+        threats = {
+            "title": "Trump administration escalates voter roll fight with threats against "
+                     "California election officials",
+            "event": "Justice Department threatens California election officials over alleged "
+                     "noncitizens on Los Angeles voter rolls",
+            "url": "https://www.cnn.com/2026/10/14/politics/justice-department-threats-california-election-officials",
+            "editorial_significance": "high", "date_published": "2026-10-14",
+        }
+        replit = {
+            "title": "Replit is no longer working with Anthropic, CEO says",
+            "event": "Replit CEO Amjad Masad says Replit has stopped working with Anthropic "
+                     "and moved to OpenAI models",
+            "url": "https://techcrunch.com/2026/10/16/replit-is-no-longer-working-with-anthropic-ceo-says",
+            "editorial_significance": "high", "date_published": "2026-10-16",
+        }
+        for day, slug, story in (("2026-10-15", "world", threats), ("2026-10-17", "ai-tech", replit)):
+            (publications / day).mkdir(parents=True)
+            (publications / day / f"{catalog.TOPICS[slug]['web_slug']}.json").write_text(json.dumps({
+                "status": "published", "fresh": [story],
+            }))
+
+        charges = {
+            "title": "Justice Department charges more than 2 dozen in California sweep targeting "
+                     "alleged noncitizen voters",
+            "event": "DOJ charges 28 people in California over alleged noncitizen voting and seeks "
+                     "to have flagged ballots set aside",
+            "url": "https://wire.example/article/california-noncitizen-voting-charges",
+            "editorial_significance": "high", "date_published": "2026-10-19",
+        }
+        check(_same_event(threats, charges, _frequency_of([{"fresh": [threats, charges]}])),
+              "fixture no longer exercises the front-page same-event match")
+        world_dir = root / catalog.TOPICS["world"]["category"] / "2026-10-20"
+        world_dir.mkdir(parents=True)
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(catalog.TOPICS["world"], [copy.deepcopy(charges)], world_dir)
+        check([item["url"] for item in queue] == [charges["url"]], f"queue={queue!r}")
+        artifact = json.loads((world_dir / "03-urls-ranked.json").read_text())
+        check(artifact["recent_coverage_rejected"] == [], artifact["recent_coverage_rejected"])
+
+        repeat = {
+            "title": "Replit makes OpenAI its default over Anthropic, CEO says",
+            "event": "Replit switched Replit Agent's default model provider from Anthropic to OpenAI",
+            "url": "https://techcrunch.com/2026/10/17/replit-is-no-longer-working-with-anthropic-ceo-says/",
+            "editorial_significance": "high", "date_published": "2026-10-17",
+        }
+        ai_dir = root / catalog.TOPICS["ai-tech"]["category"] / "2026-10-18"
+        ai_dir.mkdir(parents=True)
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(catalog.TOPICS["ai-tech"], [copy.deepcopy(repeat)], ai_dir)
+        check(queue == [], f"Replit re-publication reached the fetch queue: {queue!r}")
+        artifact = json.loads((ai_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["url"] == repeat["url"] and rejected["matched_story"]["url"] == replit["url"],
+              rejected)
+        check("headline/event wording" in rejected["rejection_reason"], rejected)
 
 
 
@@ -1300,6 +1419,32 @@ def test_phase_three_uses_product_priority() -> None:
         )
 
 
+def test_phase_three_ranks_date_unverified_after_dated() -> None:
+    """Date-unverified findings only fill fetch slots dated findings leave free."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        run_dir = root / "gaming-digest" / "2026-10-18"
+        run_dir.mkdir(parents=True)
+        fresh = [
+            {"title": "Undated championship final", "url": "https://example.com/final",
+             "editorial_significance": "high", "priority_score": 95.0,
+             "date_published": "", "date_unverified": True},
+            {"title": "Dated patch notes", "url": "https://example.com/patch",
+             "editorial_significance": "low", "priority_score": 20.0,
+             "date_published": "2026-10-18"},
+        ]
+        with patch.object(runtime, "DIGESTS_DIR", root), patch.object(research, "FRESH_CAP", 1):
+            queue = research.phase_3_rank(catalog.TOPICS["gaming"], copy.deepcopy(fresh), run_dir)
+        check([item["url"] for item in queue] == ["https://example.com/patch"], queue)
+
+        uncapped_dir = root / "uncapped" / "gaming-digest" / "2026-10-18"
+        uncapped_dir.mkdir(parents=True)
+        with patch.object(runtime, "DIGESTS_DIR", root / "uncapped"):
+            queue = research.phase_3_rank(catalog.TOPICS["gaming"], copy.deepcopy(fresh), uncapped_dir)
+        check([item["url"] for item in queue]
+              == ["https://example.com/patch", "https://example.com/final"], queue)
+
+
 def _record_fetches(urls: list[str]):
     def fake_omp(prompt: str, **kwargs: object) -> str:
         url = prompt.split("Fetch this article: ", 1)[1].splitlines()[0]
@@ -1574,16 +1719,16 @@ def test_failed_fetch_uses_alternate_source() -> None:
         (root / category / "2026-09-30" / "06-curated.json").write_text(json.dumps({
             "fresh": [{"url": covered}],
         }))
-        ap = "https://apnews.com/article/ftc-openai-anthropic"
+        ap = "https://wire.example/article/ftc-openai-anthropic"
         other_queue = "https://www.theverge.com/ai/chip-export-rules"
         research_alternate = "https://www.theguardian.com/us-news/2026/sep/30/ftc-openai-anthropic"
         attention_alternate = "https://siliconangle.com/2026/09/30/ftc-openai-anthropic/"
         story = {
-            **FTC_STORY, "url": ap, "source_domain": "apnews.com", "priority_score": 95.0,
+            **FTC_STORY, "url": ap, "source_domain": "wire.example", "priority_score": 95.0,
             "editorial_significance": "high", "date_published": "2026-09-30",
             "attention": {"status": "ok", "evidence": {"same_event_urls": [
                 # Unusable: same outlet, covered yesterday, hard paywall, already queued.
-                {"url": "https://apnews.com/article/ftc-probe-explainer", "domain": "apnews.com",
+                {"url": "https://wire.example/article/ftc-probe-explainer", "domain": "wire.example",
                  "title": "FTC probe explained", "source": "panel"},
                 {"url": covered, "domain": "reuters.com", "title": "FTC probes AI labs", "source": "gkg"},
                 {"url": "https://www.theinformation.com/articles/ftc-ai", "domain": "theinformation.com",
@@ -1606,7 +1751,7 @@ def test_failed_fetch_uses_alternate_source() -> None:
         fetched: list[str] = []
         with patch.object(runtime, "DIGESTS_DIR", root), \
                 patch.object(runtime, "ARTICLE_CACHE_DIR", root / "cache"), \
-                patch.object(runtime, "_call_omp_p", side_effect=_fetches_by_host(fetched, failing=("apnews.com",))):
+                patch.object(runtime, "_call_omp_p", side_effect=_fetches_by_host(fetched, failing=("wire.example",))):
             queue = research.phase_3_rank(
                 catalog.TOPICS["ai-tech"], [copy.deepcopy(story), copy.deepcopy(other)], run_dir,
                 [copy.deepcopy(story), copy.deepcopy(other), guardian],
@@ -1748,6 +1893,58 @@ def test_phase_five_backfills_date_confirmed_from_date_published() -> None:
         confirmed = by_url["https://b.example/story"]
         check(confirmed["date_confirmed"] == "2026-08-29",
               f"confirmed date was overwritten: {confirmed['date_confirmed']!r}")
+
+
+def test_phase_five_gates_date_unverified_findings_on_fetched_date() -> None:
+    """An undated research finding survives only on a fetched fresh date.
+
+    Phase 4's or the re-fetch's date of yesterday/today confirms it; no
+    confirmable date drops it as date_unconfirmed instead of passing it on.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        today = datetime.now(timezone.utc).date()
+        run_dir = Path(temporary) / "gaming-digest" / today.isoformat()
+        run_dir.mkdir(parents=True)
+
+        def summary(slug: str, date_confirmed: str, unverified: bool = True) -> dict:
+            return {
+                "title": f"{slug} story", "url": f"https://example.com/{slug}",
+                "source_domain": "example.com", "summary": "Verified factual summary.",
+                "date_published": "" if unverified else today.isoformat(),
+                "date_confirmed": date_confirmed, "source_verdict": "fresh",
+                "fetch_success": True, **({"date_unverified": True} if unverified else {}),
+            }
+
+        summaries = [
+            summary("fetched-fresh", today.isoformat()),
+            summary("refetched-fresh", ""),
+            summary("unconfirmable", ""),
+            summary("future-only", (today + timedelta(days=7)).isoformat()),
+            summary("dated-unconfirmable", "", unverified=False),
+        ]
+        refetched = {
+            "https://example.com/refetched-fresh": (today - timedelta(days=1)).isoformat(),
+            "https://example.com/future-only": (today + timedelta(days=7)).isoformat(),
+        }
+        judgments = json.dumps([
+            {"url": item["url"], "verdict": "keep", "issues": [], "fixed_summary": ""}
+            for item in summaries
+        ])
+        with patch("daily_news.research.refetch_article_date",
+                   side_effect=lambda url, title: refetched.get(url)), \
+             patch("daily_news.runtime._call_llm_proxy", return_value=judgments):
+            results = research.phase_5_judge_summaries(catalog.TOPICS["gaming"], summaries, run_dir)
+        by_url = {item["url"].rsplit("/", 1)[1]: item for item in results}
+        for slug in ("fetched-fresh", "refetched-fresh", "dated-unconfirmable"):
+            check(by_url[slug]["judge_verdict"] == "keep", by_url[slug])
+        check(by_url["refetched-fresh"]["date_confirmed"] == refetched["https://example.com/refetched-fresh"],
+              by_url["refetched-fresh"])
+        for slug in ("unconfirmable", "future-only"):
+            check(by_url[slug]["judge_verdict"] == "drop"
+                  and by_url[slug]["judge_issues"][0].startswith("date_unconfirmed:"), by_url[slug])
+        persisted = json.loads((run_dir / "05-summaries-judged.json").read_text())
+        check(any(issue.startswith("date_unconfirmed:")
+                  for item in persisted for issue in item.get("judge_issues") or []), persisted)
 
 
 def test_cached_curation_regenerates_referenced_url_sidecar() -> None:
@@ -3047,10 +3244,12 @@ def main() -> None:
         test_cross_topic_same_event_referenced_url_dedup,
         test_rank_resume_fingerprint_includes_cross_topic_urls,
         test_phase_two_cross_day_dedup_window_contract,
+        test_phase_two_forwards_undated_findings_for_confirmation,
         test_recent_coverage_ledger_blocks_other_section_repeats,
         test_recent_coverage_blocks_same_event_from_new_outlet,
         test_cross_topic_blocks_earlier_sections_same_event_evidence,
         test_recent_publication_blocks_same_event_without_shared_keys,
+        test_cross_day_wording_dedup_keeps_new_events_in_continuing_topics,
         test_phase_two_shared_url_findings_keep_their_own_metadata,
         test_phase_two_drops_unidentified_shared_url_finding,
         test_phase_two_restores_approvals_with_altered_urls,
@@ -3065,6 +3264,7 @@ def main() -> None:
         test_attention_phase_leaves_out_failed_sources_and_unadjudicated_stories,
         test_offline_attention_phase_never_reaches_the_network,
         test_phase_three_uses_product_priority,
+        test_phase_three_ranks_date_unverified_after_dated,
         test_hard_paywall_story_never_reaches_fetch,
         test_hard_paywall_story_uses_alternate_source,
         test_hard_paywall_story_uses_same_event_attention_url,
@@ -3073,6 +3273,7 @@ def main() -> None:
         test_failed_fetch_alternates_exhausted,
         test_failed_fetch_same_story_substitutes_once,
         test_phase_five_backfills_date_confirmed_from_date_published,
+        test_phase_five_gates_date_unverified_findings_on_fetched_date,
         test_cached_curation_regenerates_referenced_url_sidecar,
         test_phase_six_backfills_missing_date_confirmed_on_curated_fresh,
         test_editorial_validation,

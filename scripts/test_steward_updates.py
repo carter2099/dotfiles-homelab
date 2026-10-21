@@ -239,7 +239,7 @@ class DelayedUpdateTests(unittest.TestCase):
         self.assertEqual(result["post_version"], "0.11.4")
         self.assertFalse(result["local_mutation"])
         transaction.assert_not_called()
-        self.assertEqual(report._tldr_collect_updates({"steps": [result]})[0], [])
+        self.assertEqual(report._p1_events({"steps": [result]}), [])
 
     def test_llama_reports_verified_remote_rollback(self):
         releases = [
@@ -469,15 +469,11 @@ class DelayedUpdateTests(unittest.TestCase):
             "sections": [],
             "report_only": [{"section": "security-posture"}],
         }
-        facts = report._build_tldr_facts(
-            {"steps": []},
-            audit_data,
-            {"plans": {}, "ideas": {}},
-            fixes_data,
-            {},
-        )
-        self.assertTrue(facts["audit_open"][0]["manual"])
-        self.assertIn("gaming rig 8082", facts["needs_carter"][0])
+        triaged = report._triage({"steps": []}, audit_data, fixes_data)
+        # A security finding left for Carter is extreme: Needs You, never Watching.
+        self.assertIn("gaming rig 8082", triaged["needs"][0]["text"])
+        self.assertEqual(triaged["watching"], [])
+        self.assertTrue(report._build_tldr_facts(triaged)["action_needed"])
 
     def test_judge_failure_is_automation_not_carter_action(self):
         audit_data = {"sections": [{
@@ -487,16 +483,12 @@ class DelayedUpdateTests(unittest.TestCase):
                 "invalid audit judge verdict; retry also failed: missing finding id"
             ),
         }]}
-        facts = report._build_tldr_facts(
-            {"steps": []},
-            audit_data,
-            {"plans": {}, "ideas": {}},
-            {"sections": []},
-            {},
-        )
-        self.assertEqual(facts["needs_carter"], [])
-        self.assertEqual(facts["n_sections_open"], 0)
-        self.assertEqual(facts["n_sections_incomplete"], 1)
+        triaged = report._triage({"steps": []}, audit_data, {"sections": []})
+        facts = report._build_tldr_facts(triaged)
+        self.assertEqual(facts["needs_you"], [])
+        self.assertFalse(facts["action_needed"])
+        self.assertEqual(facts["audit_incomplete"], ["Daily News quality"])
+        self.assertTrue(any(w["text"].startswith("Audit incomplete") for w in triaged["watching"]))
 
     def test_unverifiable_audit_section_gets_fixed_text_not_model_summary(self):
         audit_data = {"sections": [{
@@ -517,7 +509,7 @@ class DelayedUpdateTests(unittest.TestCase):
             rendered = report._html_audit(audit_data, {"sections": []})
         model.assert_not_called()
         self.assertNotIn("No problems were found", rendered)
-        self.assertIn("Audit incomplete", rendered)
+        self.assertIn("Incomplete", rendered)
         self.assertIn("could not verify 1 finding(s)", rendered)
         self.assertIn("Maia 300 launch twice", rendered)
         self.assertIn("citation the duplicate depends on is unreadable", rendered)
@@ -871,11 +863,11 @@ class GamingRigMaintenanceTests(unittest.TestCase):
         for argv in (plan_argv, apply_argv):
             self.assertEqual(argv[-2:], ["--with-new-pkgs", "upgrade"])
         self.assertNotIn("dist-upgrade", apply_argv)
-        rendered = report._html_gamingrig_update({
+        texts = [i["text"] for i in report._rig_events({
             "step": "gamingrig_maintenance", "host": "gamingrig-linux",
             "status": "ok", "substeps": [result],
-        })
-        self.assertIn("9 packages upgraded, 2 newly installed", rendered)
+        })]
+        self.assertTrue(any("9 packages upgraded, 2 newly installed" in t for t in texts))
 
     def test_apt_upgrade_does_not_apply_an_invalid_or_failed_plan(self):
         for output, code in (
@@ -1121,9 +1113,10 @@ class GamingRigMaintenanceTests(unittest.TestCase):
         self.assertFalse(result["new_boot_observed"])
         self.assertFalse(result["rebooted"])
         self.assertFalse(result["post_reboot_health_passed"])
-        rendered = report._html_gamingrig_update(result)
-        self.assertIn("ssh_return", rendered)
-        self.assertNotIn("rebooted;", rendered)
+        items = report._rig_events(result)
+        needs = [i["text"] for i in items if i["kind"] == "needs"]
+        self.assertTrue(any("SSH return after reboot" in text for text in needs))
+        self.assertFalse([i for i in items if i["kind"] == "change"])
 
 
 
@@ -1157,10 +1150,9 @@ class GamingRigMaintenanceTests(unittest.TestCase):
         health.assert_called_once()
         self.assertEqual(result["status"], "ok")
         self.assertFalse(result["reboot_requested"])
-        self.assertIn("no NVIDIA module", report._html_gamingrig_update(result))
-        lines, failures = report._tldr_collect_gamingrig_updates(result)
-        self.assertEqual(failures, 0)
-        self.assertTrue(any("reboot deferred" in line for line in lines))
+        items = report._rig_events(result)
+        self.assertEqual([i["kind"] for i in items], ["watch"])
+        self.assertIn("no NVIDIA module", items[0]["text"])
 
     def test_boot_gpu_gate_requires_module_matching_the_driver(self):
         def run(module):
@@ -1232,14 +1224,12 @@ class GamingRigMaintenanceTests(unittest.TestCase):
                 ],
             }],
         }
-        html = report._html_updates(applied)
-        updates, failures = report._tldr_collect_updates(applied)
-
-        self.assertIn("rolled back", html)
-        self.assertIn("model_endpoint", html)
-        self.assertEqual(failures, 2)
-        self.assertTrue(any("rolled back" in item for item in updates))
-        self.assertTrue(any("HTTP 503" in item for item in updates))
+        items = report._p1_events(applied)
+        rollbacks = [i["text"] for i in items if i["kind"] == "rollback"]
+        watching = [i["text"] for i in items if i["kind"] == "watch"]
+        self.assertTrue(any("rolled back" in text for text in rollbacks))
+        self.assertTrue(any("model endpoint: HTTP 503" in text for text in watching))
+        self.assertFalse([i for i in items if i["kind"] == "needs"])
     def test_all_failed_reboot_gates_are_rendered(self):
         names = (
             "reboot_required", "pre_reboot_boot_id", "bootnext",
@@ -1249,16 +1239,14 @@ class GamingRigMaintenanceTests(unittest.TestCase):
             {"step": name, "status": "failed", "error": f"{name} failed"}
             for name in names
         ]
-        rendered = report._html_gamingrig_update({
-            "step": "gamingrig_maintenance",
-            "host": "gamingrig-linux",
-            "status": "failed",
-            "substeps": substeps,
-        })
+        texts = " ".join(i["text"] for i in report._rig_events({
+            "step": "gamingrig_maintenance", "host": "gamingrig-linux",
+            "status": "failed", "substeps": substeps,
+        }))
         for name in names:
-            self.assertIn(name, rendered)
+            self.assertIn(report._RIG_GATES[name], texts)
 
-    def test_rig_apply_failures_lead_tldr_health_and_needs_carter(self):
+    def test_rig_apply_failure_is_watching_not_needs_you(self):
         applied = {
             "steps": [
                 {
@@ -1277,20 +1265,12 @@ class GamingRigMaintenanceTests(unittest.TestCase):
                 },
             ],
         }
-        facts = report._build_tldr_facts(
-            applied,
-            {"sections": []},
-            {"plans": {}, "ideas": {}},
-            {"sections": []},
-            {},
-        )
-        self.assertFalse(facts["health_ok"])
-
-        self.assertIn("apt unavailable", facts["health_issues"][0])
-        self.assertIn("gaming-rig apply failure", facts["needs_carter"][0])
-        deterministic = report._tldr_deterministic(facts)
-        self.assertTrue(deterministic.startswith("Health issues:"))
-        self.assertIn("apt unavailable", deterministic)
+        triaged = report._triage(applied, {"sections": []}, {"sections": []})
+        self.assertEqual(triaged["needs"], [])
+        self.assertTrue(any("apt unavailable" in w["text"] for w in triaged["watching"]))
+        self.assertEqual(triaged["verdict"], ("ok", "All good"))
+        deterministic = report._tldr_deterministic(report._build_tldr_facts(triaged))
+        self.assertEqual(deterministic, "")
     def test_phase_failure_without_steps_is_visible_to_reports(self):
         applied = {
             "phase": "apply",
@@ -1298,21 +1278,12 @@ class GamingRigMaintenanceTests(unittest.TestCase):
             "phase_failed": True,
             "error": "apt upgrade timed out after 900s",
         }
-        rendered = report._html_updates(applied)
-        updates, failures = report._tldr_collect_updates(applied)
-        facts = report._build_tldr_facts(
-            applied,
-            {"sections": []},
-            {"plans": {}, "ideas": {}},
-            {"sections": []},
-            {},
-        )
-
-        self.assertIn("Maintenance: FAILED", rendered)
-        self.assertEqual(failures, 1)
-        self.assertIn("P1 maintenance failed", updates[0])
-        self.assertIn("apt upgrade timed out", facts["health_issues"][0])
-        self.assertTrue(any("maintenance" in item for item in facts["needs_carter"]))
+        triaged = report._triage(applied, {"sections": []}, {"sections": []})
+        self.assertEqual(triaged["needs"][0]["text"], "Nightly maintenance failed")
+        self.assertIn("apt upgrade timed out", triaged["needs"][0]["why"])
+        self.assertEqual(report._subject("2026-10-01", triaged),
+                         "Homelab Steward 2026-10-01 — Problem: maintenance failed")
+        self.assertTrue(report._build_tldr_facts(triaged)["action_needed"])
     def test_gamingrig_runs_before_local_apt_failure(self):
         calls = []
         remote = {
@@ -2088,12 +2059,12 @@ class OpenWebUIUpdateTests(unittest.TestCase):
                     "latest_tag": "0.12.2",
                     "reason": "preflight: open-webui is not running+healthy "
                               "({'status': 'running', 'health': 'starting'})"}
-        text, color = report._openwebui_update_text(deferred)
-        self.assertTrue(text.startswith(
-            "open-webui: update to 0.12.2 deferred — preflight: open-webui is not running+healthy"))
-        self.assertEqual(color, "#e65100")
+        (item,) = report._p1_events({"steps": [deferred]})
+        self.assertEqual(item["kind"], "watch")
+        self.assertTrue(item["text"].startswith(
+            "Open WebUI update to 0.12.2 deferred — preflight: open-webui is not running+healthy"))
         current = {**deferred, "latest_tag": "0.12.1", "reason": "current"}
-        self.assertEqual(report._openwebui_update_text(current), ("", ""))
+        self.assertEqual(report._p1_events({"steps": [current]}), [])
 
     def test_previous_image_removed_only_after_health_pass(self):
         images = {"ghcr.io/open-webui/open-webui:0.11.1": "sha256:old"}
@@ -2871,9 +2842,9 @@ class OmpDbRepairTests(unittest.TestCase):
     def test_needs_carter_row_is_visible_in_report(self):
         row = {"step": "omp_db_repair", "status": "warning", "needs_carter": True,
                "reason": "agent.db blocked: lossless gates failed"}
-        self.assertIn("needs Carter", report._html_updates({"steps": [row]}))
-        facts = report._build_tldr_facts({"steps": [row]}, {}, {}, {}, {})
-        self.assertTrue(any("agent.db blocked" in item for item in facts["needs_carter"]))
+        triaged = report._triage({"steps": [row]}, {}, {})
+        self.assertTrue(any("agent.db blocked" in item["why"] for item in triaged["needs"]))
+        self.assertTrue(report._build_tldr_facts(triaged)["action_needed"])
 
 
 class DependabotMergeTests(unittest.TestCase):
@@ -2949,9 +2920,14 @@ class DependabotMergeTests(unittest.TestCase):
         self.assertIn("not mergeable", reasons[("herdr-web-client", 14)])
         self.assertIn("Bump X from A to B", reasons[("herdr-web-client", 15)])
         self.assertIn("own agent", reasons[("hyperliquid", None)])
-        html = report._html_updates({"steps": [result]})
-        self.assertIn("herdr-web-client#10 auto-merge queued", html)
-        self.assertIn("herdr-web-client#11 needs Carter", html)
+        items = report._p1_events({"steps": [result]})
+        merged = {i["text"].split(":", 1)[0]: i["text"] for i in items if i["kind"] == "change"}
+        self.assertEqual(sorted(merged), ["blog", "herdr-web-client"])  # one line per repo
+        self.assertTrue(merged["herdr-web-client"].startswith(
+            "herdr-web-client: 2 updates set to auto-merge"))
+        self.assertIn("(#10)", merged["herdr-web-client"])
+        self.assertTrue(any(i["kind"] == "watch" and "#11" in i["text"]
+                            and "major update" in i["text"] for i in items))
 
     def test_unknown_mergeable_state_is_rechecked_before_skipping(self):
         prs = {"herdr-web-client": [self._pr(11, "Bump knip from 6.36.0 to 6.38.0", mergeable="UNKNOWN"),
@@ -3025,13 +3001,11 @@ class DependabotMergeTests(unittest.TestCase):
             "before GitHub merges: gh pr merge --disable-auto https://pr/12; after: "
             "revert the merge commit on the default branch",
         ])
-        page = report.html.unescape(
-            report._html_actions({"sections": []}, {"routes": []}, {"steps": [result]}))
-        self.assertIn("herdr-web-client#10 Bump a from 1.0.0 to 1.0.1 — auto-merge queued "
-                      "(1.0.0 -> 1.0.1;", page)
-        self.assertIn("Undo: before GitHub merges: gh pr merge --disable-auto https://pr/12", page)
-        self.assertNotIn("<url>", page)
-        self.assertNotIn("?", page)
+        (row,) = report._triage({"steps": [result]}, {"sections": []}, {"routes": []})["changes"]
+        self.assertEqual(row["text"], "herdr-web-client: 2 updates set to auto-merge — "
+                                      "a 1.0.0 → 1.0.1 (#10); b 2.0.0 → 2.1.0 (#12)")
+        self.assertEqual(row["undo"], [pr["revert"] for pr in result["merged"]])
+        self.assertNotIn("Undo", report._html_changes([row]))
 
     def test_recorded_step_with_placeholder_undo_renders_real_pr_url(self):
         # Shape of the 2026-10-01 01-applied.json row (written before per-PR undo existed).
@@ -3042,24 +3016,22 @@ class DependabotMergeTests(unittest.TestCase):
                 "needs_carter": [], "skipped": [],
                 "revert": "before GitHub merges: gh pr merge --disable-auto <url>; after: "
                           "revert the merged commit on the default branch"}
-        page = report.html.unescape(
-            report._html_actions({"sections": []}, {"routes": []}, {"steps": [step]}))
-        self.assertIn("herdr-web-client#11 Bump knip from 6.36.0 to 6.38.0 — auto-merge queued "
-                      "(6.36.0 -> 6.38.0; 6 check(s) green)", page)
-        self.assertIn("gh pr merge --disable-auto "
-                      "https://github.com/carter2099/herdr-web-client/pull/11", page)
-        self.assertNotIn("<url>", page)
-        self.assertNotIn("updated ?", page)
+        (row,) = report._triage({"steps": [step]}, {"sections": []}, {"routes": []})["changes"]
+        self.assertIn("knip 6.36.0 → 6.38.0 (#11)", row["text"])
+        self.assertEqual(row["undo"], ["before GitHub merges: gh pr merge --disable-auto "
+                                       "https://github.com/carter2099/herdr-web-client/pull/11; "
+                                       "after: revert the merge commit on the default branch"])
 
     def test_done_step_without_versions_renders_reason_not_question_marks(self):
         step = {"step": "some_step", "status": "ok", "reason": "rotated the token",
                 "revert": "restore the old token"}
-        page = report._html_actions({"sections": []}, {"routes": []}, {"steps": [step]})
-        self.assertIn("rotated the token", page)
-        self.assertNotIn("?", page)
+        (row,) = report._triage({"steps": [step]}, {"sections": []}, {"routes": []})["changes"]
+        self.assertIn("rotated the token", row["text"])
+        self.assertNotIn("?", row["text"])
+        self.assertEqual(row["undo"], ["restore the old token"])
         versioned = {**step, "pre_version": "1.0.0", "post_version": "1.1.0"}
-        page = report._html_actions({"sections": []}, {"routes": []}, {"steps": [versioned]})
-        self.assertIn("updated 1.0.0 -&gt; 1.1.0", page)
+        (row,) = report._triage({"steps": [versioned]}, {"sections": []}, {"routes": []})["changes"]
+        self.assertIn("1.0.0 → 1.1.0", row["text"])
 
 
 class HostRebootReportTests(unittest.TestCase):
@@ -3090,28 +3062,29 @@ class HostRebootReportTests(unittest.TestCase):
 
     def test_changed_boot_id_renders_reboot_line_status_row_and_tldr_fact(self):
         status = self._status("boot-after")
-        line = ("ThinkPad rebooted for kernel update: 6.8.0-142-generic -> 6.8.0-146-generic "
-                "(04:02 UTC, after P3); run resumed")
+        line = ("ThinkPad rebooted for kernel update: 6.8.0-142-generic → 6.8.0-146-generic "
+                "(04:02 UTC); run resumed")
         self.assertEqual(status["text"], line)
         applied = {"steps": [], "host_reboot": status}
-        self.assertIn(report.html.escape(line), report._html_updates(applied))
+        self.assertEqual(report._p1_events(applied)[0]["text"], line)
         health = report._html_health({"checks": []}, {"reboot": {"needed": False}}, applied)
         self.assertIn("Rebooted 04:02 UTC — kernel 6.8.0-146-generic", health)
         self.assertNotIn("Not needed", health)
         again = report._html_health(
             {"checks": []}, {"reboot": {"needed": True, "kernel": "6.8.0-147-generic"}}, applied)
         self.assertIn("Needed — kernel 6.8.0-147-generic", again)
-        facts = report._build_tldr_facts(applied, {}, {}, {}, {})
-        self.assertEqual(facts["updates"][0], line)
-        self.assertEqual(report._tldr_payload(facts, "2026-10-01")[0]["updates"][0], line)
+        facts = report._build_tldr_facts(report._triage(applied, {}, {}))
+        self.assertEqual(facts["changes"][0], line)
+        self.assertEqual(report._tldr_payload(facts, "2026-10-01")[0]["changes"][0], line)
 
     def test_unchanged_boot_id_warns_that_host_did_not_restart(self):
         status = self._status("boot-before")
         self.assertFalse(status["rebooted"])
-        self.assertEqual(status["text"], "ThinkPad reboot requested at 04:02 UTC (after P3) "
+        self.assertEqual(status["text"], "ThinkPad reboot requested at 04:02 UTC "
                                          "but the host did not restart")
         applied = {"steps": [], "host_reboot": status}
-        self.assertIn("did not restart", report._html_updates(applied))
+        (item,) = report._p1_events(applied)
+        self.assertEqual(item["kind"], "watch")
         health = report._html_health({"checks": []}, {}, applied)
         self.assertIn("Requested 04:02 UTC — host did not restart", health)
 
@@ -3130,8 +3103,196 @@ class HostRebootReportTests(unittest.TestCase):
             report.phase_9_archive(self.run_dir, {"date": "2026-10-01"}, 1.0)
         summary = (self.run_dir / "summary.md").read_text()
         update_status = summary.split("## Update Status\n", 1)[1].split("\n\n", 1)[0]
-        self.assertIn("- ThinkPad rebooted for kernel update: 6.8.0-142-generic -> "
-                      "6.8.0-146-generic (04:02 UTC, after P3); run resumed", update_status)
+        self.assertIn("- ThinkPad rebooted for kernel update: 6.8.0-142-generic → "
+                      "6.8.0-146-generic (04:02 UTC); run resumed", update_status)
+
+
+class EmailTriageTests(unittest.TestCase):
+    """Needs You is only for extreme items; everything else open is Watching."""
+
+    def route(self, **row):
+        return {"section": "agents-md-truth", "finding_id": "finding-2", "severity": "medium",
+                "status": "needs_carter", "claim": "The rig firewall still allows 192.168.4.100.",
+                "decision": "Keep or remove the allow for 192.168.4.100.", **row}
+
+    def triage(self, *routes, steps=()):
+        return report._triage({"steps": list(steps)}, {"sections": []}, {"routes": list(routes)})
+
+    def test_medium_decision_is_watching_and_high_severity_is_needs_you(self):
+        quiet = self.triage(self.route())
+        self.assertEqual(quiet["needs"], [])
+        self.assertIn("192.168.4.100", quiet["watching"][0]["text"])
+        self.assertEqual(report._subject("2026-10-18", quiet), "Homelab Steward 2026-10-18 — All good")
+        loud = self.triage(self.route(severity="high"))
+        self.assertEqual(len(loud["needs"]), 1)
+        self.assertEqual(loud["watching"], [])
+        self.assertEqual(report._subject("2026-10-18", loud),
+                         "Homelab Steward 2026-10-18 — Needs you (1)")
+
+    def test_report_only_deferred_and_recommended_rows_are_watching(self):
+        triaged = self.triage(
+            self.route(section="digest-quality", status="report_only", finding_id="finding-1"),
+            self.route(section="digest-quality", status="deferred", finding_id="finding-2",
+                       summary="Deferred: an open steward-code PR already changes research.py."),
+            self.route(section="config-doc-drift", approve="steward-approve 2026-10-18 x",
+                       recommended="patch"),
+        )
+        self.assertEqual(triaged["needs"], [])
+        self.assertEqual(len(triaged["watching"]), 3)
+        texts = " | ".join(w["text"] for w in triaged["watching"])
+        self.assertIn("noted; never changed automatically", texts)
+        self.assertIn("fix queued", texts)
+        self.assertIn("steward-approve 2026-10-18 x", [w["command"] for w in triaged["watching"]])
+        self.assertFalse(report._build_tldr_facts(triaged)["action_needed"])
+
+    def test_noop_doc_fix_is_dropped_and_a_real_fix_is_listed_once(self):
+        fixed = {"section": "agents-md-truth", "finding_id": "finding-1", "status": "done",
+                 "severity": "low", "claim": "stale version",
+                 "summary": "Corrected AGENTS.md (agents-md-truth) and pushed the commit.",
+                 "revert": "git revert abc"}
+        triaged = self.triage(
+            fixed, {**fixed, "section": "docs-accuracy"},
+            {**fixed, "section": "config-doc-drift", "finding_id": "finding-2", "revert": "",
+             "summary": "AGENTS.md already has the corrected text; nothing needed changing.",
+             "detail": "replacement text already present (e.g. applied by an earlier route)"},
+        )
+        texts = [c["text"] for c in triaged["changes"]]
+        self.assertEqual(texts, ["AGENTS.md accuracy: Corrected AGENTS.md and pushed the commit.",
+                                 "Docs accuracy: Corrected AGENTS.md and pushed the commit."])
+        self.assertFalse(any("already has" in t for t in texts))
+
+    def test_update_with_undo_is_listed_once_and_its_undo_moves_to_the_appendix(self):
+        step = {"step": "omp_update", "status": "ok", "pre_version": "omp/1.0.0",
+                "post_version": "omp/1.0.1", "revert": "install -m 755 old omp"}
+        triaged = self.triage(steps=[step])
+        (change,) = triaged["changes"]
+        self.assertEqual((change["text"], change["ref"]), ("omp 1.0.0 → 1.0.1", 1))
+        changes = report._html_changes(triaged["changes"])
+        self.assertIn("[1]", changes)
+        self.assertNotIn("install -m 755", changes)
+        footer = report._html_footer(triaged, {"accounts": []}, Path("/run"))
+        self.assertIn("install -m 755 old omp", footer)
+        self.assertIn("OpenCode Go usage unavailable (proxy dormant)", footer)
+
+    def test_rig_skip_reports_how_long_since_the_last_maintenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "2026-10-17").mkdir()
+            (root / "2026-10-17" / "01-applied.json").write_text(json.dumps(
+                {"steps": [{"step": "gamingrig_maintenance", "status": "ok"}]}))
+            last_ok = report._rig_last_maintained(root / "2026-10-20", "2026-10-20")
+        self.assertEqual(last_ok, {"date": "2026-10-17", "nights": 3})
+        (item,) = report._rig_events(
+            {"step": "gamingrig_maintenance", "status": "skipped",
+             "reason": "offline or sleeping: no route to gamingrig-linux"}, last_ok)
+        self.assertEqual((item["kind"], item["text"]), (
+            "watch", "Gaming rig not maintained tonight (offline or asleep) — "
+                     "last maintained 2026-10-17 (3 nights ago)"))
+
+    RIG_SKIPPED = {"step": "gamingrig_maintenance", "status": "skipped",
+                   "reason": "offline or sleeping: no route to gamingrig-linux"}
+
+    def rig_triage(self, last_ok):
+        return report._triage({"steps": [self.RIG_SKIPPED]}, {"sections": []}, {"routes": []},
+                              rig_last_ok=last_ok)
+
+    def test_rig_staleness_escalates_to_needs_you_at_thirty_nights(self):
+        quiet = self.rig_triage({"date": "2026-09-21", "nights": 29})
+        self.assertEqual(quiet["needs"], [])
+        self.assertIn("(29 nights ago)", quiet["watching"][0]["text"])
+        loud = self.rig_triage({"date": "2026-09-20", "nights": 30})
+        (needs,) = loud["needs"]
+        self.assertEqual(loud["watching"], [])
+        self.assertIn("30 nights", needs["text"])
+        self.assertIn("security updates", needs["why"])
+        self.assertIn("booted into Linux overnight", needs["todo"])
+        self.assertEqual(report._subject("2026-10-20", loud),
+                         "Homelab Steward 2026-10-20 — Needs you (1)")
+
+    def test_rig_with_no_successful_maintenance_in_the_scan_window_is_needs_you(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            last_ok = report._rig_last_maintained(Path(tmp) / "2026-10-20", "2026-10-20")
+        self.assertEqual(last_ok, {"date": None, "days": report.RIG_MAINTENANCE_SCAN_DAYS})
+        (needs,) = self.rig_triage(last_ok)["needs"]
+        self.assertIn(f"more than {report.RIG_MAINTENANCE_SCAN_DAYS} days", needs["text"])
+
+    def test_deferred_row_names_the_blocking_pr(self):
+        triaged = self.triage(self.route(
+            status="deferred", summary="Deferred: queued behind open steward-code PR #8, ...",
+            pr_url="https://github.com/o/dotfiles-homelab-private/pull/8"))
+        (watch,) = triaged["watching"]
+        self.assertIn("fix queued behind steward-code PR #8; raised again next night", watch["text"])
+
+    def test_summary_never_restates_the_banner(self):
+        quiet = report._triage({"steps": []}, {"sections": []}, {"routes": []})
+        with patch.object(report, "_call_omp_p") as model:
+            self.assertEqual(report._build_tldr(quiet, "2026-10-20"), "")
+        model.assert_not_called()
+        watching = self.triage(self.route())
+        self.assertEqual(report._tldr_deterministic(report._build_tldr_facts(watching)), "")
+        rules = {"action_needed": False, "lead_ids": [], "need_ids": [], "retry_allowed": False}
+        for summary in ("All good — nothing needs you. Tonight: 4 updates, 1 deploy.",
+                        "Watching 2 items; no action needed this time around."):
+            with self.subTest(summary=summary):
+                self.assertTrue(any("restates the banner" in v for v in report._tldr_violations(
+                    {"summary": summary, "action_needed": False}, **rules)))
+        self.assertEqual(report._tldr_violations(
+            {"summary": "omp moved to 1.0.1, and the firewall allow for the old rig IP is "
+                        "being watched.", "action_needed": False}, **rules), [])
+
+    def test_audit_strip_omits_claims_already_shown_above(self):
+        audit = {"sections": [
+            {"name": "agents-md-truth", "verdict": "ATTENTION"},
+            {"name": "docs-accuracy", "verdict": "ATTENTION",
+             "judge_confirmed": [{"claim": "README lists a retired port."}]},
+            {"name": "config-doc-drift", "verdict": "PASS"},
+        ]}
+        rendered = report._html_audit(audit, {"routes": [self.route()]})
+        self.assertIn("Watching", rendered)
+        self.assertNotIn("192.168.4.100", rendered)
+        self.assertIn("README lists a retired port.", rendered)
+        self.assertIn("1 other section passed", rendered)
+
+    def test_untracked_dotfiles_scan_is_empty_without_the_dotfiles_repo(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(report, "DOTFILES_GIT", Path(tmp) / "missing"), \
+                patch.object(report, "_dotfiles_untracked_in_scope") as scan:
+            self.assertEqual(report._dotfiles_untracked_paths(), [])
+        scan.assert_not_called()
+
+    def test_held_public_file_is_watching_and_publish_count_is_reference_only(self):
+        public = {"status": "published", "updated": [{"path": "a"}, {"path": "b"}],
+                  "held": [{"path": "scripts/x.py", "reason": "not confident (credential=0.6)"}]}
+        triaged = report._triage({"steps": []}, {}, {}, public=public)
+        self.assertEqual(triaged["verdict"], ("ok", "All good"))
+        (held,) = triaged["watching"]
+        self.assertEqual(held["command"], "scripts/x.py")
+        self.assertNotIn("credential", held["text"])
+        self.assertIn("Public mirror: published 2 changed files",
+                      report._html_footer(triaged, {}, Path("/run")))
+
+    def test_triggered_troubleshoot_renders_regression_diagnosis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "2020-01-02"
+            run_dir.mkdir()
+            (run_dir / "03-troubleshoot.json").write_text(json.dumps({
+                "triggered": True, "regressed": {"endpoint_blog": {}},
+                "agent_status": "diagnosed", "diagnosis": "blog container out of memory",
+                "next_steps": ["restart blog"], "re_validation_healthy": False,
+                "fix_actions": [{"endpoint": "blog", "choice": "restart", "confidence": 0.9,
+                                 "executed": True, "exit_code": 0, "outcome": "still failing"}]}))
+            (run_dir / "02b-validation.json").write_text(json.dumps(
+                {"checks": [{"name": "endpoint_blog", "status": "fail", "error": "HTTP 502"}]}))
+            with patch.object(report, "TEMPLATE_PATH", Path(tmp) / "template.html"), \
+                    patch.object(report, "_build_tldr", return_value="summary"), \
+                    patch.object(report, "_session_memory_context", return_value=""), \
+                    patch.object(report, "_dotfiles_untracked_paths", return_value=[]):
+                result = report.phase_8_render_send(run_dir, {"date": "2020-01-02"}, dry_run=True)
+            page = (run_dir / "08-email.html").read_text()
+        self.assertEqual(result["subject"], "Homelab Steward 2020-01-02 — Problem: blog down")
+        self.assertIn("Regression diagnosis", page)
+        self.assertIn("blog container out of memory", page)
+        self.assertIn("still failing after the automatic repair attempts", page)
 
 
 class RunTimingAndMemoryTests(unittest.TestCase):
@@ -3196,8 +3357,7 @@ class RunTimingAndMemoryTests(unittest.TestCase):
         calm = report._html_health({"checks": []}, {}, {"steps": []},
                                    memory_mib={"max_anon_mib": 391, "peak_mib": 4122},
                                    memory_high_mib=6144)
-        self.assertIn("Steward memory", calm)
-        self.assertIn("391 MiB anonymous peak, 4122 MiB total peak (MemoryHigh 6144 MiB)", calm)
+        self.assertIn("Steward peak 391 MiB", calm)
         self.assertNotIn(report._dot("warn"), calm)
         hot = report._html_health({"checks": []}, {}, {"steps": []},
                                   memory_mib={"max_anon_mib": 3500, "peak_mib": 6079},

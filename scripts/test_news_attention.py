@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import tempfile
 import zipfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
-from daily_news import attention_match, attention_sources
+from daily_news import attention_match, attention_sources, catalog, contracts
 from daily_news.attention import (
     DEFAULT_REFERENCE,
     EDITORIAL_POINTS,
@@ -232,8 +234,16 @@ def test_same_event_keys_cover_every_same_row() -> None:
          "title": "Quasar 9"},
         {"src": "gkg", "t": END_S - 400, "domain": "related.example",
          "url": "https://related.example/2026/09/24/quasar-9-analysis", "title": "What Quasar 9 means"},
+        # A Bluesky bot's link card names its home page and a site search, a wire runs a
+        # multi-story live blog: none names one event (2026-10-18 `bigearthdata.ai`).
+        {"src": "jetstream", "t": END_S - 300, "author": "bot", "url": "https://bigearthdata.ai/",
+         "urls": ["https://bigearthdata.ai/",
+                  "https://bigearthdata.ai/search/results?q=Acme+Quasar+9&eitype=bluesky"],
+         "title": "Acme ships Quasar 9", "text": ""},
+        {"src": "gkg", "t": END_S - 200, "domain": "wire.example",
+         "url": "https://wire.example/live/tech-news-updates-09-24-2026", "title": "Acme ships Quasar 9"},
     ]
-    relations = ["same", "same", "same", "same", "same", "related"]
+    relations = ["same", "same", "same", "same", "same", "related", "same", "same"]
     index = attention_match.Index(rows)
     documents = [{"key": f"doc{i}", "rows": [i], "score": 0.5, "band": "strong", "src": row["src"],
                   "title": row["title"], "relation": relation, "decided_by": "jev"}
@@ -254,6 +264,35 @@ def test_same_event_keys_cover_every_same_row() -> None:
     attention, _ = measured_attention(legacy, section="ai-tech", measured_sources=ALL_SOURCES,
                                       references={}, window_end=WINDOW_END, first_seen=found["first_seen"])
     check(attention["evidence"]["same_event_keys"] == [], attention["evidence"])
+
+
+def test_a_stored_bare_host_key_no_longer_rejects_an_unrelated_story() -> None:
+    # ai-tech 10-17 stored the bot host `bigearthdata.ai` as a same-event key of its Replit
+    # story; 10-18..10-20 candidates sharing only that key were dropped as already covered.
+    story = "https://replit.example/blog/replit-switches-to-openai"
+    sibling = "techsite.example/2026/10/17/replit-openai-switch"
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        prior = root / next(iter(catalog.TOPICS.values()))["category"] / "2026-10-17"
+        prior.mkdir(parents=True)
+        (prior / "06-curated.json").write_text(json.dumps({"fresh": [{
+            "url": story, "attention": {"evidence": {"same_event_keys": [
+                "bigearthdata.ai", "bigearthdata.ai/search/results?q=Replit+OpenAI", sibling]}},
+        }]}))
+        ledger = contracts.load_recent_coverage_ledger(root, date(2026, 10, 18), 5)
+    check({contracts.coverage_key(story), sibling} <= ledger, sorted(ledger))
+    unrelated = {"bigearthdata.ai", "api-docs.deepseek.example/news/news261017"}
+    check(not unrelated & ledger, sorted(unrelated & ledger))
+
+
+def test_bare_changelog_and_release_indexes_are_listings() -> None:
+    for index in ("https://github.blog/changelog/", "https://cursor.com/en-US/changelog",
+                  "https://github.com/acme/agent/releases", "https://docs.acme.example/release-notes"):
+        check(contracts.is_listing_url(index), index)
+    for entry in ("https://github.blog/changelog/2026-10-16-agentic-autofix-for-code-scanning-alerts-ga/",
+                  "https://github.com/acme/agent/releases/tag/v2.1.0"):
+        check(not contracts.is_listing_url(entry), entry)
+
 
 
 def test_a_failed_adjudication_is_reported_per_story_and_stops_during_an_outage() -> None:
@@ -538,6 +577,8 @@ def main() -> None:
         test_related_coverage_counts_at_half_weight,
         test_same_event_urls_are_jev_same_publisher_articles_only,
         test_same_event_keys_cover_every_same_row,
+        test_a_stored_bare_host_key_no_longer_rejects_an_unrelated_story,
+        test_bare_changelog_and_release_indexes_are_listings,
         test_a_failed_adjudication_is_reported_per_story_and_stops_during_an_outage,
         test_measured_zero_is_not_unavailable,
         test_quiet_publisher_sitemap_is_a_measured_zero_not_a_failure,

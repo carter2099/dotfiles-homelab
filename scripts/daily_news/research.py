@@ -28,6 +28,18 @@ _UPSTREAM_OUTAGE: bool = False
 _RESEARCH_FAILURES: list[str] = []
 _RESEARCH_SUCCESSES: int = 0
 
+_MONTH_ONLY_DATE = re.compile(r"^\d{4}-\d{2}$")
+
+# Cross-day text-level same-event dedup (Phase 3). news_publish._same_event's
+# 0.25 token overlap separates one day's front-page sections; across days a
+# continuing topic shares headline words with genuinely new events (10-20
+# World: AP's DOJ charges were rejected as the 10-15 DOJ threats story). The
+# re-publications this path exists for (10-17 World ChatGPT Chrome extension,
+# 10-18 AI & Tech Replit/Anthropic after a TechCrunch slug move) share at least
+# half their title/event vocabulary and run within two days of the original.
+CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP = 0.45
+CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS = 2
+
 def refetch_article_date(url: str, title: str) -> str | None:
     """Re-fetch an article to independently extract its publication date.
 
@@ -227,8 +239,12 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
 def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
     """Phase 2: Python date pre-tagging + batched LLM judge.
 
-    1. Python parses date_published; findings published before yesterday (or
-       undated) are dropped as stale without touching the LLM.
+    1. Python parses date_published; findings published before yesterday are
+       dropped as stale without touching the LLM. Findings without a full
+       date (empty, month-only "2026-10", unparseable) go on to the judge
+       marked ``date_unverified``; Phase 5 keeps them only when the fetched
+       page confirms a publication date in the freshness window. The artifact's
+       ``pre_filter`` counts and ``pre_filter_dropped`` list record every drop.
     2. Findings are split into batches of BATCH_SIZE.
     3. Each batch gets one LLM call with topic rules and editorial-significance rubric.
     4. Python resolves each approval to its source finding (keeping only the
@@ -261,7 +277,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
     )
     state, cached = runtime.begin_or_load_phase(
         run_dir, "judge-research", inputs=phase_inputs, artifact_path=output_path,
-        schema_version=1, validator=lambda value: isinstance(value, dict),
+        schema_version=2, validator=lambda value: isinstance(value, dict),
     )
     if cached is not None:
         return cached.get("fresh", [])
@@ -277,32 +293,52 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
             finding["url"] = canonicalize_publisher_url(finding["url"])
 
     pre_tagged: list[dict] = []
-    too_old_count = 0
+    pre_filter = {
+        "too_old": 0,
+        "undated_forwarded": 0,
+        "partial_date_forwarded": 0,
+        "already_covered_previous_day": 0,
+    }
+    pre_filter_dropped: list[dict] = []
     ledger_rejected: list[dict] = []
 
     for f in findings:
         if coverage_key(f.get("url", "")) in recent_coverage:
             ledger_rejected.append({"finding": f, "reason": "already_covered_previous_day"})
+            pre_filter["already_covered_previous_day"] += 1
             continue
-        pub_date = parse_date(f.get("date_published"))
+        published = str(f.get("date_published") or "").strip()
+        # A month-only date names no day, so it never proves staleness either.
+        pub_date = None if _MONTH_ONLY_DATE.match(published) else parse_date(published)
         if pub_date is None:
-            too_old_count += 1
-            continue
-        pub_calendar_date = pub_date.date()
-        if pub_calendar_date >= yesterday:
+            # 10-18 gaming: 11 of 18 raw findings (VALORANT Champions final,
+            # the official Steam Next Fest page) carried empty or month-only
+            # dates and were silently dropped, leaving the section empty.
+            f["date_tag"] = "unverified"
+            f["date_unverified"] = True
+            pre_filter["partial_date_forwarded" if published else "undated_forwarded"] += 1
+            pre_tagged.append(f)
+        elif pub_date.date() >= yesterday:
             f["date_tag"] = "fresh"
             pre_tagged.append(f)
         else:
-            too_old_count += 1
+            pre_filter["too_old"] += 1
+            pre_filter_dropped.append({
+                "title": f.get("title", ""), "url": f.get("url", ""),
+                "date_published": published, "reason": "too_old",
+            })
 
-    print(f"  Date pre-tag: {len(pre_tagged)} fresh, {too_old_count} too_old, "
+    unverified = pre_filter["undated_forwarded"] + pre_filter["partial_date_forwarded"]
+    print(f"  Date pre-tag: {len(pre_tagged) - unverified} fresh, {unverified} date-unverified "
+          f"(forwarded for fetch confirmation), {pre_filter['too_old']} too_old, "
           f"{len(ledger_rejected)} covered by a section in the previous "
           f"{CROSS_DAY_DEDUP_DAYS} days (dropped)")
 
     if not pre_tagged:
-        print(f"  [done] judge_research — all findings too old or no date")
-        output = {"fresh": [], "rejected": ledger_rejected, "status": "empty",
-                  "reason": "no date-valid research findings"}
+        print(f"  [done] judge_research — all findings too old or already covered")
+        output = {"fresh": [], "rejected": ledger_rejected,
+                  "pre_filter": pre_filter, "pre_filter_dropped": pre_filter_dropped,
+                  "status": "empty", "reason": "no date-valid research findings"}
         runtime.complete_phase_json(
             state,
             "judge-research",
@@ -341,7 +377,8 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         "a factual impact sentence grounded in the supplied title/summary. Routine "
         "deprecations, patches, renames, or migration notices are not high without "
         "documented widespread disruption or affected scale. Never estimate popularity "
-        "or attention.\n\n"
+        "or attention. A finding with `date_unverified: true` has no full publication "
+        "date yet; a later article fetch confirms it, so never reject it for its date.\n\n"
         "Output a JSON object with two arrays wrapped in ```json fences:\n"
         '  {\n'
         '    "approved": [<findings that pass all quality checks>],\n'
@@ -466,6 +503,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         print(f"    ... and {len(all_rejected) - 5} more rejected")
 
     output = {"fresh": fresh, "rejected": all_rejected + dedup_rejected,
+              "pre_filter": pre_filter, "pre_filter_dropped": pre_filter_dropped,
               "status": "ok" if fresh else "empty",
               "reason": "" if fresh else "no findings passed research judgment"}
     runtime.complete_phase_json(
@@ -823,8 +861,9 @@ def assign_fetch_alternates(
 def _recent_published_events(digests_root: Path, today: date) -> tuple[list[dict], Any]:
     """Published stories from the previous CROSS_DAY_DEDUP_DAYS plus a token corpus.
 
-    The corpus spans news_publish.EVENT_CORPUS_DAYS of publications, the same
-    window the front page calibrates same-event token rarity on.
+    Each recent story carries its ``edition_date``. The corpus spans
+    news_publish.EVENT_CORPUS_DAYS of publications, the same window the front
+    page calibrates same-event token rarity on.
     """
     # Lazy import: news_publish imports this package at module load.
     from news_publish import EVENT_CORPUS_DAYS, load_publications
@@ -840,8 +879,37 @@ def _recent_published_events(digests_root: Path, today: date) -> tuple[list[dict
             for story in publication.get("fresh", []):
                 corpus.append(story)
                 if age <= CROSS_DAY_DEDUP_DAYS:
-                    recent.append(story)
+                    recent.append({**story, "edition_date": day})
     return recent, corpus
+
+def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: date) -> bool:
+    """True when ``item`` re-reports the event of ``story``, published on an earlier day.
+
+    Beyond news_publish._same_event, the two must share
+    CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP of the smaller title/event vocabulary and
+    be dated at most CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS apart. An undated
+    candidate counts as published at the start of the freshness window
+    (yesterday); an undated story as published on its edition date.
+    """
+    from news_publish import _same_event, _story_event_tokens
+
+    story_key = coverage_key(story.get("url", ""))
+    if story_key and story_key == coverage_key(item.get("url", "")):
+        return True
+    if not _same_event(story, item, frequency):
+        return False
+    story_tokens = _story_event_tokens(story)
+    item_tokens = _story_event_tokens(item)
+    shared = story_tokens & item_tokens
+    if len(shared) / min(len(story_tokens), len(item_tokens)) < CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP:
+        return False
+    story_date = (parse_date(str(story.get("date_confirmed") or "").strip())
+                  or parse_date(str(story.get("date_published") or "").strip())
+                  or parse_date(str(story.get("edition_date") or "")))
+    item_date = parse_date(str(item.get("date_published") or "").strip())
+    item_day = item_date.date() if item_date else issue_date - timedelta(days=1)
+    story_day = story_date.date() if story_date else item_day
+    return abs((item_day - story_day).days) <= CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS
 
 @runtime.track_phase_failure("rank")
 def phase_3_rank(
@@ -885,14 +953,18 @@ def phase_3_rank(
             "research_findings": runtime.canonical_fingerprint(research_findings),
             "covered_urls": sorted(recent_coverage),
             "covered_stories": runtime.canonical_fingerprint([
-                {key: story.get(key, "") for key in ("url", "title", "event")}
+                {key: story.get(key, "") for key in (
+                    "url", "title", "event", "date_published", "date_confirmed", "edition_date")}
                 for story in recent_stories
             ]),
+            "issue_date": issue_date.isoformat(),
         },
         policy={
             "ranking_schema": RANKING_SCHEMA_VERSION,
             "hard_paywall_domains": sorted(HARD_PAYWALL_DOMAINS),
             "fetch_alternate_limit": FETCH_ALTERNATE_LIMIT,
+            "cross_day_event_min_token_overlap": CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP,
+            "cross_day_event_max_date_gap_days": CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS,
         },
     )
     state, cached = runtime.begin_or_load_phase(
@@ -922,9 +994,10 @@ def phase_3_rank(
     # Event-level dedup: a new outlet's URL slips past the URL checks above, but
     # Phase 2b's Jev-"same" rows often carry an already-covered article's URL
     # (10-10 Agents repeated the 10-09 Gemini agent launch via dataconomy).
-    # When no key overlaps, the front page's token same-event test runs against
-    # the stories published in the previous CROSS_DAY_DEDUP_DAYS days.
-    from news_publish import _frequency_of, _same_event
+    # When no key overlaps, a stricter form of the front page's token
+    # same-event test (_cross_day_same_event) runs against the stories
+    # published in the previous CROSS_DAY_DEDUP_DAYS days.
+    from news_publish import _frequency_of
 
     event_frequency = _frequency_of([{"fresh": event_corpus + eligible_fresh}])
     recent_coverage_rejected = []
@@ -940,7 +1013,8 @@ def phase_3_rank(
         matched_story = None
         if not matched:
             matched_story = next(
-                (story for story in recent_stories if _same_event(story, item, event_frequency)),
+                (story for story in recent_stories
+                 if _cross_day_same_event(story, item, event_frequency, issue_date)),
                 None,
             )
             if matched_story is not None:
@@ -991,9 +1065,11 @@ def phase_3_rank(
               f"fetchable source, {len(paywall_dropped)} dropped before fetch")
 
     # Product priority combines editorial consequence with observed attention.
+    # Date-unverified findings only fill the cap behind dated ones: they cost
+    # a Phase 5 date confirmation and may still be dropped as unconfirmed.
     pool_a = sorted(
         eligible_fresh,
-        key=priority_sort_key,
+        key=lambda item: (not item.get("date_unverified"), priority_sort_key(item)),
         reverse=True,
     )[:FRESH_CAP]
 
@@ -1295,6 +1371,9 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
        - date 2-5 days old → drop (Phase 1/2 misclassified it as fresh)
        - date >5 days old → auto-drop
        - date missing → targeted re-fetch for date extraction, then re-check
+       - a ``date_unverified`` finding (no full research date) passes only
+         when a fetched date of yesterday through today confirms it; otherwise
+         it drops as ``date_unconfirmed``
     2. Surviving summaries go through batched LLM judge for faithfulness
        and completeness (date already verified, not re-checked).
     3. Python merges results.
@@ -1344,26 +1423,47 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
     date_dropped: list[dict] = []
     need_refetch: list[dict] = []
 
-    for s in to_judge:
-        dc = (s.get("date_confirmed") or "").strip()
-        parsed = parse_date(dc)
-        if parsed is not None:
-            d = parsed.date()
-            if d >= yesterday:
-                validated.append(s)
-            elif d >= stale_cutoff:
-                # Phase 1/2 tagged as fresh but Phase 4's fetch shows it's 2-5d old
-                age = (today - d).days
-                s["judge_verdict"] = "drop"
-                s["judge_issues"] = [f"date_mismatch: tagged fresh but confirmed {dc} is {age}d old"]
-                date_dropped.append(s)
-            else:
-                age = (today - d).days
-                s["judge_verdict"] = "drop"
-                s["judge_issues"] = [f"date_stale: confirmed {dc} is {age}d old (>5d cutoff)"]
-                date_dropped.append(s)
+    def _date_check(s: dict, confirmed: str) -> str | None:
+        """Empty when ``confirmed`` is fresh, a drop issue when stale, None when unusable."""
+        parsed = parse_date(confirmed)
+        if parsed is None:
+            return None
+        d = parsed.date()
+        if d > today and s.get("date_unverified"):
+            # A future date is an event date, never the page's publication date.
+            return None
+        if d >= yesterday:
+            return ""
+        age = (today - d).days
+        if d >= stale_cutoff:
+            # Phase 1/2 tagged as fresh but Phase 4's fetch shows it's 2-5d old
+            return f"date_mismatch: tagged fresh but confirmed {confirmed} is {age}d old"
+        return f"date_stale: confirmed {confirmed} is {age}d old (>5d cutoff)"
+
+    def _drop(s: dict, issue: str) -> None:
+        s["judge_verdict"] = "drop"
+        s["judge_issues"] = [issue]
+        date_dropped.append(s)
+
+    def _unconfirmed(s: dict, label: str, outcome: str) -> None:
+        """No usable fetched date: dated findings go to the LLM, undated ones drop."""
+        if s.get("date_unverified"):
+            _drop(s, "date_unconfirmed: research had no full publication date "
+                     f"({s.get('date_published') or 'empty'}) and the fetched page "
+                     f"confirmed none from {yesterday} to {today}")
+            print(f"  [done] {label} → {outcome}, date-unverified finding dropped")
         else:
+            validated.append(s)
+            print(f"  [done] {label} → {outcome}, passing to LLM")
+
+    for s in to_judge:
+        issue = _date_check(s, (s.get("date_confirmed") or "").strip())
+        if issue is None:
             need_refetch.append(s)
+        elif issue:
+            _drop(s, issue)
+        else:
+            validated.append(s)
 
     # Re-fetch dates for articles where Phase 4 didn't extract one
     if need_refetch:
@@ -1376,37 +1476,23 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
             t_refetch = time.time()
             try:
                 refetched = refetch_article_date(url, title)
-                elapsed = time.time() - t_refetch
-                if refetched:
-                    s["date_confirmed"] = refetched
-                    parsed = parse_date(refetched)
-                    if parsed:
-                        d = parsed.date()
-                        if d >= yesterday:
-                            validated.append(s)
-                            print(f"  [done] {label} → {refetched} (fresh) ({elapsed:.0f}s)")
-                        elif d >= stale_cutoff:
-                            age = (today - d).days
-                            s["judge_verdict"] = "drop"
-                            s["judge_issues"] = [f"date_mismatch: tagged fresh but confirmed {refetched} is {age}d old"]
-                            date_dropped.append(s)
-                            print(f"  [done] {label} → {refetched} (mismatch, auto-dropped) ({elapsed:.0f}s)")
-                        else:
-                            age = (today - d).days
-                            s["judge_verdict"] = "drop"
-                            s["judge_issues"] = [f"date_stale: confirmed {refetched} is {age}d old (>5d cutoff)"]
-                            date_dropped.append(s)
-                            print(f"  [done] {label} → {refetched} (stale, auto-dropped) ({elapsed:.0f}s)")
-                    else:
-                        validated.append(s)
-                        print(f"  [done] {label} → unparseable, passing to LLM ({elapsed:.0f}s)")
-                else:
-                    validated.append(s)
-                    print(f"  [done] {label} → no date found, passing to LLM ({elapsed:.0f}s)")
             except Exception as e:
-                elapsed = time.time() - t_refetch
-                print(f"  [FAIL] {label} — {e} ({elapsed:.0f}s), passing to LLM")
+                _unconfirmed(s, label, f"failed ({e}, {time.time() - t_refetch:.0f}s)")
+                continue
+            elapsed = time.time() - t_refetch
+            if not refetched:
+                _unconfirmed(s, label, f"no date found ({elapsed:.0f}s)")
+                continue
+            s["date_confirmed"] = refetched
+            issue = _date_check(s, refetched)
+            if issue is None:
+                _unconfirmed(s, label, f"{refetched} unusable ({elapsed:.0f}s)")
+            elif issue:
+                _drop(s, issue)
+                print(f"  [done] {label} → {refetched} ({issue.split(':')[0]}, auto-dropped) ({elapsed:.0f}s)")
+            else:
                 validated.append(s)
+                print(f"  [done] {label} → {refetched} (fresh) ({elapsed:.0f}s)")
 
     # Hygiene (digest-quality audit 2026-08-29): every surviving candidate must
     # carry a parseable date_confirmed. When neither Phase 4's fetch nor the
@@ -1414,14 +1500,16 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
     # Phase 1's date_published instead of shipping null. ai-tech 08-29 shipped
     # Hunyuan Hy4 and GLM-5.3 with date_confirmed=null; priority_sort_key's
     # `date_confirmed or date_published` fallback kept ranking deterministic,
-    # but the null field is a schema-hygiene gap.
+    # but the null field is a schema-hygiene gap. Date-unverified survivors
+    # always carry a confirmed fresh date.
     for s in validated:
         dc = (s.get("date_confirmed") or "").strip()
         if not dc or parse_date(dc) is None:
             s["date_confirmed"] = (s.get("date_published") or "").strip()
 
     print(f"  Date validation: {len(validated)} pass, "
-          f"{len(date_dropped)} auto-dropped (stale/mismatch), {len(need_refetch)} refetched")
+          f"{len(date_dropped)} auto-dropped (stale/mismatch/unconfirmed), "
+          f"{len(need_refetch)} refetched")
 
     # ── Step 2: LLM judge (date pre-validated, no speculative DATE_CHECK) ──
     if validated:

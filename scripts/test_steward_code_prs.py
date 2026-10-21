@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from steward import code_pickup, code_prs, routing, worker  # noqa: E402
+from steward import code_pickup, code_prs, fixes, resolver, routing, worker  # noqa: E402
 
 GIT_ENV = {**os.environ, "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@example.com",
            "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@example.com",
@@ -466,6 +466,9 @@ class RoutingTests(unittest.TestCase):
                                     "secret scan flagged"),
             "bearer token": ({"scripts/steward/health.py": "H = 'Authorization: Bearer " + "x9Y8" * 10 + "'\n"},
                              "secret scan flagged"),
+            "credentials in URL": ({"scripts/steward/health.py":
+                                    "U = 'https://carter:" + "s3cr3tP4ss" * 2 + "@example.com/x'\n"},
+                                   "secret scan flagged"),
         }
         for label, (changes, expected) in cases.items():
             with self.subTest(label):
@@ -476,29 +479,98 @@ class RoutingTests(unittest.TestCase):
                 self.assertFalse(any(c[:2] == ["pr", "create"] for c in gh.calls), label)
                 self.assertEqual(self.remote_branches(), "", label)
 
+    def test_public_url_fixtures_are_not_secrets(self):
+        # 2026-10-17: P9b's entropy rule flagged a changelog URL in a new regression test.
+        url = "https://github.blog/changelog/2026-10-15-agentic-autofix-for-code-scanning-alerts-is-generally-available/"
+        fix = self.fake_fix({"scripts/steward/health.py": f'ENTRY = "{url}"\nLIMIT = 2\n'},
+                            records(DIFF_CHECK, VERIFY))
+        rows = self.route([finding()], fix=fix, gh=Gh())
+        self.assertEqual(rows[0]["status"], "pr_auto_merge", rows[0])
+
     def test_one_steward_code_pr_per_night(self):
         fix = self.fake_fix({"scripts/steward/health.py": "LIMIT = 2\n"}, records(DIFF_CHECK, VERIFY))
         rows = self.route([finding(), finding("finding-2")], fix=fix, gh=Gh())
-        self.assertEqual([r["status"] for r in rows], ["pr_auto_merge", "report_only"])
+        self.assertEqual([r["status"] for r in rows], ["pr_auto_merge", "deferred"])
+        self.assertIn("tonight's steward-code PR slot is used", rows[1]["summary"])
         self.assertEqual(len(self.worker_calls), 1)
         # A resumed P7b on the same night does not open a second PR.
-        gh = Gh(listed=[{"headRefName": "steward/fix-2026-09-29-x-y-1234abcd", "url": "u",
-                         "state": "CLOSED", "files": []}])
+        gh = Gh(listed=[{"headRefName": "steward/fix-2026-09-29-x-y-1234abcd",
+                         "url": f"https://github.com/{NWO}/pull/9", "state": "CLOSED", "files": []}])
         rows = self.route([finding()], fix=fix, gh=gh)
-        self.assertEqual(rows[0]["status"], "report_only")
+        self.assertEqual(rows[0]["status"], "deferred")
+        self.assertIn("tonight's steward-code PR slot is used (#9)", rows[0]["summary"])
         self.assertEqual(len(self.worker_calls), 1)
 
     def test_no_duplicate_pr_for_paths_an_open_pr_already_changes(self):
         fix = self.fake_fix({"scripts/steward/health.py": "LIMIT = 2\n"}, records(DIFF_CHECK, VERIFY))
-        older = {"headRefName": "steward/fix-2026-09-28-s-f-1234abcd", "url": "u28",
+        older = {"headRefName": "steward/fix-2026-09-28-s-f-1234abcd", "url": f"https://github.com/{NWO}/pull/7",
                  "files": [{"path": "scripts/steward/health.py"}]}
         rows = self.route([finding()], fix=fix, gh=Gh(listed=[{**older, "state": "OPEN"}]))
-        self.assertEqual(rows[0]["status"], "report_only")
+        self.assertEqual(rows[0]["status"], "deferred")
+        self.assertIn("queued behind open steward-code PR #7", rows[0]["summary"])
         self.assertIn("already changes scripts/steward/health.py", rows[0]["summary"])
+        self.assertEqual(rows[0]["pr_url"], older["url"])
         self.assertEqual(self.worker_calls, [])
         # A closed (objected) PR does not block a new attempt.
         rows = self.route([finding()], fix=fix, gh=Gh(listed=[{**older, "state": "CLOSED"}]))
         self.assertEqual(rows[0]["status"], "pr_auto_merge")
+
+    def test_deferred_rows_are_not_sent_to_the_resolver(self):
+        older = {"headRefName": "steward/fix-2026-09-28-s-f-1234abcd", "url": f"https://github.com/{NWO}/pull/7",
+                 "state": "OPEN", "files": [{"path": "scripts/steward/health.py"}]}
+        rows = self.route([finding()], gh=Gh(listed=[older]))
+        self.assertEqual(rows[0]["status"], "deferred")
+        decided = dict(rows[0], finding_id="finding-9", status="needs_carter")
+        run_dir = self.sb.root / "run"
+        run_dir.mkdir()
+        (run_dir / "07b-fixes.json").write_text(json.dumps({"routes": [rows[0], decided]}))
+        items = resolver.collect_items(resolver.ResolveContext(run_dir=run_dir, home=self.sb.home), {})
+        self.assertEqual([i.finding_id for i in items], ["finding-9"])
+
+    def test_pre_pr_gate_objection_is_revised_within_the_fix_loop(self):
+        # 2026-10-17: a judge-passed, verifier-green fix tripped only the
+        # post-loop secret scan and became needs_carter with iterations left.
+        path = "scripts/steward/health.py"
+        attempts = ["LIMIT = 2\nGH = 'ghp_" + "a1B2" * 10 + "'\n", "LIMIT = 2\n"]
+        sent = []
+
+        def run_fix(section_name, findings, *, iteration=1, timeout=0):
+            sent.append([dict(f) for f in findings])
+            repo = Path(findings[0]["repo"])
+            base = git("-C", str(repo), "rev-parse", "HEAD")
+            (repo / path).write_text(attempts[iteration - 1])
+            diff = subprocess.run(["git", "-C", str(repo), "diff", "--no-ext-diff", "--full-index", "HEAD"],
+                                  capture_output=True, text=True, check=True).stdout
+            git("-C", str(repo), "checkout", "-q", "--", path)
+            commands = worker._validation_plan(repo, [path])
+            binding = {"source": str(repo), "base_sha": base, "allowed_paths": [path],
+                       "companion_test_paths": [], "validation_commands": commands}
+            fid = findings[0]["id"]
+            return {
+                "protocol_version": worker.PROTOCOL_VERSION, "status": "ok",
+                "section": section_name, "iteration": iteration,
+                "fix_packet": {"fixes_applied": [{"finding": fid, "action": "raised", "status": "fixed"}],
+                               "summary": "raised the limit"},
+                "judge_packet": {"verdict": "pass", "reviewed": [{"finding": fid, "ok": True, "note": "ok"}],
+                                 "summary": "fix verified"},
+                "_trusted_repositories": [binding],
+                "repositories": [{**binding, "changed_paths": [path], "diff": diff,
+                                  "diff_sha256": worker._sha256_text(diff),
+                                  "validation": records(*commands)}],
+            }
+
+        dev = (self.sb.root / "dev").resolve()
+        with patch.object(worker, "_ALLOWED_REPO_ROOT", dev), \
+                patch.object(worker, "STEWARD_CODE_ROOT", dev / ".steward-code"), \
+                patch.object(fixes, "FIX_MAX_ITERS", 3), patch.object(fixes, "run_fix", run_fix), \
+                patch("sys.stdout", io.StringIO()):
+            rows = self.route([finding()], fix=fixes._fix_one_section, gh=Gh())
+        self.assertEqual(rows[0]["status"], "pr_auto_merge", rows[0])
+        self.assertEqual(len(sent), 2)
+        note = sent[1][0]["prior_judge_note"]
+        self.assertIn("pre-PR gate would refuse this patch", note)
+        self.assertIn("secret scan flagged", note)
+        self.assertTrue(self.remote_branches().startswith("steward/fix-2026-09-29-"))
 
     def test_dry_run_does_not_clone_or_call_the_worker(self):
         rows = self.route([finding()], dry_run=True)

@@ -70,6 +70,15 @@ def normalize_url(url: str) -> str:
 # Fresh story). `?p=` is deliberately absent: WordPress uses it for single
 # post IDs (gematsu.com/?p=1035212).
 _LISTING_PATH_SEGMENTS = frozenset({"archive", "archives", "news-archive", "news-archives"})
+# A path ending at one of these segments is the index itself: Guardian daily
+# archives (`.../2026/aug/18/all`) and bare changelog/release index pages
+# (steward digest-quality finding 2026-10-17: the 10-16 Agents story "Agentic
+# autofix for code scanning alerts GA" linked https://github.blog/changelog/
+# instead of its dated entry). Entries below the index stay articles
+# (`/changelog/2026-10-16-agentic-autofix-...`, `/releases/tag/v2.1`).
+_LISTING_LAST_SEGMENTS = frozenset({
+    "all", "changelog", "changelogs", "release-notes", "releasenotes", "releases",
+})
 _LISTING_QUERY_KEYS = frozenset({"month", "year", "page", "paged"})
 _YEAR_SEGMENT = re.compile(r"(?:19|20)\d{2}")
 _MONTH_SEGMENT = re.compile(
@@ -102,15 +111,17 @@ def is_listing_url(url: str) -> bool:
     on 08-20 and 08-21 were the same two Guardian .../all pages, canonicalizing
     to /us/technology).
     Archive indexes (`/news-archive?month=0927`), pagination
-    (`?page=3`, `/page/2`, `/changelog/month/09-2026`), and bare-date paths
-    (`/2026/09/28`) are listings too.
+    (`?page=3`, `/page/2`, `/changelog/month/09-2026`), bare-date paths
+    (`/2026/09/28`), and bare changelog/release-notes/releases indexes
+    (`https://github.blog/changelog/`, `https://cursor.com/en/changelog`) are
+    listings too.
     """
     try:
         parts = urlsplit((url or "").strip())
     except ValueError:
         return False
     segments = [s.lower() for s in parts.path.split("/") if s]
-    if segments and segments[-1] == "all":
+    if segments and segments[-1] in _LISTING_LAST_SEGMENTS:
         return True
     if any(segment in _LISTING_PATH_SEGMENTS for segment in segments):
         return True
@@ -150,16 +161,89 @@ def is_asset_cdn_url(url: str) -> bool:
         host.endswith(f".{cdn}") for cdn in _ASSET_CDN_URL_HOSTS
     )
 
-# Hard-paywalled publishers the Phase 4 reader cannot open. Phase 3 swaps each
-# such URL for another research finding on the same story, or drops the story,
-# so none of them consumes a fetch slot. Add a domain only on fetch-failure
-# evidence from 04-fetch-summaries.json that names a paywall or wall-level
-# block (September 2026: washingtonpost.com 11/12 failed with timeouts or a
-# metered page; theinformation.com 4/5 returned HTTP 403 paywall). Keep
-# bot-blocked outlets that mostly fetch (apnews.com 9/67, arstechnica.com
-# 6/13, both intermittent 403s) out of this set.
+# Pages that collect many developments, so they never are one article: live
+# blogs (`apnews.com/live/...`, `theguardian.com/world/live/...`,
+# `nbcnews.com/.../live-blog/...`, `thehill.com/.../6146945-live-updates-...`),
+# site search, and tag/topic/category term pages.
+_LIVE_PAGE_SEGMENTS = frozenset({
+    "live", "liveblog", "live-blog", "live-blogs", "live-news", "live-updates", "livestory",
+})
+_LIVE_PAGE_SLUG_MARKERS = ("liveblog", "live-blog", "live-updates")
+_TAXONOMY_SEGMENTS = frozenset({"tag", "tags", "topic", "topics", "category", "categories"})
+
+def _with_scheme(url: str) -> str:
+    raw = (url or "").strip()
+    return raw if "://" in raw else f"https://{raw}"
+
+def is_non_article_page(url: str) -> bool:
+    """True for a URL or coverage key whose page is never one article.
+
+    Listings (``is_listing_url``), asset-CDN hosts, site search, live blogs,
+    and tag/topic/category term pages. A taxonomy segment followed by an
+    article slug (`japantoday.com/category/world/<slug>`) is an article.
+    """
+    candidate = _with_scheme(url)
+    try:
+        parts = urlsplit(candidate)
+    except ValueError:
+        return True
+    segments = [segment.lower() for segment in parts.path.split("/") if segment]
+    return (
+        "search" in segments
+        or any(
+            segment in _LIVE_PAGE_SEGMENTS
+            or any(marker in segment for marker in _LIVE_PAGE_SLUG_MARKERS)
+            for segment in segments
+        )
+        or (not parts.query and any(
+            segment in _TAXONOMY_SEGMENTS and position >= len(segments) - 2
+            for position, segment in enumerate(segments)
+        ))
+        or is_listing_url(candidate)
+        or is_asset_cdn_url(candidate)
+    )
+
+def is_event_url(url: str) -> bool:
+    """True when a URL or coverage key can identify a single event.
+
+    Phase 3 rejects a candidate that shares one same-event key with recent
+    coverage, so a key naming a whole site or a multi-story page rejects
+    unrelated stories (2026-10-18..10-20: Bluesky bot link cards made the bare
+    host `bigearthdata.ai` and its `/search/results?...` page "same" keys, and
+    DeepSeek V4.1-Flash, AP "No Kings" rallies, and Microsoft Guardian Agents
+    were dropped as already covered). Needs a host and a path plus query longer
+    than 8 characters (no bare host or home page) on a page that is not
+    ``is_non_article_page``.
+    """
+    try:
+        parts = urlsplit(_with_scheme(url))
+    except ValueError:
+        return False
+    return (
+        bool(parts.hostname)
+        and len(parts.path.strip("/")) + len(parts.query) > 8
+        and not is_non_article_page(url)
+    )
+
+# Publishers the Phase 4 reader cannot open: hard-paywalled or anti-bot
+# (401/403 on every fetch). Phase 3 swaps each such URL for another research
+# finding on the same story, or drops the story, so none of them consumes a
+# fetch slot or a fetch-alternate slot. Add a domain only on fetch-failure
+# evidence from 04-fetch-summaries.json (September 2026: washingtonpost.com
+# 11/12 failed with timeouts or a metered page; theinformation.com 4/5
+# returned HTTP 403 paywall). Keep bot-blocked outlets that mostly fetch
+# (arstechnica.com 6/13 intermittent 403s) out of this set.
+# 2026-10-20, every 04 run dir 10-07..10-20 (70 runs; a primary that a fetch
+# alternate replaced counts as a failure), failures/runs with 0 successes:
+# apnews.com 13/4 (10-18..10-20 world, 10-20 agentic; 9/67 failed in September),
+# axios.com 7/5 (HTTP 403), gamespot.com 3/2 (HTTP 403), usnews.com 2/2.
+# science.org (2 failures, 1 run), reuters.com and ft.com (1 each) fall short.
 HARD_PAYWALL_DOMAINS = frozenset({
+    "apnews.com",
+    "axios.com",
+    "gamespot.com",
     "theinformation.com",
+    "usnews.com",
     "washingtonpost.com",
 })
 
@@ -176,6 +260,23 @@ def hard_paywall_domain(url: str) -> str | None:
         if host == domain or host.endswith(f".{domain}"):
             return domain
     return None
+
+def _same_event_evidence_keys(story: dict) -> set[str]:
+    """Coverage keys of a covered story's Phase 2b same-event evidence.
+
+    Keys that cannot identify one event (``is_event_url``) are skipped even
+    when an earlier run stored them, so a poisoned key already in a curated
+    file (ai-tech 10-17 stored the bare host `bigearthdata.ai`) stops matching
+    at once. The story's own URL is the caller's to add.
+    """
+    evidence = (story.get("attention") or {}).get("evidence") or {}
+    keys = {
+        coverage_key(entry.get("url", ""))
+        for entry in evidence.get("same_event_urls") or []
+        if isinstance(entry, dict)
+    }
+    keys.update(key for key in evidence.get("same_event_keys") or [] if isinstance(key, str))
+    return {key for key in keys if key and is_event_url(key)}
 
 def load_cross_topic_urls(
     topic: dict,
@@ -218,16 +319,7 @@ def load_cross_topic_urls(
             # evidence, mirroring load_recent_coverage_ledger, so a later section's
             # candidate sharing a same-event key is dropped by Phase 3 (World
             # repeated 10-13 Maia 300 and 10-14 Apple HomeView).
-            evidence = (story.get("attention") or {}).get("evidence") or {}
-            for entry in evidence.get("same_event_urls") or []:
-                if isinstance(entry, dict):
-                    normalized = coverage_key(entry.get("url", ""))
-                    if normalized:
-                        blocked.add(normalized)
-            blocked.update(
-                key for key in evidence.get("same_event_keys") or []
-                if isinstance(key, str) and key
-            )
+            blocked |= _same_event_evidence_keys(story)
         # Same-event dedup: later topics also block the canonical/related links
         # recorded from earlier topics' selected stories, so the same event
         # under a different URL is not curated twice (digest-quality audit
@@ -398,14 +490,7 @@ def load_recent_coverage_ledger(digests_root: Path, today: date, days: int) -> s
                     for story in data.get("fresh", []):
                         if isinstance(story, dict):
                             add(story.get("url", ""))
-                            evidence = (story.get("attention") or {}).get("evidence") or {}
-                            for entry in evidence.get("same_event_urls") or []:
-                                if isinstance(entry, dict):
-                                    add(entry.get("url", ""))
-                            covered.update(
-                                key for key in evidence.get("same_event_keys") or []
-                                if isinstance(key, str) and key
-                            )
+                            covered |= _same_event_evidence_keys(story)
                     structured = True
             except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
                 pass

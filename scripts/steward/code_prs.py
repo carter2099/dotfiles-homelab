@@ -12,7 +12,9 @@ protected path.  This module then
 2. gates the published review commit deterministically: single commit on
    the base, only allowed paths, bounded diff, deterministic secret scan, no
    added sudo/firewall/systemd-enablement/network-exposure lines, and every
-   required verifier recorded as passed;
+   required verifier recorded as passed.  The diff-only part (``preflight``)
+   also runs in the trusted publisher on every candidate, so an objection
+   reaches the repair worker while it still has fix iterations left;
 3. pushes ``steward/fix-<date>-<id>`` from the steward process and opens a PR
    labelled ``steward-auto``.  ``code_pickup`` merges it after 24 h.
 """
@@ -116,11 +118,17 @@ def remote_url(ctx):
     return url
 
 
+def _pr_ref(url):
+    match = re.search(r"/pull/(\d+)", url)
+    return f"#{match.group(1)}" if match else (url or "(unknown URL)")
+
+
 def blocking_pr(ctx, paths: Sequence[str]):
     """(url, reason) of a steward-code PR that blocks a new one, else None.
 
     One per night: any steward-auto PR (any state) on today's branch prefix.
-    No duplicates: any OPEN steward-auto PR touching one of ``paths``."""
+    No duplicates: any OPEN steward-auto PR touching one of ``paths``.  The
+    reason reads as a deferral: the audit re-raises the finding next night."""
     cp = ctx.gh(["pr", "list", "--repo", DOTFILES_REPO, "--state", "all", "--label", LABEL,
                  "--limit", "50", "--json", "headRefName,url,state,files"], None)
     try:
@@ -136,11 +144,13 @@ def blocking_pr(ctx, paths: Sequence[str]):
             continue
         url = str(row.get("url") or "")
         if str(row.get("headRefName") or "").startswith(prefix):
-            return url, "a steward-code PR was already opened tonight"
+            return url, (f"tonight's steward-code PR slot is used ({_pr_ref(url)}); "
+                         "retried next night")
         touched = {str((f or {}).get("path") or "") for f in row.get("files") or []}
         overlap = sorted(wanted & touched)
         if row.get("state") == "OPEN" and overlap:
-            return url, "an open steward-code PR already changes " + ", ".join(overlap[:5])
+            return url, (f"queued behind open steward-code PR {_pr_ref(url)}, which already changes "
+                         + ", ".join(overlap[:5]) + "; retried once it merges or closes")
     return None
 
 
@@ -181,6 +191,40 @@ def _verification_records(section_result, repo):
     return []
 
 
+def preflight(diff: str, paths: Sequence[str]) -> list[str]:
+    """Objections of the diff-only gate checks; empty when the patch may pass.
+
+    ``gate`` raises on any of these; the trusted publisher runs the same
+    checks on each candidate so the repair worker can revise it in-loop."""
+    if not paths:
+        return ["review commit changes nothing"]
+    objections = []
+    if len(paths) > MAX_FILES:
+        objections.append(f"patch touches {len(paths)} files (cap {MAX_FILES})")
+    for path in paths:
+        reason = steward_code_path_reason(path)
+        if reason:
+            objections.append(f"steward-code protected: {reason}")
+    lines = list(_content_lines(diff))
+    if len(lines) > MAX_CHANGED_LINES:
+        objections.append(f"patch changes {len(lines)} lines (cap {MAX_CHANGED_LINES})")
+    # The publication scanner (also used by dotfiles-commit) is a superset of
+    # P9b's rules but exempts plain URLs from the entropy heuristic; P9b's flagged
+    # every long public URL in a test fixture (2026-10-17 changelog fix blocked).
+    secrets = scan_diff(diff, mac=False)
+    if secrets:
+        where = ", ".join(f"{s.get('path')}:{s.get('line')} ({s.get('rule')})" for s in secrets[:5])
+        objections.append(f"secret scan flagged {where}")
+    risks = []
+    for sign, path, text in lines:
+        risk = _line_risk(sign, text)
+        if secrets and risk and risk.startswith("secret scan"):
+            continue  # already reported, with its location, by scan_diff
+        if risk and f"{path}: {risk}" not in risks:
+            risks.append(f"{path}: {risk}")
+    return objections + risks[:5]
+
+
 def gate(ctx, repo, base, commit, section_result):
     """Deterministic pre-PR gate; returns the facts for the PR body or raises."""
     parents = _must(_git(ctx, repo, "rev-list", "--parents", "-n", "1", commit), "rev-list").split()
@@ -188,14 +232,6 @@ def gate(ctx, repo, base, commit, section_result):
         raise StewardCodeRejected("review commit is not a single commit on origin/main")
     names = _must(_git(ctx, repo, "diff", "--name-only", "-z", "--no-renames", base, commit), "diff")
     paths = [p for p in names.split("\0") if p]
-    if not paths:
-        raise StewardCodeRejected("review commit changes nothing")
-    if len(paths) > MAX_FILES:
-        raise StewardCodeRejected(f"patch touches {len(paths)} files (cap {MAX_FILES})")
-    for path in paths:
-        reason = steward_code_path_reason(path)
-        if reason:
-            raise StewardCodeRejected(f"steward-code protected: {reason}")
     numstat = _must(_git(ctx, repo, "diff", "--numstat", "--no-renames", base, commit), "numstat")
     changed = 0
     for line in numstat.splitlines():
@@ -203,21 +239,11 @@ def gate(ctx, repo, base, commit, section_result):
         if not added.isdigit() or not removed.isdigit():
             raise StewardCodeRejected("binary changes are not auto-repairable")
         changed += int(added) + int(removed)
-    if changed > MAX_CHANGED_LINES:
-        raise StewardCodeRejected(f"patch changes {changed} lines (cap {MAX_CHANGED_LINES})")
     diff = _must(_git(ctx, repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
                       base, commit), "diff")
-    # The publication scanner (also used by dotfiles-commit) is a superset of
-    # P9b's rules but exempts plain URLs from the entropy heuristic; P9b's flagged
-    # every long public URL in a test fixture (2026-10-17 changelog fix blocked).
-    secrets = scan_diff(diff, mac=False)
-    if secrets:
-        where = ", ".join(f"{s.get('path')}:{s.get('line')} ({s.get('rule')})" for s in secrets[:5])
-        raise StewardCodeRejected(f"secret scan flagged {where}")
-    for sign, path, text in _content_lines(diff):
-        risk = _line_risk(sign, text)
-        if risk:
-            raise StewardCodeRejected(f"{path}: {risk}")
+    objections = preflight(diff, paths)
+    if objections:
+        raise StewardCodeRejected("; ".join(objections))
     records = _verification_records(section_result, repo)
     required = steward_code_validation_commands(paths)
     by_argv = {tuple(str(a) for a in r.get("argv") or []): r for r in records}

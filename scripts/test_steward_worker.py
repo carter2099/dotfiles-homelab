@@ -458,6 +458,17 @@ class StewardCodeCompanionTests(unittest.TestCase):
         self.assertEqual(result["commits"][0]["changed_paths"], [self.CONTRACTS, self.DIGEST])
         self.assertIn("test_parse_strips", self.git("show", f"{result['commits'][0]['ref']}:{self.DIGEST}"))
 
+    def test_publisher_returns_pre_pr_gate_objections_to_the_fix_loop(self):
+        # 2026-10-17: only code_prs.gate saw this after the loop ended, so the
+        # worker never got to revise it. The objection now rejects publication.
+        leaked = "def parse(text):\n    return text  # ghp_" + "a1B2" * 10 + "\n"
+        packet = review_packet(self.clone, self.git, [self.CONTRACTS], {self.CONTRACTS: leaked}, [])
+        result = worker.publish_validated_result(packet, "s")
+        self.assertEqual(result["status"], "publish-rejected")
+        self.assertIn("pre-PR gate would refuse this patch", result["error"])
+        self.assertIn("secret scan flagged", result["error"])
+        self.assertEqual(self.git("for-each-ref", "refs/steward-review"), "")
+
 
 if __name__ == "__main__":
     unittest.main()

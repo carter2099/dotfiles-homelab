@@ -1,4 +1,9 @@
-"""HTML report rendering, TL;DR generation, and archive handling."""
+"""HTML report rendering, TL;DR generation, and archive handling.
+
+Every report item is triaged once (`_triage`): Needs You holds only extreme items,
+everything else still open is Watching, and real changes form one deduplicated list.
+The email, its subject, the TL;DR and summary.md all read that triage.
+"""
 from __future__ import annotations
 
 import sqlite3
@@ -135,13 +140,19 @@ from .fixes import (
     _remaining_after_judge,
     phase_7b_fix,
 )
+from .dotfiles import DOTFILES_GIT
 from .dotfiles import untracked_in_scope as _dotfiles_untracked_in_scope
 from .setup import P0B_PROBLEM_ACTIONS
 from .updates import _dependabot_merge_undo
 
 
 def _dotfiles_untracked_paths():
-    """Untracked in-scope dotfiles at report time, before tonight's P9b runs."""
+    """Untracked in-scope dotfiles at report time, before tonight's P9b runs.
+
+    Never raises: no dotfiles repo (GitHub CI) means nothing to list.
+    """
+    if not DOTFILES_GIT.is_dir():
+        return []
     try:
         return _dotfiles_untracked_in_scope()
     except Exception as error:
@@ -149,72 +160,42 @@ def _dotfiles_untracked_paths():
         return []
 
 
-def _html_host_drift(remediation, untracked_dotfiles, prev_dotfiles=None):
-    """Report-only P3a drift, untracked dotfiles, and last night's blocked P9b."""
-    esc = html.escape
-    items = []
-    ufw = (remediation or {}).get("ufw_drift") or {}
-    status = ufw.get("status")
-    if status == "drift":
-        for rule in ufw.get("missing") or []:
-            items.append(f"UFW rule missing: <code>{esc(rule)}</code>")
-        for rule in ufw.get("extra") or []:
-            items.append(f"UFW rule not in expected list: <code>{esc(rule)}</code>")
-    elif status and status != "ok":
-        items.append(f"UFW drift check: {esc(str(ufw.get('reason') or status))}")
-    for row in (remediation or {}).get("docker_proxy") or []:
-        if row.get("action") in {"attention_needed", "error"}:
-            items.append(
-                f"Port {esc(str(row.get('port')))} ({esc(str(row.get('container')))}): "
-                f"{esc(str(row.get('reason') or row.get('error') or row.get('action')))}"
-            )
-    probe = (remediation or {}).get("bridge_probe") or {}
-    if probe.get("status") == "unreachable":
-        items.append("Open WebUI cannot reach host.docker.internal:8082 (opencode-go-proxy)")
-    if untracked_dotfiles:
-        shown = ", ".join(f"<code>{esc(p)}</code>" for p in untracked_dotfiles[:40])
-        more = f" (+{len(untracked_dotfiles) - 40} more)" if len(untracked_dotfiles) > 40 else ""
-        items.append(
-            "Untracked dotfiles before tonight's P9b (it commits only gated new text files "
-            f"under its auto-commit roots; add others manually if wanted): {shown}{more}"
-        )
-    prev = prev_dotfiles or {}
-    if prev.get("phase_failed") or prev.get("status") in {"secret_blocked", "push_blocked"}:
-        hits = "; ".join(
-            f"{f.get('path')}:{f.get('line')} ({f.get('rule')})"
-            for f in (prev.get("secret_findings") or [])[:10]
-        )
-        items.append(
-            f"Last dotfiles commit/push ({esc(str(prev.get('status')))}): "
-            f"{esc(str(prev.get('reason') or ''))[:400]}"
-            + (f" — {esc(hits)}" if hits else "")
-        )
-    if not items:
-        return ""
-    li = "".join(f"<li>{item}</li>" for item in items)
-    return (
-        '<tr><td style="padding:16px 32px 8px;">'
-        '<h2 style="margin:0; color:#e65100; font-size:15px; font-weight:700;">'
-        'Host drift (report only)</h2></td></tr>'
-        '<tr><td style="padding:8px 32px 16px;">'
-        f'<ul style="margin:0; padding-left:20px; color:#555; font-size:12px;">{li}</ul>'
-        '</td></tr>'
-        '<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>'
-    )
+
+# ── palette and HTML primitives ──────────────────────────────────────
+# Every colour the email uses (the template frame adds #f4f4f7/#ffffff/#b8b8d0).
+COLOR = {
+    "ink": "#1a1a2e",      # headings, header band
+    "text": "#2a2a36",     # body text
+    "muted": "#7b7b8a",    # labels, footer, housekeeping
+    "faint": "#9aa0b2",    # neutral chips and dots
+    "track": "#d0d4de",    # usage bar track
+    "rule": "#ececf2",     # section rules
+    "code": "#f4f4f7",     # monospace background
+    "ok": "#2e7d32",       # all good, What changed
+    "danger": "#c62828",   # Needs You, failures
+    "warn": "#e65100",     # rollbacks, warnings, Work Queue
+    "info": "#1565c0",     # Watching, in progress
+    "health": "#5b3cc4",
+    "audit": "#00838f",
+    "slate": "#37474f",    # usage
+    "week": "#0d47a1",
+    "month": "#4a148c",
+}
+_esc = html.escape
 
 
 def _chip(text, color):
     """Inline rounded status chip."""
     return (
         f'<span style="display:inline-block; padding:1px 8px; border-radius:10px; '
-        f'background-color:{color}1f; color:{color}; font-size:10px; font-weight:700; '
+        f'background-color:{color}1f; color:{color}; font-size:11px; font-weight:700; '
         f'letter-spacing:0.6px; text-transform:uppercase; white-space:nowrap;">{text}</span>'
     )
 
 
 def _dot(level):
-    color = {"ok": "#2e7d32", "warn": "#e65100",
-             "danger": "#c62828", "muted": "#9aa0b2"}.get(level, "#9aa0b2")
+    color = {"ok": COLOR["ok"], "warn": COLOR["warn"],
+             "danger": COLOR["danger"]}.get(level, COLOR["faint"])
     return (
         f'<span style="display:inline-block; width:7px; height:7px; border-radius:50%; '
         f'background-color:{color}; vertical-align:middle; margin-right:5px; '
@@ -222,10 +203,27 @@ def _dot(level):
     )
 
 
-def _sub_header(label):
+def _label(text):
+    """Small grey group label inside a section."""
     return (
-        f'<p style="margin:12px 0 3px; color:#7b7b8a; font-size:10px; font-weight:700; '
-        f'letter-spacing:0.8px; text-transform:uppercase;">{label}</p>'
+        f'<p style="margin:10px 0 3px; color:{COLOR["muted"]}; font-size:11px; font-weight:700; '
+        f'letter-spacing:0.8px; text-transform:uppercase;">{_esc(text)}</p>'
+    )
+
+
+def _row(inner_html, color=None, margin="0 0 6px"):
+    """One 13px report line (inner_html is already escaped)."""
+    return (
+        f'<p style="margin:{margin}; color:{color or COLOR["text"]}; font-size:13px; '
+        f'line-height:1.45;">{inner_html}</p>'
+    )
+
+
+def _code(text):
+    return (
+        f'<code style="font-family:SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; '
+        f'background-color:{COLOR["code"]}; padding:1px 4px; border-radius:3px; '
+        f'word-break:break-all;">{_esc(str(text))}</code>'
     )
 
 
@@ -234,166 +232,174 @@ def _kv_rows(rows):
     if not rows:
         return ""
     out = ['<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-           'style="font-size:13px; color:#2a2a36; border-collapse:collapse;">']
+           f'style="font-size:13px; color:{COLOR["text"]}; border-collapse:collapse;">']
     for label, val in rows:
         out.append(
             '<tr>'
-            f'<td width="40%" style="padding:4px 12px 4px 0; vertical-align:top; '
-            f'color:#7b7b8a; font-size:12px;">{label}</td>'
-            f'<td style="padding:4px 0; vertical-align:top; color:#2a2a36;">{val}</td>'
+            f'<td width="35%" style="padding:3px 12px 3px 0; vertical-align:top; '
+            f'color:{COLOR["muted"]}; font-size:13px;">{label}</td>'
+            f'<td style="padding:3px 0; vertical-align:top; color:{COLOR["text"]};">{val}</td>'
             '</tr>'
         )
     out.append('</table>')
     return "".join(out)
 
 
-def _badge(verdict):
-    """Return an HTML status chip for an audit verdict."""
-    palette = {
-        "PASS": "#2e7d32",
-        "DRIFT": "#c62828",
-        "ATTENTION": "#e65100",
-        "UNVERIFIABLE": "#9aa0b2",
-        "collector-failed": "#c62828",
-        "worker-failed": "#c62828",
-        "dry-run-collector-only": "#9aa0b2",
-    }
-    label = verdict
-    if verdict == "dry-run-collector-only":
-        label = "collector-only · dry-run"
-    elif verdict == "collector-failed":
-        label = "collector failed"
-    elif verdict == "worker-failed":
-        label = "worker failed"
-    color = palette.get(verdict, "#9aa0b2")
-    if verdict.startswith("cached-"):
-        base = verdict.removeprefix("cached-")
-        color = {"PASS": "#2e7d32", "DRIFT": "#c62828",
-                 "ATTENTION": "#e65100"}.get(base, "#9aa0b2")
-        return _chip(f"CACHED {base}", color)
-    return _chip(label, color)
+def _section(title, color, body):
+    """A titled card section with a coloured left bar, followed by a rule."""
+    return (
+        '<tr><td style="padding:18px 32px 0;">'
+        f'<h2 style="margin:0; padding-left:10px; border-left:3px solid {color}; '
+        f'color:{COLOR["ink"]}; font-size:13px; font-weight:700; letter-spacing:0.6px; '
+        f'text-transform:uppercase;">{_esc(title)}</h2></td></tr>'
+        f'<tr><td style="padding:8px 32px 14px;">{body}</td></tr>'
+        '<tr><td style="padding:0 32px;"><hr style="border:none; '
+        f'border-top:1px solid {COLOR["rule"]}; margin:4px 0;"></td></tr>'
+    )
 
-def _html_gamingrig_update(step):
-    """Render only actionable gaming-rig changes and failures."""
-    lines = []
-    host = html.escape(str(step.get("host") or RIG_SSH_ALIAS))
-    status = step.get("status", "")
-    if status == "skipped":
-        reason = html.escape(str(step.get("reason") or "not attempted"))
-        return (
-            f'<p style="margin:0 0 4px; color:#e65100; font-size:13px;">'
-            f'{host}: SKIPPED — {reason}</p>'
-        )
 
-    def row(text, color="#2a2a36"):
-        lines.append(
-            f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
-            f'{text}</p>'
-        )
+def _plural(count, word, plural=None):
+    return f"{count} {word if count == 1 else (plural or word + 's')}"
 
-    for sub in step.get("substeps", []) or []:
-        name = sub.get("step", "")
-        sub_status = sub.get("status", "")
-        if name == "apt_upgrade":
-            count = sub.get("upgraded_count", 0)
-            if count:
-                new = sub.get("installed_count", 0)
-                row(f'{host} apt: {html.escape(str(count))} packages upgraded'
-                    + (f', {html.escape(str(new))} newly installed' if new else ''))
-            if sub_status in _P1_FAILURE_STATUSES:
-                row(
-                    f'{host} apt: {_p1_status_label(sub_status)} — '
-                    f'{html.escape(str(sub.get("error") or sub.get("reason") or ""))}',
-                    "#c62828",
-                )
-        elif name == "herdr_update":
-            if sub_status == "ok":
-                row(
-                    f'{host} herdr: '
-                    f'{html.escape(str(sub.get("pre_version", "?")))} -> '
-                    f'{html.escape(str(sub.get("post_version", "?")))}'
-                )
-            elif sub_status in _P1_FAILURE_STATUSES:
-                row(
-                    f'{host} herdr: {_p1_status_label(sub_status)} — '
-                    f'{html.escape(str(sub.get("error") or sub.get("reason") or ""))}',
-                    "#c62828",
-                )
-        elif name == "omp_update":
-            if sub_status == "ok":
-                row(
-                    f'{host} omp: '
-                    f'{html.escape(str(sub.get("pre_version", "?")))} -> '
-                    f'{html.escape(str(sub.get("post_version", "?")))}'
-                )
-            elif sub_status == "reverted":
-                row(
-                    f'{host} omp: update rolled back to '
-                    f'{html.escape(str(sub.get("reverted_to", "?")))} '
-                    '(post-update check failed)',
-                    "#e65100",
-                )
-            elif sub_status in _P1_FAILURE_STATUSES:
-                row(
-                    f'{host} omp: {_p1_status_label(sub_status)} — '
-                    f'{html.escape(str(sub.get("error") or sub.get("reason") or ""))}',
-                    "#c62828",
-                )
-        elif name in ("health", "post_reboot_health"):
-            check_failures = []
-            for check in sub.get("checks", []) or []:
-                check_status = check.get("status", "")
-                if check_status in (_P1_FAILURE_STATUSES | {"warning"}):
-                    detail = check.get("error") or check.get("reason") or check_status
-                    check_failures.append(
-                        f'{check.get("step", "check")}: {detail}'
-                    )
-            if name == "post_reboot_health" and sub_status in _P1_FAILURE_STATUSES:
-                row(
-                    f'{host} post_reboot_health: {_p1_status_label(sub_status)} — '
-                    f'{html.escape(str(sub.get("error") or "health gate failed"))}',
-                    "#c62828",
-                )
-            for failure in check_failures:
-                color = "#e65100" if "warning" in failure else "#c62828"
-                row(
-                    f'{host} {html.escape(failure.split(":", 1)[0])}: '
-                    f'{html.escape(failure.split(":", 1)[1].strip() if ":" in failure else failure)}',
-                    color,
-                )
-            if sub_status in _P1_FAILURE_STATUSES and not check_failures:
-                row(
-                    f'{host} health: {_p1_status_label(sub_status)} — '
-                    f'{html.escape(str(sub.get("error") or sub.get("reason") or sub_status))}',
-                    "#c62828",
-                )
-        elif name == "boot_gpu_ready" and sub_status == "warning":
-            row(f'{host}: {html.escape(str(sub.get("reason") or "reboot deferred"))}', "#e65100")
-        elif name == "reboot" and sub_status == "ok":
-            if step.get("rebooted") and step.get("post_reboot_health_passed"):
-                row(f'{host}: rebooted; Linux SSH return and post-reboot health were validated')
-            elif step.get("rebooted"):
-                row(f'{host}: rebooted; post-reboot health gate did not pass', "#e65100")
-            elif step.get("reboot_requested"):
-                row(f'{host}: reboot requested; Linux SSH return was not validated', "#e65100")
-        elif name in (
-            "reboot_required", "pre_reboot_boot_id", "bootnext",
-            "reboot", "ssh_return",
-        ) and sub_status in _P1_FAILURE_STATUSES:
-            row(
-                f'{host} {html.escape(name)}: {_p1_status_label(sub_status)} — '
-                f'{html.escape(str(sub.get("error") or sub.get("reason") or sub_status))}',
-                "#c62828",
-            )
 
-    if status in _P1_FAILURE_STATUSES and not lines:
-        row(
-            f'{host}: {_p1_status_label(status)} — {html.escape(str(step.get("error") or ""))}',
-            "#c62828",
-        )
-    return "\n".join(lines)
+def _clip(text, limit):
+    """Collapse whitespace and cut at a word boundary."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0] or text[:limit]
+    return cut.rstrip(",;:") + "…"
+
+
+# ── human names ──────────────────────────────────────────────────────
+
+_SECTION_NAMES = {
+    "agents-md-truth": "AGENTS.md accuracy",
+    "version-currency": "Version currency",
+    "digest-quality": "Daily News quality",
+    "security-posture": "Security posture",
+    "config-doc-drift": "Config vs docs",
+    "notes-resources": "Notes & resources",
+    "agent-fleet-review": "Agent fleet",
+    "docs-accuracy": "Docs accuracy",
+    "dotfiles": "Dotfiles",
+    "steward-resolver": "Follow-up on open items",
+}
+
+_STEP_NAMES = {
+    "omp_update": "omp",
+    "openwebui_update": "Open WebUI",
+    "openwebui": "Open WebUI",
+    "apt_upgrade": "apt",
+    "searxng": "SearXNG",
+    "freshrss": "FreshRSS",
+    "herdr_update": "herdr",
+    "llama_cpp": "llama.cpp",
+    "worker_omp_refresh": "Steward worker omp",
+    "omp_db_repair": "OMP database check",
+    "docker_cleanup": "Docker cleanup",
+    "docker_settle": "Docker restart",
+    "docker_daemon_assert": "Docker daemon check",
+    "dependabot_merge": "Dependabot auto-merge",
+}
+
+_CHECK_NAMES = {
+    "docker_containers": "Containers",
+    "llm_fallback": "LLM routing",
+    "openwebui_image_match": "Open WebUI image",
+    "endpoint_tunnel-health": "Cloudflare tunnel",
+}
+
+
+def _section_name(section):
+    section = str(section or "")
+    return _SECTION_NAMES.get(section, section.replace("_", " ").replace("-", " "))
+
+
+def _step_name(step):
+    name = str(step.get("step") or "")
+    if name == "app_deploy":
+        return str(step.get("service") or "app")
+    if name.startswith("auto_"):
+        return name.removeprefix("auto_")
+    return _STEP_NAMES.get(name, name.replace("_", " "))
+
+
+def _check_label(check):
+    name = str(check.get("name") or check.get("endpoint") or "check")
+    if name in _CHECK_NAMES:
+        return _CHECK_NAMES[name]
+    return name.removeprefix("endpoint_").replace("_", " ")
+
+
+# Internal phase codes and agent names that leak into audit claims.
+_JARGON = (
+    (r"\bP0b\b", "session notes"),
+    (r"\bP1\b", "nightly maintenance"),
+    (r"\bP3a?\b", "the regression check"),
+    (r"\bP7c\b", "the follow-up check"),
+    (r"\bP7b?\b", "the audit"),
+    (r"\bP9b\b", "the dotfiles commit"),
+    (r"\bP9c\b", "the public mirror"),
+    (r"\bJev\b", "the checker"),
+)
+
+
+def _humanize(text):
+    """Plain wording: section ids ('digest-quality/finding-1', '(agents-md-truth)')
+    become section names; phase codes and agent names become what they do."""
+    text = str(text or "")
+    text = re.sub(
+        r"\b([a-z]+(?:-[a-z]+)+)/finding-\d+\b",
+        lambda m: _SECTION_NAMES.get(m.group(1), m.group(1)), text)
+    ids = "|".join(re.escape(s) for s in _SECTION_NAMES)
+    text = re.sub(rf"\s*\((?:{ids})\)", "", text)
+    for pattern, plain in _JARGON:
+        text = re.sub(pattern, plain, text)
+    return text
+
+
+def _arrow(pre, post):
+    return f"{pre} → {post}"
+
+
+def _short_sha(value):
+    value = str(value or "").strip()
+    return value[:7] if re.fullmatch(r"[0-9a-f]{7,40}", value) else (value or "?")
+
+
+# ── report items ─────────────────────────────────────────────────────
+# One item model feeds every block: "needs" (Needs You), "watch" (Watching),
+# "change" / "rollback" / "chore" (What changed tonight).
+
+_CHANGE_GROUPS = ("Updates", "Deploys", "Fixes by the steward", "Dependabot", "Housekeeping")
+_CHANGE_KINDS = ("change", "rollback", "chore")
+
+
+def _item(kind, text, *, group="Updates", undo=(), why="", todo="", problem="", command=""):
+    """kind: needs | watch | change | rollback | chore.
+
+    needs items carry why/todo (and problem, a short phrase that turns the
+    verdict into "Problem: …"); watch items may carry a command shown in
+    monospace; changes carry their undo commands for the appendix.
+    """
+    undo = [undo] if isinstance(undo, str) else list(undo or ())
+    return {"kind": kind, "group": group, "text": str(text),
+            "undo": [str(u) for u in undo if u], "why": str(why or ""),
+            "todo": str(todo or ""), "problem": str(problem or ""), "command": str(command or "")}
+
 
 _P1_FAILURE_STATUSES = frozenset({"failed", "error", "timeout", "started"})
+_RIG_STEPS = ("gamingrig_maintenance", "gamingrig_linux", "gamingrig")
+# Earlier runs scanned for the last successful rig maintenance, and the age at
+# which a skipped rig moves from Watching to Needs You.
+RIG_MAINTENANCE_SCAN_DAYS = 60
+RIG_MAINTENANCE_ESCALATE_DAYS = 30
+# A failed rollback leaves a service in an unknown state: always Carter's.
+_ROLLBACK_UNVERIFIED = re.compile(
+    r"(?i)rollback\s+(?:not\s+verified|failed)|ROLLBACK_FAILED|deployment or rollback failed")
+_RETRIES = "retries tomorrow"
+STEWARD_JOURNAL = "journalctl --user -u homelab-steward.service --since today"
 
 
 def _p1_phase_failed(applied_data):
@@ -415,115 +421,382 @@ def _p1_failure_detail(applied_data):
         or "phase failed before producing step results"
     )[:240]
 
-def _p1_status_label(status):
-    return {
-        "timeout": "TIMED OUT",
-        "started": "STARTED (INCOMPLETE)",
-        "error": "ERROR",
-        "reverted": "ROLLED BACK",
-        "warning": "DEFERRED",
-    }.get(status, "FAILED")
+
+def _failed_word(status):
+    return {"timeout": "timed out", "started": "did not finish",
+            "error": "errored"}.get(status, "failed")
 
 
-def _p1_phase_failure_row(applied_data):
-    return (
-        '<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-        '<strong>Maintenance: FAILED</strong> — '
-        f'{html.escape(_p1_failure_detail(applied_data))}</p>'
-    )
-
-def _p1_line(text, color="#2a2a36"):
-    """One escaped update/status row."""
-    return (
-        f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
-        f'{html.escape(str(text))}</p>'
-    )
+def _detail(step, limit=160):
+    return _clip(step.get("error") or step.get("reason") or step.get("status") or "", limit)
 
 
-def _short_sha(value):
-    value = str(value or "").strip()
-    return value[:7] if re.fullmatch(r"[0-9a-f]{7,40}", value) else (value or "?")
-
-
-def _openwebui_update_text(step):
-    """(text, color) for an Open WebUI update row; ("", "") when there is no signal."""
-    status = str(step.get("status") or "")
-    pre = step.get("pre_version") or step.get("current_tag") or "?"
-    post = step.get("post_version") or "?"
-    latest = step.get("latest_tag") or post
-    detail = str(step.get("error") or step.get("reason") or "")[:160]
-    if status == "ok" and pre != post:
-        return f"open-webui: {pre} -> {post}", "#2a2a36"
-    if status == "rolled_back":
-        return f"open-webui: update to {latest} rolled back — {detail}", "#e65100"
-    # A newer release held back by the transaction's own guards waits for the
-    # next night; release-type, dry-run and "current" skips are not deferrals.
-    newer_skipped = (
-        status == "skipped" and str(step.get("reason") or "").startswith(("preflight:", "baseline:"))
-        and step.get("latest_tag") and step["latest_tag"] != pre
-    )
-    if status == "warning" or newer_skipped:
-        return f"open-webui: update to {latest} deferred — {detail}", "#e65100"
-    if status in _P1_FAILURE_STATUSES:
-        return f"open-webui: {_p1_status_label(status)} — {detail}", "#c62828"
-    return "", ""
-
-
-def _app_deploy_text(step):
-    """(text, color) for an app-deploy row; ("", "") when there is no signal."""
-    status = str(step.get("status") or "")
-    service = step.get("service") or "app"
-    detail = str(step.get("error") or step.get("reason") or "")[:160]
-    if status == "ok":
-        return (
-            f"{service}: deployed {_short_sha(step.get('pre_version'))} -> "
-            f"{_short_sha(step.get('post_version'))}",
-            "#2a2a36",
+def _step_failure(step, name=None):
+    """A failed P1 step: Needs You when its rollback is unverified, else Watching."""
+    name = name or _step_name(step)
+    detail = _detail(step)
+    if _ROLLBACK_UNVERIFIED.search(str(step.get("error") or step.get("reason") or "")):
+        return _item(
+            "needs", f"{name} update failed and its rollback could not be verified",
+            why=detail,
+            todo=(f"Restore {name} by hand: {step['revert']}" if step.get("revert")
+                  else f"Check {name} by hand and restore the previous version."),
         )
-    if status == "rolled_back":
-        return f"{service} deploy failed and rolled back — {detail}", "#c62828"
-    if status in _P1_FAILURE_STATUSES:
-        return f"{service} deploy: {_p1_status_label(status)} — {detail}", "#c62828"
-    if status == "skipped" and re.search(r"(?i)\b(ci|checks?|dirty|fast-forward|branch)\b", detail):
-        return f"{service}: deploy waiting — {detail}", "#7b7b8a"
-    return "", ""
+    return _item("watch", f"{name} {_failed_word(step.get('status'))}: {detail}; {_RETRIES}")
 
 
-def _dependabot_merge_lines(step):
-    """[(text, color)] for the Dependabot auto-merge step: merges, majors, errors."""
-    lines = []
+_RIG_GATES = {
+    "reboot_required": "reboot check",
+    "pre_reboot_boot_id": "boot id before reboot",
+    "bootnext": "boot-into-Linux setting",
+    "reboot": "reboot",
+    "ssh_return": "SSH return after reboot",
+    "post_reboot_health": "health after reboot",
+}
+
+
+def _rig_staleness(last_ok):
+    """' — last maintained <date> (N nights ago)' from _rig_last_maintained."""
+    if not last_ok:
+        return ""
+    if last_ok.get("date"):
+        nights = last_ok["nights"]
+        return (f" — last maintained {last_ok['date']} "
+                f"({_plural(nights, 'night')} ago)")
+    return f" — no successful maintenance in the last {last_ok.get('days')} days of runs"
+
+
+def _rig_overdue(last_ok):
+    """True once the rig has gone RIG_MAINTENANCE_ESCALATE_DAYS without maintenance.
+
+    No success inside the scan window counts as at least the window length.
+    """
+    if not last_ok:
+        return False
+    if last_ok.get("date"):
+        return last_ok.get("nights", 0) >= RIG_MAINTENANCE_ESCALATE_DAYS
+    return True
+
+
+def _rig_skipped_item(why, last_ok):
+    rig = "Gaming rig"
+    if not _rig_overdue(last_ok):
+        return _item("watch", f"{rig} not maintained tonight ({why}){_rig_staleness(last_ok)}")
+    if last_ok.get("date"):
+        age = f"{_plural(last_ok['nights'], 'night')} (last on {last_ok['date']})"
+    else:
+        age = f"more than {last_ok.get('days')} days"
+    return _item(
+        "needs", f"{rig} has gone {age} without maintenance (tonight: {why})",
+        why="It is missing security updates, and herdr, omp and llama.cpp on the inference "
+            "host keep drifting from the versions the rest of the homelab runs.",
+        todo="Leave the rig booted into Linux overnight so the 04:00 UTC steward run can "
+             "maintain it. The steward never wakes the rig or switches its OS, by design.")
+
+
+def _rig_events(step, last_ok=None):
+    """Gaming-rig maintenance as report items (changes, Watching, Needs You)."""
+    status = step.get("status", "")
+    rig = "Gaming rig"
+    if status == "skipped":
+        reason = str(step.get("reason") or "")
+        if "windows" in reason.lower():
+            why = "booted into Windows"
+        elif re.search(r"(?i)offline|sleep|no route|unreachable|timed out", reason):
+            why = "offline or asleep"
+        else:
+            why = _clip(reason, 100) or "not attempted"
+        return [_rig_skipped_item(why, last_ok)]
+
+    items = []
+    reboot_failed = False
+    for sub in step.get("substeps", []) or []:
+        name = sub.get("step", "")
+        sub_status = sub.get("status", "")
+        failed = sub_status in _P1_FAILURE_STATUSES
+        detail = _detail(sub, 140)
+        if name == "apt_upgrade":
+            count = sub.get("upgraded_count", 0)
+            if count:
+                new = sub.get("installed_count", 0)
+                items.append(_item("change", f"{rig}: {_plural(count, 'package')} upgraded"
+                                   + (f", {new} newly installed" if new else "")))
+            if failed:
+                items.append(_item("watch", f"{rig} package upgrade {_failed_word(sub_status)}: "
+                                   f"{detail}; {_RETRIES}"))
+        elif name in ("herdr_update", "omp_update"):
+            tool = "herdr" if name == "herdr_update" else "omp"
+            pre, post = str(sub.get("pre_version") or ""), str(sub.get("post_version") or "")
+            if sub_status == "ok" and pre and post and pre != post:
+                items.append(_item("change", f"{rig} {tool} {_arrow(pre, post)}"))
+            elif sub_status == "reverted":
+                items.append(_item(
+                    "rollback", f"{rig} {tool} update rolled back to "
+                    f"{sub.get('reverted_to') or 'the previous version'} (post-update check "
+                    f"failed); {_RETRIES}"))
+            elif failed:
+                items.append(_item("watch", f"{rig} {tool} update {_failed_word(sub_status)}: "
+                                   f"{detail}; {_RETRIES}"))
+        elif name in ("health", "post_reboot_health"):
+            after_reboot = name == "post_reboot_health"
+            problems = [
+                check for check in sub.get("checks", []) or []
+                if check.get("status") in (_P1_FAILURE_STATUSES | {"warning"})
+            ]
+            texts = [
+                f"{str(check.get('step') or 'check').replace('_', ' ')}: {_detail(check, 120)}"
+                for check in problems
+            ]
+            if failed and not texts:
+                texts = [detail or "health gate failed"]
+            for text, check in zip(texts, problems or [{}] * len(texts)):
+                if after_reboot and (failed or check.get("status") in _P1_FAILURE_STATUSES):
+                    reboot_failed = True
+                    items.append(_item(
+                        "needs", f"{rig} unhealthy after its reboot ({_RIG_GATES[name]})",
+                        why=text,
+                        todo="Check the rig over SSH (ssh gamingrig-linux) or at the desk; "
+                             "the steward will not reboot it again until it is healthy."))
+                else:
+                    items.append(_item("watch", f"{rig} health check {text}"))
+        elif name == "boot_gpu_ready" and sub_status == "warning":
+            items.append(_item("watch", f"{rig}: {_clip(sub.get('reason') or 'reboot deferred', 200)}"))
+        elif name == "reboot" and sub_status == "ok":
+            if step.get("rebooted") and step.get("post_reboot_health_passed"):
+                items.append(_item("change", f"{rig} rebooted; health rechecked after the reboot"))
+        elif name == "ssh_return" and failed:
+            reboot_failed = True
+            items.append(_item(
+                "needs", f"{rig} did not come back to Linux after its reboot "
+                f"({_RIG_GATES[name]})",
+                why=detail,
+                todo="Check the rig at the desk: it may be stuck in Windows, the boot menu, "
+                     "or powered off."))
+        elif name in _RIG_GATES and failed:
+            items.append(_item("watch", f"{rig} {_RIG_GATES[name]} {_failed_word(sub_status)}: "
+                               f"{detail}; {_RETRIES}"))
+    if step.get("rebooted") and not step.get("post_reboot_health_passed") and not reboot_failed:
+        items.append(_item(
+            "needs", f"{rig} rebooted but its health check after the reboot did not pass",
+            todo="Check the rig over SSH (ssh gamingrig-linux) or at the desk."))
+    if status in _P1_FAILURE_STATUSES and not any(i["kind"] in ("watch", "needs", "rollback")
+                                                  for i in items):
+        items.append(_item("watch", f"{rig} maintenance {_failed_word(status)}: "
+                           f"{_detail(step)}; {_RETRIES}"))
+    return items
+
+
+def _omp_stale_note(step):
+    """Suffix naming OMP sessions that still run a replaced binary."""
+    stale = step.get("stale_processes") or {}
+    try:
+        count = int(stale.get("count") or 0) if isinstance(stale, dict) else 0
+    except (TypeError, ValueError):
+        count = 0
+    if count <= 0:
+        return ""
+    return (
+        f" ({count} running omp session{'s' if count != 1 else ''} still "
+        f"use{'s' if count == 1 else ''} the old binary; restart "
+        f"{'it' if count == 1 else 'them'})"
+    )
+
+
+_DEPENDABOT_BUMP = re.compile(r"\b[Bb]ump (?P<dep>\S+) from (?P<old>\S+) to (?P<new>\S+?)\.?(?:\s|$)")
+
+
+def _bump_text(pr):
+    title = str(pr.get("title") or "")
+    match = _DEPENDABOT_BUMP.search(title)
+    what = (f"{match['dep']} {_arrow(match['old'], match['new'])}" if match
+            else _clip(title, 80) or "update")
+    return f"{what} (#{pr.get('number')})"
+
+
+def _dependabot_events(step):
+    """One What-changed line per repo with queued auto-merges; one Watching line per
+    repo with PRs left open (majors and skips)."""
+    items = []
+    merged = {}
     for pr in step.get("merged") or []:
-        lines.append((f"dependabot: {pr.get('repo')}#{pr.get('number')} auto-merge queued — "
-                      f"{str(pr.get('title') or '')[:120]}", "#2a2a36"))
-    for pr in step.get("needs_carter") or []:
-        lines.append((f"dependabot: {pr.get('repo')}#{pr.get('number')} needs Carter "
-                      f"({pr.get('reason')}) — {str(pr.get('title') or '')[:120]}", "#e65100"))
-    if step.get("error"):
-        lines.append((f"dependabot auto-merge: {str(step['error'])[:200]}", "#c62828"))
-    skipped = [pr for pr in step.get("skipped") or [] if pr.get("number") is not None]
-    if skipped:
-        reasons = "; ".join(
-            f"{pr.get('repo')}#{pr.get('number')}: {str(pr.get('reason') or '')[:80]}"
-            for pr in skipped[:6]
-        )
-        more = f" (+{len(skipped) - 6} more)" if len(skipped) > 6 else ""
-        lines.append((f"dependabot: {len(skipped)} PR(s) left open — {reasons}{more}", "#7b7b8a"))
-    return lines
-
-
-def _dependabot_done_rows(step):
-    """[(text, undo)] — one Done Automatically row per queued Dependabot auto-merge."""
-    rows = []
-    for pr in step.get("merged") or []:
-        if not isinstance(pr, dict):
-            continue
-        undo = pr.get("revert") or (_dependabot_merge_undo(pr["url"]) if pr.get("url") else "")
-        rows.append((
-            f"dependabot: {pr.get('repo')}#{pr.get('number')} "
-            f"{str(pr.get('title') or '')[:120]} — auto-merge queued ({pr.get('reason') or 'ok'})",
-            undo,
+        if isinstance(pr, dict):
+            merged.setdefault(str(pr.get("repo") or "?"), []).append(pr)
+    for repo, prs in merged.items():
+        items.append(_item(
+            "change",
+            f"{repo}: {_plural(len(prs), 'update')} set to auto-merge — "
+            + "; ".join(_bump_text(pr) for pr in prs),
+            group="Dependabot",
+            undo=[pr.get("revert") or (_dependabot_merge_undo(pr["url"]) if pr.get("url") else "")
+                  for pr in prs],
         ))
-    return rows
+    left = {}
+    for pr in step.get("needs_carter") or []:
+        if isinstance(pr, dict):
+            left.setdefault(str(pr.get("repo") or "?"), []).append(
+                f"{_bump_text(pr)} is a major update for you to merge")
+    for pr in step.get("skipped") or []:
+        if isinstance(pr, dict) and pr.get("number") is not None:
+            left.setdefault(str(pr.get("repo") or "?"), []).append(
+                f"#{pr.get('number')} {_clip(pr.get('reason'), 80)}")
+    for repo, reasons in left.items():
+        more = f" (+{len(reasons) - 3} more)" if len(reasons) > 3 else ""
+        items.append(_item(
+            "watch", f"{repo}: {_plural(len(reasons), 'Dependabot PR')} left open — "
+            + "; ".join(reasons[:3]) + more))
+    if step.get("error"):
+        items.append(_item("watch", f"Dependabot auto-merge error: {_clip(step['error'], 200)}"))
+    return items
+
+
+def _p1_events(applied, rig_last_ok=None):
+    """Every P1 maintenance step as report items, signal only (no-op steps vanish)."""
+    applied = applied if isinstance(applied, dict) else {}
+    items = []
+    reboot = applied.get("host_reboot")
+    if reboot:
+        items.append(_item("change" if reboot.get("rebooted") else "watch", reboot["text"]))
+    if _p1_phase_failed(applied):
+        items.append(_item(
+            "needs", "Nightly maintenance failed",
+            why=_p1_failure_detail(applied),
+            todo=f"Read tonight's log ({STEWARD_JOURNAL}), fix the cause, then run "
+                 "python3 ~/scripts/steward_runner.py --resume.",
+            problem="maintenance failed",
+        ))
+    for s in applied.get("steps", []) or []:
+        if not isinstance(s, dict):
+            continue
+        name = s.get("step", "")
+        status = s.get("status", "")
+        label = _step_name(s)
+        failed = status in _P1_FAILURE_STATUSES
+        pre, post = s.get("pre_version"), s.get("post_version")
+        undo = s.get("revert") or ""
+        if name in _RIG_STEPS:
+            items.extend(_rig_events(s, rig_last_ok))
+        elif name == "dependabot_merge":
+            items.extend(_dependabot_events(s))
+        elif name in ("openwebui_update", "openwebui"):
+            pre = pre or s.get("current_tag") or "?"
+            latest = s.get("latest_tag") or post or "?"
+            newer_skipped = (
+                status == "skipped"
+                and str(s.get("reason") or "").startswith(("preflight:", "baseline:"))
+                and s.get("latest_tag") and s["latest_tag"] != pre
+            )
+            if status == "ok" and pre != post:
+                items.append(_item("change", f"Open WebUI {_arrow(pre, post)}", undo=undo))
+            elif status == "rolled_back":
+                items.append(_item("rollback", f"Open WebUI update to {latest} rolled back "
+                                   f"({_detail(s)}); {_RETRIES}"))
+            elif status == "warning" or newer_skipped:
+                items.append(_item("watch", f"Open WebUI update to {latest} deferred — "
+                                   f"{_detail(s)}"))
+            elif failed:
+                items.append(_step_failure(s))
+        elif name == "app_deploy":
+            if status == "ok":
+                items.append(_item("change", f"{label} deployed "
+                                   f"{_arrow(_short_sha(pre), _short_sha(post))}",
+                                   group="Deploys", undo=undo))
+            elif status == "rolled_back":
+                items.append(_item("rollback", f"{label} deploy failed and was rolled back "
+                                   f"({_detail(s)}); {_RETRIES}", group="Deploys"))
+            elif failed:
+                items.append(_step_failure(s, f"{label} deploy"))
+            elif status == "skipped" and re.search(
+                    r"(?i)\b(ci|checks?|dirty|fast-forward|branch)\b", _detail(s)):
+                items.append(_item("watch", f"{label} deploy waiting — {_detail(s)}"))
+        elif name == "omp_db_repair":
+            detail = _clip(s.get("error") or s.get("reason") or "", 400)
+            if status == "ok":
+                items.append(_item("change", f"OMP database repaired: {detail}",
+                                   group="Fixes by the steward"))
+            elif status == "warning" and s.get("needs_carter"):
+                items.append(_item(
+                    "needs", "An OMP database is damaged and cannot be repaired without loss",
+                    why=detail,
+                    todo="Decide whether to restore it from the nightly backup; the steward "
+                         "left it untouched (restoring the pre-repair copy is not safe while "
+                         "OMP runs)."))
+            elif status == "warning":
+                items.append(_item("watch", f"OMP database check: {detail}"))
+            elif failed:
+                items.append(_step_failure(s))
+        elif name == "docker_daemon_assert" and failed:
+            items.append(_item(
+                "needs", "Docker daemon check failed after tonight's updates",
+                why=_detail(s, 300),
+                todo="Check `systemctl status docker` and /etc/docker/daemon.json before "
+                     "the next run."))
+        elif name == "docker_cleanup":
+            if status == "ok" and s.get("reason"):
+                items.append(_item("chore", f"Docker cleanup: {_clip(s['reason'], 140)}",
+                                   group="Housekeeping"))
+            elif status == "warning" or failed:
+                items.append(_item("watch", f"Docker cleanup {_failed_word(status) if failed else 'incomplete'}: "
+                                   f"{_detail(s)}"))
+        elif failed:
+            items.append(_step_failure(s))
+        elif status == "reverted":
+            items.append(_item("rollback", f"{label} update rolled back to "
+                               f"{s.get('reverted_to') or 'the previous version'}"
+                               f" (post-update check failed); {_RETRIES}"))
+        elif name == "omp_update" and status == "skipped" and _omp_stale_note(s):
+            items.append(_item("watch", f"omp is current{_omp_stale_note(s)}"))
+        elif name == "apt_upgrade":
+            if s.get("upgraded_count", 0) > 0:
+                items.append(_item("change", f"apt: {_plural(s['upgraded_count'], 'package')} upgraded"))
+        elif name == "searxng" and status == "ok":
+            items.append(_item("change", "SearXNG image refreshed", undo=undo))
+        elif name == "freshrss":
+            if status == "bumped":
+                items.append(_item("change", f"FreshRSS {_arrow(s.get('current_tag'), s.get('latest_tag'))}",
+                                   undo=undo))
+            elif status == "warning":
+                items.append(_item("watch", f"FreshRSS update deferred — {_detail(s)}"))
+        elif status in ("ok", "bumped") and (
+                (pre and post and pre != post) or undo or name.startswith("auto_")
+                or name in ("omp_update", "herdr_update", "llama_cpp", "worker_omp_refresh")):
+            pre_text = str(pre or "").replace("omp/", "").replace("herdr ", "")
+            post_text = str(post or "").replace("omp/", "").replace("herdr ", "")
+            if pre_text and post_text and pre_text != post_text:
+                text = f"{label} {_arrow(pre_text, post_text)}"
+            elif pre_text and post_text:
+                continue  # reinstall of the same version: no change
+            else:
+                text = f"{label}: {_clip(s.get('reason') or 'done', 140)}"
+            if name == "omp_update":
+                text += _omp_stale_note(s)
+            items.append(_item("change", text, undo=undo))
+    if applied.get("phase_status") == "degraded" and not any(
+            i["kind"] in ("watch", "needs") for i in items):
+        items.append(_item("watch", f"Nightly maintenance finished with problems: "
+                           f"{_p1_failure_detail(applied)}"))
+    return items
+
+
+def _rig_last_maintained(run_dir, date_str, max_days=RIG_MAINTENANCE_SCAN_DAYS):
+    """Last earlier run whose gaming-rig maintenance succeeded (bounded scan)."""
+    try:
+        today = datetime.strptime(date_str, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+    base = Path(run_dir).parent
+    for back in range(1, max_days + 1):
+        day = (today - timedelta(days=back)).strftime("%Y-%m-%d")
+        path = base / day / "01-applied.json"
+        if not path.exists():
+            continue
+        try:
+            steps = read_json(path).get("steps") or []
+        except (OSError, ValueError, AttributeError):
+            continue
+        if any(isinstance(s, dict) and s.get("step") in _RIG_STEPS and s.get("status") == "ok"
+               for s in steps):
+            return {"date": day, "nights": back}
+    return {"date": None, "days": max_days}
 
 
 def _host_reboot_status(run_dir):
@@ -544,25 +817,19 @@ def _host_reboot_status(run_dir):
     requested = str(record.get("requested_at") or "")
     match = re.search(r"T(\d{2}:\d{2})", requested)
     hhmm = match.group(1) if match else "?"
-    phase = record.get("phase") or "?"
     before_boot = str(record.get("boot_id_before") or "")
     now_boot = _current_boot_id()
     kernel_before = str(record.get("kernel_before") or "?")
     kernel_after = run_capture(["uname", "-r"]) or "?"
     rebooted = bool(before_boot and now_boot and before_boot != now_boot)
-    if rebooted:
-        if kernel_before != kernel_after:
-            text = (f"ThinkPad rebooted for kernel update: {kernel_before} -> {kernel_after} "
-                    f"({hhmm} UTC, after {phase}); run resumed")
-        else:
-            text = (f"ThinkPad rebooted (kernel {kernel_after} unchanged) "
-                    f"({hhmm} UTC, after {phase}); run resumed")
-        color = "#2a2a36"
+    if rebooted and kernel_before != kernel_after:
+        text = (f"ThinkPad rebooted for kernel update: {_arrow(kernel_before, kernel_after)} "
+                f"({hhmm} UTC); run resumed")
+    elif rebooted:
+        text = f"ThinkPad rebooted (kernel {kernel_after} unchanged) ({hhmm} UTC); run resumed"
     else:
-        text = (f"ThinkPad reboot requested at {hhmm} UTC (after {phase}) "
-                "but the host did not restart")
-        color = "#e65100"
-    return {"rebooted": rebooted, "text": text, "color": color, "time": hhmm,
+        text = f"ThinkPad reboot requested at {hhmm} UTC but the host did not restart"
+    return {"rebooted": rebooted, "text": text, "time": hhmm,
             "kernel_before": kernel_before, "kernel_after": kernel_after}
 
 
@@ -667,439 +934,14 @@ def _steward_memory_note(memory_mib, memory_high_mib):
     return text, anon > memory_high_mib / 2
 
 
-def _omp_db_repair_text(step):
-    """(text, color) for the OMP SQLite self-repair row; ("", "") when all DBs are ok."""
-    status = str(step.get("status") or "")
-    detail = str(step.get("error") or step.get("reason") or "")[:600]
-    if step.get("undo") and "pre-repair copy" in detail:
-        detail += " (restoring that copy is not a safe undo while OMP runs)"
-    if status == "ok":
-        return f"OMP DB: {detail}", "#2a2a36"
-    if status == "warning":
-        return f"OMP DB: needs Carter — {detail}", "#e65100"
-    if status in _P1_FAILURE_STATUSES:
-        return f"OMP DB check: {_p1_status_label(status)} — {detail}", "#c62828"
-    return "", ""
-
-
-def _omp_stale_note(step):
-    """Suffix naming OMP sessions that still run a replaced binary."""
-    stale = step.get("stale_processes") or {}
-    try:
-        count = int(stale.get("count") or 0) if isinstance(stale, dict) else 0
-    except (TypeError, ValueError):
-        count = 0
-    if count <= 0:
-        return ""
-    return (
-        f" ({count} running omp session{'s' if count != 1 else ''} still "
-        f"use{'s' if count == 1 else ''} the old binary; restart "
-        f"{'it' if count == 1 else 'them'})"
-    )
-
-
-def _html_updates(applied_data):
-    """Render update steps — signal only, no no-op greys."""
-    steps = applied_data.get("steps", [])
-    reboot = applied_data.get("host_reboot")
-    head = [_p1_line(reboot["text"], reboot["color"])] if reboot else []
-    if not steps:
-        if _p1_phase_failed(applied_data):
-            body = _p1_phase_failure_row(applied_data)
-        elif applied_data.get("dry_run"):
-            body = '<p style="margin:0; color:#888; font-size:13px;">Dry run — no mutations applied.</p>'
-        else:
-            body = '<p style="margin:0; color:#888; font-size:13px;">No update steps executed.</p>'
-        return "\n".join(head + [body])
-
-    lines = list(head)
-    for s in steps:
-        name = s.get("step", "")
-        status = s.get("status", "")
-        # gamingrig_maintenance owns its own nested signal rendering; do not
-        # collapse a no-op remote health pass into a generic "ok" row.
-        if name in ("gamingrig_maintenance", "gamingrig_linux", "gamingrig"):
-            rendered = _html_gamingrig_update(s)
-            if rendered:
-                lines.append(rendered)
-
-        elif name == "llama_cpp":
-            pre = s.get("pre_version")
-            post = s.get("post_version")
-            if status == "ok" and pre != post:
-                lines.append(
-                    f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
-                    f'llama.cpp: {html.escape(str(pre or "?"))} -> '
-                    f'{html.escape(str(post or "?"))}</p>'
-                )
-            elif status == "reverted":
-                lines.append(
-                    f'<p style="margin:0 0 4px; color:#e65100; font-size:13px;">'
-                    f'llama.cpp: update rolled back to '
-                    f'{html.escape(str(s.get("reverted_to") or "?"))}</p>'
-                )
-            elif status in _P1_FAILURE_STATUSES:
-                lines.append(
-                    f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                    f'llama.cpp: {_p1_status_label(status)} — '
-                    f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>'
-                )
-
-        # apt_upgrade: show only if upgrades happened or failed
-        elif name == "apt_upgrade":
-
-            n = s.get("upgraded_count", 0)
-            if n > 0:
-                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
-                             f'apt: {n} packages upgraded</p>')
-            elif status in _P1_FAILURE_STATUSES:
-                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'apt: {_p1_status_label(status)} — '
-                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
-
-        # auto_* packages: show only ok or failed
-        elif name.startswith("auto_"):
-            pkg = name.replace("auto_", "")
-            if status == "ok":
-                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
-                             f'{pkg}: {s.get("pre_version","?")} -> {s.get("post_version","?")}</p>')
-            elif status in _P1_FAILURE_STATUSES:
-                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'{pkg}: {_p1_status_label(status)} — '
-                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
-
-        # Open WebUI: guarded automatic update (soak, data gates, image+data rollback).
-        elif name in ("openwebui_update", "openwebui"):
-            text, color = _openwebui_update_text(s)
-            if text:
-                lines.append(_p1_line(text, color))
-
-        elif name == "app_deploy":
-            text, color = _app_deploy_text(s)
-            if text:
-                lines.append(_p1_line(text, color))
-
-        elif name == "dependabot_merge":
-            lines.extend(_p1_line(text, color) for text, color in _dependabot_merge_lines(s))
-
-        elif name == "omp_db_repair":
-            text, color = _omp_db_repair_text(s)
-            if text:
-                lines.append(_p1_line(text, color))
-
-        elif name == "worker_omp_refresh":
-            if status == "ok":
-                lines.append(_p1_line(
-                    f"steward worker omp: {s.get('pre_version') or '?'} -> "
-                    f"{s.get('post_version') or '?'}"
-                ))
-            elif status in _P1_FAILURE_STATUSES:
-                lines.append(_p1_line(
-                    f"steward worker omp: {_p1_status_label(status)} — "
-                    f"{s.get('error') or s.get('reason') or ''}",
-                    "#c62828",
-                ))
-
-        # freshrss: show only bumped/reverted/failed/error
-        elif name == "freshrss":
-            if status == "bumped":
-                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
-                             f'freshrss: {s.get("current_tag")} -> {s.get("latest_tag")}</p>')
-            elif status in _P1_FAILURE_STATUSES | {"reverted", "warning"}:
-                color = "#e65100" if status == "warning" else "#c62828"
-                lines.append(f'<p style="margin:0 0 4px; color:{color}; font-size:13px;">'
-                             f'freshrss: {_p1_status_label(status)} — '
-                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
-
-        # herdr: show only bumped or failed/error
-        elif name == "herdr_update":
-            pre = str(s.get("pre_version", "?")).replace("herdr ", "")
-            post = str(s.get("post_version", "?")).replace("herdr ", "")
-            if status == "ok":
-                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
-                             f'herdr: {pre} -> {post}</p>')
-            elif status in _P1_FAILURE_STATUSES:
-                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'herdr: {_p1_status_label(status)} — '
-                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
-
-        # omp: show only updated, reverted, or failed/error
-        elif name == "omp_update":
-            pre = str(s.get("pre_version", "?")).replace("omp/", "")
-            post = str(s.get("post_version", "?")).replace("omp/", "")
-            if status == "ok":
-                lines.append(_p1_line(f"omp: {pre} -> {post}{_omp_stale_note(s)}"))
-            elif status == "skipped" and _omp_stale_note(s):
-                lines.append(_p1_line(f"omp: current{_omp_stale_note(s)}", "#7b7b8a"))
-            elif status == "reverted":
-                lines.append(f'<p style="margin:0 0 4px; color:#e65100; font-size:13px;">'
-                             f'omp: update rolled back to {s.get("reverted_to","?")} '
-                             f'(post-update check failed)</p>')
-            elif status in _P1_FAILURE_STATUSES:
-                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'omp: {_p1_status_label(status)} — '
-                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
-
-        # searxng: show only updated or failed/error
-        elif name == "searxng":
-            if status == "ok":
-                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
-                             f'searxng: pulled latest :latest image</p>')
-            elif status in _P1_FAILURE_STATUSES:
-                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'searxng: {_p1_status_label(status)} — '
-                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
-
-        # docker cleanup: show reclaimed images/cache, or why it only partly ran
-        elif name == "docker_cleanup":
-            if status == "ok":
-                lines.append(_p1_line(f"docker cleanup: {s.get('reason') or ''}", "#7b7b8a"))
-            elif status == "warning":
-                lines.append(_p1_line(f"docker cleanup: WARNING — {s.get('reason') or ''}",
-                                      "#e65100"))
-            elif status in _P1_FAILURE_STATUSES:
-                lines.append(_p1_line(
-                    f"docker cleanup: {_p1_status_label(status)} — {s.get('reason') or ''}",
-                    "#c62828",
-                ))
-
-        # Generic fallback: show any step with real change/failure
-        else:
-            if status in ("ok", "bumped"):
-                lines.append(f'<p style="margin:0 0 4px; color:#2a2a36; font-size:13px;">'
-                             f'{name}: ok</p>')
-            elif status in _P1_FAILURE_STATUSES:
-                lines.append(f'<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-                             f'{name}: {_p1_status_label(status)} — '
-                             f'{html.escape(str(s.get("error") or s.get("reason") or ""))}</p>')
-    if _p1_phase_failed(applied_data):
-        lines.append(_p1_phase_failure_row(applied_data))
-    elif applied_data.get("phase_status") == "degraded":
-        lines.append(
-            '<p style="margin:0 0 4px; color:#e65100; font-size:13px;">'
-            '<strong>Maintenance: DEGRADED</strong> — '
-            f'{html.escape(_p1_failure_detail(applied_data))}</p>'
-        )
-
-    return "\n".join(lines) if lines else '<p style="margin:0; color:#888; font-size:13px;">No updates tonight.</p>'
-
-
-
-
-
-def _mini_bar(pct, color="#37474f"):
-    """Inline 0-100% horizontal bar, email-safe via nested table cells.
-    Track is darker (#d0d4de). Min fill 2% when pct>0."""
-    try:
-        w = max(0.0, min(100.0, float(pct)))
-    except (TypeError, ValueError):
-        w = 0.0
-    fill_w = max(w, 2.0) if w > 0 else 0.0
-    return (
-        '<table role="presentation" cellpadding="0" cellspacing="0" width="100%" '
-        'style="border-collapse:collapse;"><tr>'
-        f'<td width="{fill_w:.0f}%" style="background-color:{color}; height:5px; '
-        f'line-height:5px; font-size:0;">&nbsp;</td>'
-        f'<td width="{100-fill_w:.0f}%" style="background-color:#d0d4de; height:5px; '
-        f'line-height:5px; font-size:0;">&nbsp;</td>'
-        '</tr></table>'
-    )
-
-
-def _html_health(validation_data, hb_data, applied_data=None, memory_mib=None,
-                 memory_high_mib=None):
-    """Merged update/validation health section with system status.
-
-    memory_mib is the run's own memory.json maxima (_memory_mib); memory_high_mib
-    defaults to the steward cgroup's MemoryHigh.
-    """
-    out = []
-
-    if _p1_phase_failed(applied_data):
-        out.append(
-            '<p style="margin:0 0 4px; color:#c62828; font-size:13px;">'
-            f'{_dot("danger")}Maintenance failed: '
-            f'{html.escape(_p1_failure_detail(applied_data))}</p>'
-        )
-
-    # If heartbeat phase failed, show the error and retain the maintenance
-    # failure above instead of replacing it with a generic health packet.
-    if hb_data.get("phase_failed"):
-        err = hb_data.get("error", "unknown error")
-        out.append(
-            f'<p style="margin:0; color:#c62828; font-size:13px;">'
-            f'{_dot("danger")}Heartbeat failed: {html.escape(str(err))}</p>'
-        )
-        return "".join(out)
-
-    # ── A. Checks table ──
-    checks = validation_data.get("checks", [])
-    check_rows = []
-    for c in checks:
-        name = c.get("name", "")
-        status = c.get("status", "")
-
-        # Normalize label
-        label_map = {
-            "docker_containers": "Containers",
-            "llm_fallback": "LLM routing",
-            "openwebui_image_match": "open-webui image",
-        }
-        label = label_map.get(name, name)
-        if name.startswith("endpoint_"):
-            svc = name.replace("endpoint_", "")
-            label = {"tunnel-health": "CF tunnel"}.get(svc, svc)
-
-        if status == "ok":
-            chip = _chip("OK", "#2e7d32")
-            detail = ""
-            # Add compact detail for endpoints
-            if name.startswith("endpoint_"):
-                svc = name.replace("endpoint_", "")
-                if svc == "tunnel-health":
-                    detail = f'{c.get("active_connections", "?")} connectors'
-                else:
-                    code = c.get("http_code", "?")
-                    detail = f'HTTP {code}'
-            elif name == "llm_fallback":
-                fb = c.get("fallback_active", False)
-                chip = _chip("OK", "#2e7d32") if not fb else _chip("FAIL", "#c62828")
-                detail = "local" if not fb else "cloud fallback"
-                label = "LLM routing"
-            check_rows.append((label, f'{chip} {detail}'.strip()))
-        elif status in ("fail", "error"):
-            chip = _chip("FAIL", "#c62828")
-            detail = c.get("error", c.get("status", ""))
-            check_rows.append((label, f'{chip} {detail}'.strip()))
-        elif status == "warning":
-            chip = _chip("WARN", "#e65100")
-            check_rows.append((label, chip))
-
-    if check_rows:
-        out.append(_sub_header("Checks"))
-        out.append(_kv_rows(check_rows))
-
-    # ── B. System status (from heartbeat, no trends) ──
-    sys_rows = []
-
-    # Failed systemd units
-    uf = hb_data.get("failed_units", {}) or {}
-    user_f = [x for x in uf.get("user", []) if x and str(x).strip()]
-    sys_f = [x for x in uf.get("system", []) if x and str(x).strip()]
-    cleared = [c for c in (uf.get("cleared") or []) if c]
-    missing = (hb_data.get("units", {}) or {}).get("missing", [])
-    if user_f or sys_f or missing or cleared:
-        parts = []
-        for u in user_f:
-            parts.append(_dot("danger") + html.escape(str(u).strip()))
-        for u in sys_f:
-            parts.append(_dot("danger") + html.escape(str(u).strip()))
-        if missing:
-            parts.append(_dot("warn") + "missing: " + html.escape(", ".join(map(str, missing))))
-        if cleared and not (user_f or sys_f):
-            # Only mention clears when nothing is still failed — avoids noise
-            clr = ", ".join(
-                html.escape(str(c.get("unit") or c)) for c in cleared[:4]
-            )
-            parts.append(_dot("ok") + f"cleared stale: {clr}")
-        sys_rows.append(("Systemd units", " ".join(parts)))
-
-    # Reboot (heartbeat runs after a mid-run ThinkPad reboot, so the run's own
-    # reboot record says whether one happened tonight)
-    rb = hb_data.get("reboot", {}) or {}
-    host_reboot = (applied_data or {}).get("host_reboot")
-    if rb.get("needed"):
-        reboot_cell = _dot("danger") + f'Needed — kernel {rb.get("kernel","?")}'
-    elif host_reboot and host_reboot.get("rebooted"):
-        reboot_cell = _dot("ok") + html.escape(
-            f'Rebooted {host_reboot["time"]} UTC — kernel {host_reboot["kernel_after"]}')
-    elif host_reboot:
-        reboot_cell = _dot("warn") + html.escape(
-            f'Requested {host_reboot["time"]} UTC — host did not restart')
-    else:
-        reboot_cell = _dot("ok") + "Not needed"
-    sys_rows.append(("Reboot", reboot_cell))
-
-    # Disk
-    disk = hb_data.get("disk", {}) or {}
-    if disk.get("df_root"):
-        parts = disk["df_root"].splitlines()[-1].split()
-        if len(parts) >= 5:
-            used_pct = parts[4]
-            sys_rows.append(("Disk", f'{used_pct} used ({parts[2]}/{parts[1]})'))
-
-    # Memory
-    mem = hb_data.get("memory", {}) or {}
-    mem_avail = mem.get("available", "")
-    if mem_avail:
-        sys_rows.append(("Memory", mem_avail))
-
-    # Steward memory (this run's own cgroup maxima)
-    note = _steward_memory_note(
-        memory_mib,
-        memory_high_mib if memory_high_mib is not None else _steward_memory_high_mib(),
-    ) if memory_mib else None
-    if note:
-        text, warn = note
-        sys_rows.append(("Steward memory", (_dot("warn") if warn else "") + html.escape(text)))
-
-    # Backup
-    bt = (hb_data.get("backup", {}) or {}).get("last_run", "")
-    if bt:
-        sys_rows.append(("Last backup", bt))
-
-    # DNS — only if not all ok
-    dns = hb_data.get("dns", {}) or {}
-    if dns:
-        ok = sum(1 for v in dns.values() if v.get("resolves"))
-        total = len(dns)
-        if ok != total:
-            sys_rows.append(("DNS", _dot("warn") + f'{ok}/{total} hostnames resolve'))
-
-    # TLS — only if any cert expires within 30 days
-    tls = hb_data.get("tls_certs", {}) or {}
-    if tls:
-        now_dt = datetime.now()
-        expiring = []
-        for host, expiry in tls.items():
-            dm = re.search(r"notAfter=(.+?\d{4})\s", expiry)
-            if dm:
-                try:
-                    exp_date = datetime.strptime(dm.group(1), "%b %d %H:%M:%S %Y %Z")
-                    days_left = (exp_date - now_dt).days
-                    if days_left <= 30:
-                        expiring.append(f'{host.split(".")[0]} ({days_left}d)')
-                except ValueError:
-                    pass
-        if expiring:
-            sys_rows.append(("TLS expiring", _dot("warn") + ", ".join(expiring)))
-
-    # LLM routing (from heartbeat)
-    fb = (hb_data.get("llm_stack", {}) or {}).get("falling_back", False)
-    if fb:
-        sys_rows.append(("LLM proxy", _dot("warn") + "Cloud fallback"))
-
-    # bundle-audit — only when vulnerabilities (or a check error) are reported
-    ba = hb_data.get("bundle_audit", {}) or {}
-    for app, result in ba.items():
-        if "no vulnerabilities" not in str(result):
-            sys_rows.append((f"bundle-audit ({app})",
-                             _dot("warn") + html.escape(_clip(str(result), 400))))
-
-    if sys_rows:
-        out.append(_sub_header("System status"))
-        out.append(_kv_rows(sys_rows))
-
-    return "".join(out) if out else '<p style="margin:0; color:#888; font-size:13px;">All health checks passed.</p>'
-
 
 # ── finding routes (07b-fixes.json "routes") ─────────────────────────
 
 _SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
-# Routes that leave a confirmed problem with Carter.
-_NEEDS_CARTER_ROUTES = ("needs_carter", "failed", "pr_opened")
-# Routes where the steward is still acting (PR merging, nightly step).
-_IN_PROGRESS_ROUTES = ("pr_auto_merge", "handled_by_p1")
+# Routes where a fix is already under way (PR merging, nightly step, queued).
+_IN_PROGRESS_ROUTES = ("pr_auto_merge", "handled_by_p1", "deferred")
+# Routes that may leave Carter a decision; only extreme ones reach Needs You.
+_OPEN_ROUTES = ("needs_carter", "report_only", "pr_opened", "failed")
 
 
 def _finding_severity(item, section):
@@ -1191,38 +1033,27 @@ def _merge_resolution(row, res):
     if status == "done":
         row.update(
             status="done",
-            summary=_clip(res.get("summary") or f"Resolver: {action}", 300),
+            summary=_clip(res.get("summary") or f"Follow-up fix applied: {action}", 300),
             revert=str(res.get("undo") or ""),
             commit=str(res.get("commit") or ""),
-            detail=f"P7c resolver acted autonomously ({res.get('tier') or 'act'})",
+            detail="fixed by the follow-up check",
         )
-    elif status == "resolved":
-        row.update(
-            status="done",
-            summary=_clip(f"No action needed: already resolved since the audit ({reason})", 300),
-            revert="",
-            detail="P7c resolver found the item already resolved",
-        )
+    elif status == "resolved" or (status == "held" and res.get("already_fixed")):
+        row.update(status="done", no_change=True, revert="",
+                   summary=_clip(f"Already resolved since the audit ({reason})", 300))
     elif status in ("recommended", "dry_run"):
-        certainty = res.get("certainty")
-        conf = f" (Jev certainty {certainty:.2f})" if isinstance(certainty, (int, float)) else ""
-        rationale = _clip(res.get("rationale"), 180)
-        row["decision"] = f"resolver recommends {action}{conf}" + (f": {rationale}" if rationale else "")
+        row["recommended"] = action
         row["approve"] = str(res.get("approve_command") or "")
-        row["resolver_note"] = reason
     elif status == "failed":
         commit = str(res.get("commit") or "")
         row.update(
             status="failed",
-            detail=_clip(f"P7c {action or 'action'}"
+            partial=True,
+            detail=_clip(f"{action or 'the fix'}"
                          + (f" (commit {commit[:12]})" if commit else "") + f": {reason}", 300),
             revert=str(res.get("undo") or ""),
             commit=commit,
         )
-    else:
-        rationale = _clip(res.get("rationale"), 200) if status == "held" else ""
-        note = f"resolver {status or 'unknown'}: {reason}" if reason else ""
-        row["resolver_note"] = f"{note} — {rationale}" if note and rationale else note
 
 
 def _apply_resolutions(fixes, resolve):
@@ -1264,7 +1095,7 @@ def _apply_resolutions(fixes, resolve):
     if degraded and not reason.startswith("P7c action(s) failed"):
         merged.append({
             "section": "steward-resolver", "finding_id": "p7c", "severity": "low",
-            "claim": f"The Needs You resolver (P7c) did not finish: {_clip(reason, 240)}",
+            "claim": f"The follow-up check on open audit items did not finish: {_clip(reason, 240)}",
             "action": "", "status": "failed", "summary": "", "detail": "items it did not reach "
             "are listed unchanged", "decision": "", "revert": "", "pr_url": "", "commit": "",
             "iteration": None,
@@ -1282,124 +1113,459 @@ def _load_fixes_with_resolutions(run_dir):
     return _apply_resolutions(fixes, resolve if isinstance(resolve, dict) else {})
 
 
-def _route_needs_carter(row):
-    """Whether a route leaves Carter something to do.
+def _route_deferred(row):
+    return row.get("status") == "deferred" or (
+        row.get("status") == "report_only"
+        and str(row.get("summary") or "").startswith("Deferred:"))
 
-    Report-only means "never changed automatically", not "unimportant": a
-    report-only finding above low severity is still Carter's to act on.
+
+def _route_class(row):
+    """needs | watch | progress | done | noop — the triage of one finding route.
+
+    Needs You only for: a partly applied follow-up fix, or a finding left for
+    Carter (needs_carter / report_only) that is high severity or a security
+    finding. Everything else open is Watching.
     """
     status = row.get("status")
-    return status in _NEEDS_CARTER_ROUTES or (
-        status == "report_only" and row.get("severity") != "low"
-    )
-
-
-def _clip(text, limit):
-    """Collapse whitespace and cut at a word boundary."""
-    text = re.sub(r"\s+", " ", str(text or "")).strip()
-    if len(text) <= limit:
-        return text
-    cut = text[:limit].rsplit(" ", 1)[0] or text[:limit]
-    return cut.rstrip(",;:") + "…"
-
-
-def _route_outcome_text(row):
-    """One plain phrase saying what happened to a finding."""
-    status = row.get("status")
-    detail = _clip(row.get("detail"), 160)
-    if status == "needs_carter":
-        decision = _clip(row.get("decision"), 200)
-        if decision:
-            text = f"needs Carter: {decision}"
-        else:
-            text = "needs Carter: no automatic fix route" + (f" ({detail})" if detail else "")
-        if row.get("approve"):
-            return f"{text} — approve with: {row['approve']}"
-        if row.get("resolver_note"):
-            return f"{text} ({_clip(row['resolver_note'], 360)})"
-        return text
-    if status == "failed":
-        return ("the automatic fix failed" + (f": {detail}" if detail else "")
-                + (f" — undo: {row['revert']}" if row.get("revert") else ""))
-    if status == "pr_opened":
-        return "a fix PR is waiting for Carter's review" + (
-            f": {row['pr_url']}" if row.get("pr_url") else "")
-    if status == "pr_auto_merge":
-        if "dotfiles-homelab-private" in str(row.get("pr_url") or "") and row.get("summary"):
-            return _clip(row["summary"], 200)
-        return "a fix PR will merge automatically once its checks pass"
-    if status == "handled_by_p1":
-        return "nightly maintenance handles this" + (f" ({detail})" if detail else "")
     if status == "done":
-        return _clip(row.get("summary"), 160) or "fixed automatically"
-    if status == "report_only":
-        return ("needs Carter: reported only, never changed automatically"
-                if _route_needs_carter(row) else "noted; low priority")
-    return str(status or "unknown")
+        if row.get("no_change") or str(row.get("detail") or "").startswith(
+                "replacement text already present"):
+            return "noop"
+        return "done"
+    if status in _IN_PROGRESS_ROUTES or _route_deferred(row):
+        return "progress"
+    if status == "failed":
+        return "needs" if row.get("partial") else "watch"
+    if status in ("needs_carter", "report_only") and (
+            row.get("severity") == "high" or row.get("section") == "security-posture"):
+        return "needs"
+    return "watch"
 
 
-def _route_section_summary(rows, findings):
-    """Deterministic section summary when the summary model fails."""
-    if not rows:
-        return f"{len(findings)} finding(s) reviewed." if findings else "Section reviewed."
-    top = rows[0]
-    text = f"{_clip(top.get('claim'), 220)} Outcome: {_route_outcome_text(top)}."
-    if len(rows) > 1:
-        text += f" {len(rows) - 1} more finding(s) in this section."
-    return text
+def _route_progress_text(row):
+    status = row.get("status")
+    url = str(row.get("pr_url") or "")
+    if _route_deferred(row):
+        number = re.search(r"/pull/(\d+)", url)
+        if number:
+            return f"fix queued behind steward-code PR #{number.group(1)}; raised again next night"
+        why = str(row.get("summary") or "").removeprefix("Deferred:").strip().rstrip(".")
+        return f"fix queued ({why or 'a fix is already in flight'}); raised again next night"
+    if status == "pr_auto_merge":
+        number = re.search(r"/pull/(\d+)", url)
+        pr = f"PR #{number.group(1)}" if number else "a PR"
+        if "dotfiles-homelab-private" in url:
+            return (f"fix proposed as steward-code {pr}; it merges after the 24 h objection "
+                    "window unless labelled hold")
+        return f"fix {pr} merges automatically once its checks pass"
+    detail = _clip(row.get("detail"), 120)
+    return "nightly maintenance handles this" + (f" ({detail})" if detail else "")
 
 
-def _section_route_chip(verdict, rows):
-    """Badge describing a section's end state after routing."""
-    base = str(verdict or "").removeprefix("cached-")
-    if str(verdict).endswith("-failed") or base == "UNVERIFIABLE":
-        return _chip("Audit incomplete", "#e65100")
-    failed = sum(1 for r in rows if r.get("status") == "failed")
-    if failed:
-        return _chip(f"{failed} fix failed", "#c62828")
-    needs = [r for r in rows if _route_needs_carter(r)]
-    if needs:
-        high = any(r.get("severity") == "high" for r in needs)
-        return _chip(
-            f"{len(needs)} need{'s' if len(needs) == 1 else ''} you",
-            "#c62828" if high else "#e65100",
+def _route_watch_item(row):
+    head = f"{_section_name(row.get('section'))}: {_clip(_humanize(row.get('claim')), 200)}"
+    status = row.get("status")
+    command = ""
+    if _route_class(row) == "progress":
+        tail = _route_progress_text(row)
+    elif row.get("approve"):
+        tail = f"a {row.get('recommended') or 'fix'} is ready; approve it with"
+        command = row["approve"]
+    elif status == "failed":
+        detail = _clip(row.get("detail"), 140)
+        tail = "the automatic fix did not land" + (f" ({detail})" if detail else "") + \
+            "; raised again next night"
+    elif status == "pr_opened":
+        tail = "a fix PR is waiting for review"
+        command = str(row.get("pr_url") or "")
+    elif status == "report_only":
+        tail = "noted; never changed automatically"
+    elif row.get("decision"):
+        tail = f"open question: {_clip(_humanize(row['decision']), 160)}"
+    else:
+        tail = "no safe automatic fix; raised again if it persists"
+    return _item("watch", f"{head} — {tail}", command=command)
+
+
+def _route_needs_item(row):
+    section = _section_name(row.get("section"))
+    if row.get("status") == "failed":
+        return _item(
+            "needs", f"A follow-up fix only partly applied: {_clip(_humanize(row.get('claim')), 160)}",
+            why=_clip(row.get("detail"), 240),
+            todo="Finish the change by hand or undo it.",
+            command=f"undo: {row['revert']}" if row.get("revert") else "",
         )
-    in_progress = sum(1 for r in rows if r.get("status") in _IN_PROGRESS_ROUTES)
-    if in_progress:
-        return _chip(f"{in_progress} in progress", "#1565c0")
-    done = sum(1 for r in rows if r.get("status") == "done")
-    if done:
-        return _chip(f"{done} fixed", "#2e7d32")
-    if rows:
-        return _chip(f"{len(rows)} FYI", "#9aa0b2")
-    return _chip("reviewed", "#9aa0b2")
+    why = ("Security finding; never changed automatically." if row.get("section") == "security-posture"
+           else f"High-severity {section} finding with no safe automatic fix.")
+    if row.get("approve"):
+        return _item("needs", _clip(_humanize(row.get("claim")), 220), why=why,
+                     todo="A fix is prepared; approve it with:", command=row["approve"])
+    todo = (_clip(_humanize(row.get("decision")), 240) if row.get("decision")
+            else "Decide how to handle it; nothing was changed automatically.")
+    return _item("needs", _clip(_humanize(row.get("claim")), 220), why=why, todo=todo)
 
 
-def _section_findings_text(sec, date_str):
-    """Flatten confirmed findings for summarizer input (digest-stale filtered)."""
-    confirmed = sec.get("judge_confirmed", []) or sec.get("confirmed_findings", []) or []
-    claims = []
-    for f in confirmed:
-        claim = (f.get("claim") or f.get("evidence") or "").strip()
-        if not claim:
+def _route_events(audit, fixes):
+    items = []
+    for row in _route_rows(audit, fixes):
+        kind = _route_class(row)
+        if kind == "needs":
+            items.append(_route_needs_item(row))
+        elif kind == "done":
+            summary = _humanize(row.get("summary")) or "fixed automatically"
+            items.append(_item("change", f"{_section_name(row.get('section'))}: {_clip(summary, 200)}",
+                               group="Fixes by the steward", undo=row.get("revert") or ""))
+        elif kind in ("watch", "progress"):
+            items.append(_route_watch_item(row))
+    return items
+
+
+# ── steward code, public mirror, host drift, session memory ──────────
+
+def _utc_text(value):
+    parsed = _parse_utc(value)
+    return parsed.strftime("%Y-%m-%d %H:%M UTC") if parsed else str(value or "")
+
+
+def _steward_code_events(steward_code):
+    """Startup steward-code merge + live-tree pickup as report items."""
+    if not isinstance(steward_code, dict):
+        return []
+    items = []
+    merge = steward_code.get("merge") if isinstance(steward_code.get("merge"), dict) else {}
+    pickup = steward_code.get("pickup") if isinstance(steward_code.get("pickup"), dict) else {}
+    status = pickup.get("status")
+    reason = _clip(pickup.get("reason"), 200)
+    merged = [pr for pr in merge.get("merged") or [] if isinstance(pr, dict)]
+    picked = "; live scripts updated and verified" if status == "fast_forwarded" else ""
+    for pr in merged:
+        title = _clip(_humanize(str(pr.get("title") or "").removeprefix("steward: ")), 140)
+        if pr.get("reverted_by"):
+            items.append(_item(
+                "rollback", f"Steward code: PR #{pr.get('number')} merged, then reverted "
+                f"({_clip(pr.get('revert_reason') or 'live update failed its checks', 140)})",
+                group="Fixes by the steward"))
+        else:
+            items.append(_item(
+                "change", f"Steward code: PR #{pr.get('number')} merged — {title}{picked}",
+                group="Fixes by the steward", undo=pr.get("undo") or ""))
+    if status == "fast_forwarded" and not merged:
+        commits = [c for c in pickup.get("commits") or [] if isinstance(c, dict)]
+        subjects = "; ".join(_clip(c.get("subject"), 80) for c in commits[:3])
+        items.append(_item(
+            "change", f"Steward code: live scripts updated ({_plural(len(commits), 'commit')}"
+            + (f": {subjects}" if subjects else "") + ")",
+            group="Fixes by the steward"))
+    for pr in merge.get("pending") or []:
+        if not isinstance(pr, dict):
             continue
-        if sec.get("name") == "digest-quality":
-            dates_in_claim = re.findall(r"20\d{2}-\d{2}-\d{2}", claim)
-            if dates_in_claim:
-                has_recent = any(
-                    (datetime.strptime(d, "%Y-%m-%d")
-                     >= datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=2))
-                    for d in dates_in_claim
-                )
-                if not has_recent:
-                    continue
-        claims.append(claim[:240])
-    return claims
+        if pr.get("needs_carter") or "CONFLICTING" in str(pr.get("reason") or ""):
+            items.append(_item("watch", f"Steward code PR #{pr.get('number')} not merged: "
+                               f"{_clip(pr.get('reason'), 160)}", command=pr.get("url") or ""))
+        else:
+            due = f"merges after {_utc_text(pr['due'])}" if pr.get("due") else "merges later"
+            items.append(_item("watch", f"Steward code PR #{pr.get('number')} waiting — {due} "
+                               "unless labelled hold", command=pr.get("url") or ""))
+    for pr in merge.get("held") or []:
+        if isinstance(pr, dict):
+            items.append(_item("watch", f"Steward code PR #{pr.get('number')} held: "
+                               f"{_clip(pr.get('reason'), 160)}"))
+    errors = [str(e) for e in merge.get("errors") or []]
+    if errors or merge.get("status") in ("warning", "failed"):
+        items.append(_item("watch", "Steward code merge problem: "
+                           + _clip("; ".join(errors) or merge.get("reason") or "", 240)))
+    if status == "skipped":
+        items.append(_item("watch", f"Steward code update not picked up yet: {reason}; "
+                           "tried again at the next start"))
+    elif status == "rolled_back":
+        items.append(_item("watch", f"Steward code update rolled back after its checks failed: "
+                           f"{reason}; the previous scripts are running"))
+    elif status == "failed":
+        items.append(_item(
+            "needs", "Steward code update left the live scripts in an unverified state",
+            why=reason or "the live update failed",
+            todo="Recover the scripts by hand before the next run:",
+            command=pickup.get("manual_recovery") or "",
+        ))
+    return items
 
+
+def _public_mirror_events(public):
+    """Last night's public dotfiles mirror: held/blocked files and failures."""
+    if not public:
+        return []
+    items = []
+    for key, text in (("held", "held back from the public mirror; previous version kept"),
+                      ("blocked", "blocked from the public mirror")):
+        rows = [r for r in public.get(key) or [] if isinstance(r, dict)]
+        if rows:
+            paths = ", ".join(str(r.get("path")) for r in rows[:10])
+            more = f" (+{len(rows) - 10} more)" if len(rows) > 10 else ""
+            items.append(_item("watch", f"{_plural(len(rows), 'file')} {text}",
+                               command=paths + more))
+    if public.get("phase_failed") or public.get("status") in ("failed", "error"):
+        items.append(_item("watch", "Public mirror update failed: "
+                           + _clip(public.get("reason") or public.get("error") or "", 200)))
+    return items
+
+
+def _public_mirror_count(public):
+    return sum(len([r for r in (public or {}).get(key) or [] if isinstance(r, dict)])
+               for key in ("added", "updated", "removed"))
+
+
+def _host_drift_events(remediation, untracked_dotfiles, prev_dotfiles=None):
+    """Report-only host drift, untracked dotfiles, and last night's blocked dotfiles commit."""
+    items = []
+    ufw = (remediation or {}).get("ufw_drift") or {}
+    status = ufw.get("status")
+    if status == "drift":
+        for rule in ufw.get("missing") or []:
+            items.append(_item("watch", "Firewall rule missing from the live firewall",
+                               command=rule))
+        for rule in ufw.get("extra") or []:
+            items.append(_item("watch", "Firewall rule not in the expected list", command=rule))
+    elif status and status != "ok":
+        items.append(_item("watch", f"Firewall drift check did not run: "
+                           f"{_clip(ufw.get('reason') or status, 160)}"))
+    for row in (remediation or {}).get("docker_proxy") or []:
+        if row.get("action") in {"attention_needed", "error"}:
+            items.append(_item(
+                "watch", f"Port {row.get('port')} ({row.get('container')}): "
+                f"{_clip(row.get('reason') or row.get('error') or row.get('action'), 160)}"))
+    probe = (remediation or {}).get("bridge_probe") or {}
+    if probe.get("status") == "unreachable":
+        items.append(_item("watch", "Open WebUI cannot reach the OpenCode Go proxy "
+                           "(host.docker.internal:8082)"))
+    if untracked_dotfiles:
+        paths = ", ".join(untracked_dotfiles[:10])
+        more = f" (+{len(untracked_dotfiles) - 10} more)" if len(untracked_dotfiles) > 10 else ""
+        items.append(_item(
+            "watch", f"{_plural(len(untracked_dotfiles), 'new dotfile')} not tracked; the "
+            "nightly commit only takes vetted text files, add others by hand if wanted",
+            command=paths + more))
+    prev = prev_dotfiles or {}
+    if prev.get("phase_failed") or prev.get("status") in {"secret_blocked", "push_blocked"}:
+        hits = ", ".join(f"{f.get('path')}:{f.get('line')}"
+                         for f in (prev.get("secret_findings") or [])[:5])
+        items.append(_item(
+            "watch", "Last dotfiles commit was blocked: "
+            + _clip(prev.get("reason") or prev.get("status") or "", 200),
+            command=hits))
+    return items
+
+
+def _session_memory_events(p0b):
+    """Sessions whose notes could not be written (degraded session-memory phase only)."""
+    if not p0b or p0b.get("phase_status") != "degraded":
+        return []
+    rows = [s for s in (p0b.get("sessions") or [])
+            if isinstance(s, dict) and s.get("action") in P0B_PROBLEM_ACTIONS]
+    counts = {}
+    for s in rows:
+        action = str(s.get("action")).replace("_", " ")
+        counts[action] = counts.get(action, 0) + 1
+    what = ", ".join(f"{n} {action}" for action, n in counts.items()) or "degraded"
+    names = ", ".join(Path(str(s.get("path") or "?")).name for s in rows[:10])
+    more = f" (+{len(rows) - 10} more)" if len(rows) > 10 else ""
+    return [_item("watch", f"Session notes not updated ({what}); earlier notes kept",
+                  command=names + more if names else "")]
+
+
+# ── health ───────────────────────────────────────────────────────────
+
+_CHECK_OK = ("ok", "pass", "skipped", "dry-run")
+_CHECK_FAILED = ("fail", "failed", "error")
+
+
+def _checks(validation):
+    return [c for c in (validation or {}).get("checks", []) or [] if isinstance(c, dict)]
+
+
+def _check_failing(check):
+    return str(check.get("status") or "ok") in _CHECK_FAILED
+
+
+def _health_events(validation, heartbeat, troubleshoot):
+    """Health end state: failing checks are Carter's; warnings are Watching."""
+    items = []
+    heartbeat = heartbeat or {}
+    if heartbeat.get("phase_failed"):
+        items.append(_item(
+            "needs", "The nightly health check did not run",
+            why=_clip(heartbeat.get("error") or "unknown error", 200),
+            todo=f"Read tonight's log ({STEWARD_JOURNAL}).",
+            problem="health check failed"))
+    ts = troubleshoot or {}
+    regressed = set()
+    if ts.get("triggered") and not ts.get("re_validation_healthy"):
+        regressed = {str(name) for name in (ts.get("regressed") or {})}
+        names = ", ".join(sorted(n.removeprefix("endpoint_") for n in regressed)) or "a service"
+        steps = [str(s) for s in ts.get("next_steps") or []]
+        items.append(_item(
+            "needs", f"{names} still failing after the automatic repair attempts",
+            why=_clip(ts.get("diagnosis") or "no diagnosis", 240),
+            todo=_clip(steps[0], 240) if steps else "See the regression diagnosis below.",
+            problem=f"{names} down"))
+    elif ts.get("triggered"):
+        fixed = [r for r in ts.get("fix_actions") or [] if isinstance(r, dict) and r.get("executed")]
+        names = ", ".join(sorted({str(r.get("endpoint")) for r in fixed}))
+        if names:
+            items.append(_item("change", f"Recovered {names} automatically after tonight's updates",
+                               group="Fixes by the steward"))
+    for check in _checks(validation):
+        status = str(check.get("status") or "ok")
+        if check.get("name") in regressed:
+            continue
+        label = _check_label(check)
+        if status in _CHECK_FAILED:
+            items.append(_item(
+                "needs", f"{label} check failing",
+                why=_clip(check.get("error") or check.get("reason") or status, 200),
+                todo=f"Check {label} and its logs; the steward did not fix it.",
+                problem=f"{label} failing"))
+        elif status not in _CHECK_OK:
+            text = ("LLM routing on cloud fallback" if check.get("fallback_active")
+                    else f"{label} check: {_clip(check.get('error') or check.get('reason') or status, 160)}")
+            items.append(_item("watch", text))
+    reboot = heartbeat.get("reboot", {}) or {}
+    if reboot.get("needed"):
+        items.append(_item("watch", f"ThinkPad reboot pending for kernel {reboot.get('kernel', '?')}"))
+    units = heartbeat.get("failed_units", {}) or {}
+    failed_units = [str(u).strip() for u in (units.get("user") or []) + (units.get("system") or [])
+                    if u and str(u).strip()]
+    if failed_units:
+        items.append(_item("watch", f"{_plural(len(failed_units), 'systemd unit')} failed",
+                           command=", ".join(failed_units)))
+    return items
+
+
+def _health_glance(validation, heartbeat):
+    if (heartbeat or {}).get("phase_failed"):
+        return "The health check did not run"
+    checks = _checks(validation)
+    failing = [c for c in checks if _check_failing(c)]
+    if failing:
+        return f"{len(failing)} failing: " + ", ".join(_check_label(c) for c in failing[:4])
+    if not checks:
+        return "No checks ran"
+    warn = sum(1 for c in checks if str(c.get("status") or "ok") not in _CHECK_OK)
+    return f"All {len(checks)} checks passed" + (f" ({_plural(warn, 'warning')})" if warn else "")
+
+
+def _html_health(validation_data, hb_data, applied_data=None, memory_mib=None,
+                 memory_high_mib=None):
+    """Health: one line when every check passed, else only the failing checks;
+    then one system line.
+
+    memory_mib is the run's own memory.json maxima (_memory_mib); memory_high_mib
+    defaults to the steward cgroup's MemoryHigh.
+    """
+    hb_data = hb_data or {}
+    out = []
+    if hb_data.get("phase_failed"):
+        out.append(_row(_dot("danger") + "Heartbeat failed: "
+                        + _esc(str(hb_data.get("error", "unknown error"))), COLOR["danger"]))
+    checks = _checks(validation_data)
+    flagged = [c for c in checks if str(c.get("status") or "ok") not in _CHECK_OK]
+    if checks and not flagged:
+        out.append(_row(_dot("ok") + f"All {len(checks)} checks passed"))
+    elif flagged:
+        rows = []
+        for c in flagged:
+            failing = _check_failing(c)
+            chip = _chip("FAIL", COLOR["danger"]) if failing else _chip("WARN", COLOR["warn"])
+            detail = "cloud fallback" if c.get("fallback_active") else \
+                _clip(c.get("error") or c.get("reason") or "", 200)
+            rows.append((_esc(_check_label(c)), f"{chip} {_esc(detail)}".strip()))
+        out.append(_kv_rows(rows))
+        others = len(checks) - len(flagged)
+        if others:
+            out.append(_row(f"{_plural(others, 'other check')} OK", COLOR["muted"], "4px 0 6px"))
+
+    # System line (heartbeat runs after a mid-run ThinkPad reboot, so the run's own
+    # reboot record says whether one happened tonight)
+    parts = []
+    disk = hb_data.get("disk", {}) or {}
+    if disk.get("df_root"):
+        cols = disk["df_root"].splitlines()[-1].split()
+        if len(cols) >= 5:
+            parts.append(f"Disk {_esc(cols[4])} used ({_esc(cols[2])}/{_esc(cols[1])})")
+    mem_avail = (hb_data.get("memory", {}) or {}).get("available", "")
+    if mem_avail:
+        parts.append(f"Memory {_esc(str(mem_avail))} free")
+    backup = (hb_data.get("backup", {}) or {}).get("last_run", "")
+    if backup:
+        parts.append(f"Backup {_esc(str(backup))}")
+    rb = hb_data.get("reboot", {}) or {}
+    host_reboot = (applied_data or {}).get("host_reboot")
+    if rb.get("needed"):
+        parts.append("Reboot: " + _dot("danger") + _esc(f'Needed — kernel {rb.get("kernel", "?")}'))
+    elif host_reboot and host_reboot.get("rebooted"):
+        parts.append("Reboot: " + _dot("ok") + _esc(
+            f'Rebooted {host_reboot["time"]} UTC — kernel {host_reboot["kernel_after"]}'))
+    elif host_reboot:
+        parts.append("Reboot: " + _dot("warn") + _esc(
+            f'Requested {host_reboot["time"]} UTC — host did not restart'))
+    else:
+        parts.append("Reboot: Not needed")
+    note = _steward_memory_note(
+        memory_mib,
+        memory_high_mib if memory_high_mib is not None else _steward_memory_high_mib(),
+    ) if memory_mib else None
+    if note:
+        text, warn = note
+        if warn:
+            parts.append("Steward memory: " + _dot("warn") + _esc(text))
+        else:
+            parts.append(f"Steward peak {memory_mib['max_anon_mib']} MiB")
+    out.append(_row(" · ".join(parts), COLOR["muted"], "6px 0 4px"))
+
+    extra = []
+    units = hb_data.get("failed_units", {}) or {}
+    failed_units = [str(u).strip() for u in (units.get("user") or []) + (units.get("system") or [])
+                    if u and str(u).strip()]
+    missing = (hb_data.get("units", {}) or {}).get("missing", [])
+    if failed_units or missing:
+        cells = [_dot("danger") + _esc(u) for u in failed_units]
+        if missing:
+            cells.append(_dot("warn") + "missing: " + _esc(", ".join(map(str, missing))))
+        extra.append(("Systemd units", " ".join(cells)))
+    dns = hb_data.get("dns", {}) or {}
+    if dns:
+        ok = sum(1 for v in dns.values() if v.get("resolves"))
+        if ok != len(dns):
+            extra.append(("DNS", _dot("warn") + f"{ok}/{len(dns)} hostnames resolve"))
+    tls = hb_data.get("tls_certs", {}) or {}
+    expiring = []
+    for host, expiry in tls.items():
+        match = re.search(r"notAfter=(.+?\d{4})\s", expiry)
+        if match:
+            try:
+                days_left = (datetime.strptime(match.group(1), "%b %d %H:%M:%S %Y %Z")
+                             - datetime.now()).days
+            except ValueError:
+                continue
+            if days_left <= 30:
+                expiring.append(f'{host.split(".")[0]} ({days_left}d)')
+    if expiring:
+        extra.append(("TLS expiring", _dot("warn") + _esc(", ".join(expiring))))
+    if (hb_data.get("llm_stack", {}) or {}).get("falling_back", False):
+        extra.append(("LLM proxy", _dot("warn") + "Cloud fallback"))
+    for app, result in (hb_data.get("bundle_audit", {}) or {}).items():
+        if "no vulnerabilities" not in str(result):
+            extra.append((f"bundle-audit ({_esc(app)})", _dot("warn") + _esc(_clip(str(result), 400))))
+    if extra:
+        out.append(_kv_rows(extra))
+    return "".join(out)
+
+
+# ── audit ────────────────────────────────────────────────────────────
 
 def _audit_incomplete_summary(payload):
     """Deterministic wording for steward automation failures."""
-    label = payload["name"].replace("_", " ")
+    label = _section_name(payload["name"])
     verdict = payload.get("verdict", "")
     raw_error = str(payload.get("error") or "").strip()
     short_error = raw_error.split("\n", 1)[0][:180] or verdict
@@ -1415,14 +1581,13 @@ def _audit_incomplete_summary(payload):
         stage = "its evidence collector failed"
     return (
         f"The {label} audit was incomplete because {stage} ({short_error}). "
-        f"No underlying {label} problem was established; the steward will retry automatically "
-        "on the next run."
+        f"No underlying problem was established; it runs again next night."
     )
 
 
 def _audit_unverifiable_summary(payload):
     """Deterministic wording for UNVERIFIABLE sections; zero confirmed findings is not a pass."""
-    label = payload["name"].replace("_", " ")
+    label = _section_name(payload["name"])
     rejected = payload.get("rejected") or []
     count = len(rejected) or payload.get("n_worker_findings") or 0
     items = []
@@ -1449,183 +1614,326 @@ def _audit_unverifiable_summary(payload):
     )
 
 
-def _audit_section_deterministic(verdict):
-    """Sections whose wording must not come from the summary model."""
+def _audit_incomplete(verdict):
     base = str(verdict or "").removeprefix("cached-")
     return str(verdict or "").endswith("-failed") or base == "UNVERIFIABLE"
 
 
+_AUDIT_OUTCOMES = (  # route class -> (chip, colour), most important first
+    ("needs", "Needs you", COLOR["danger"]),
+    ("watch", "Watching", COLOR["info"]),
+    ("progress", "In progress", COLOR["info"]),
+    ("done", "Fixed", COLOR["ok"]),
+    ("noop", "Already fixed", COLOR["ok"]),
+)
 
-def _summarize_audit_sections(section_payloads):
-    """One LLM call → {section_name: summary_text}. Falls back per-section."""
-    if not section_payloads:
-        return {}
 
-    compact = []
-    for p in section_payloads:
-        rows = p.get("routes") or []
-        compact.append({
-            "name": p["name"],
-            "findings": [
-                {
-                    "finding": _clip(r.get("claim"), 240),
-                    "severity": r.get("severity"),
-                    "outcome": _route_outcome_text(r),
-                }
-                for r in rows[:12]
-            ] or [{"finding": f} for f in p["findings"][:12]],
-        })
-
-    prompt = (
-        "You summarize Homelab Steward audit results for a nightly email.\n\n"
-        "For EACH section below, write 1-3 plain-English sentences a human can skim: what is "
-        "wrong and what happened to it, using each finding's outcome as given. Put "
-        "high-severity findings first.\n"
-        "An outcome starting 'needs Carter' is a real, confirmed problem that is still open. "
-        "Say plainly that it needs Carter. Never call it automation trouble or malformed, and "
-        "never say it will be retried.\n"
-        "No badge jargon (DRIFT/ATTENTION). No bullet lists. No filenames unless load-bearing.\n\n"
-        f"SECTIONS:\n{json.dumps(compact, indent=2)}\n\n"
-        "Return ONLY fenced JSON:\n"
-        '```json\n'
-        '{"summaries": {"section-name": "one to three sentences", "...": "..."}}\n'
-        "```"
-    )
-
-    try:
-        raw = _call_omp_p(prompt, model=STEWARD_MODEL, timeout=120, mode="json", tools=NO_TOOLS)
-        packet = _extract_json(raw, "audit-section-summaries")
-        summaries = packet.get("summaries") or {}
-        if not isinstance(summaries, dict):
-            raise ValueError("summaries not a dict")
-        # Normalize keys to bare section names
-        out = {}
-        for p in section_payloads:
-            name = p["name"]
-            text = summaries.get(name) or summaries.get(name.replace("_", " "))
-            if isinstance(text, str) and text.strip():
-                out[name] = text.strip()
-        if out:
-            return out
-    except Exception as e:
-        print(f"  audit section summary LLM failed: {e}")
-
-    return {
-        p["name"]: _route_section_summary(p.get("routes") or [], p["findings"])
-        for p in section_payloads
+def _audit_incomplete_text(sec):
+    """Deterministic wording for an incomplete (failed or UNVERIFIABLE) audit section."""
+    verdict = str(sec.get("verdict") or "")
+    payload = {
+        "name": sec.get("name") or "unknown", "verdict": verdict,
+        "rejected": [r for r in sec.get("judge_rejected") or [] if isinstance(r, dict)],
+        "n_worker_findings": len(sec.get("worker_findings") or []),
+        "error": (sec.get("error") or sec.get("worker_error") or sec.get("judge_error") or ""),
     }
+    return _humanize(_audit_incomplete_summary(payload) if verdict.endswith("-failed")
+                     else _audit_unverifiable_summary(payload))
+
+
+def _audit_section_outcome(sec, rows):
+    """(chip, colour, text) for one non-PASS audit section.
+
+    Routed findings are already shown above (Needs You, What changed, Watching) or
+    were already fixed, so their section gets a chip only; a short claim appears
+    only for confirmed findings that were never routed.
+    """
+    if _audit_incomplete(sec.get("verdict")):
+        return "Incomplete", COLOR["warn"], _audit_incomplete_text(sec)
+    classes = {_route_class(r) for r in rows}
+    for kind, chip, color in _AUDIT_OUTCOMES:
+        if kind in classes:
+            return chip, color, ""
+    claims = [f.get("claim") for f in sec.get("judge_confirmed") or [] if isinstance(f, dict)]
+    return "Noted", COLOR["muted"], (_clip(_humanize(claims[0]), 120) if claims
+                                     else "Findings reviewed; nothing to change.")
 
 
 def _html_audit(audit_data, fixes_data=None):
-    """Render audit sections: model-written summaries plus route-outcome badges."""
-    sections = audit_data.get("sections", []) or []
+    """One line when every section passed; otherwise a compact line per non-PASS section."""
+    sections = (audit_data or {}).get("sections", []) or []
     if not sections:
-        return '<p style="margin:0; color:#9aa0b2; font-size:13px;">No audit results.</p>'
-
+        return _row("No audit results.", COLOR["muted"])
     routes_by_section = {}
     for row in _route_rows(audit_data, fixes_data):
         routes_by_section.setdefault(row.get("section"), []).append(row)
-
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    payloads = []
-    for sec in sections:
-        verdict = sec.get("verdict", "UNKNOWN")
-        if verdict in ("PASS", "cached-PASS"):
-            continue
-        name = sec.get("name", "unknown") or "unknown"
-        payloads.append({
-            "name": name,
-            "verdict": verdict,
-            "findings": _section_findings_text(sec, date_str),
-            "routes": routes_by_section.get(name, []),
-            "rejected": [r for r in sec.get("judge_rejected") or [] if isinstance(r, dict)],
-            "n_worker_findings": len(sec.get("worker_findings") or []),
-            "error": (
-                sec.get("error")
-                or sec.get("worker_error")
-                or sec.get("judge_error")
-                or ""
-            ).strip(),
-        })
-
-    if not payloads:
-        return '<p style="margin:0; color:#888; font-size:13px;">All audit sections clear.</p>'
-
-    summaries = _summarize_audit_sections([
-        p for p in payloads if not _audit_section_deterministic(p["verdict"])
-    ])
-
+    open_sections = [s for s in sections if s.get("verdict") not in ("PASS", "cached-PASS")]
+    if not open_sections:
+        return _row(_dot("ok") + f"All {len(sections)} audit sections passed")
     out = []
-    for p in payloads:
-        name = p["name"]
-        display = name.replace("_", " ")
-        chip = _section_route_chip(p["verdict"], p["routes"])
+    for sec in open_sections:
+        chip, color, text = _audit_section_outcome(
+            sec, routes_by_section.get(sec.get("name"), []))
+        detail = (f'<tr><td colspan="2" style="padding:0 0 2px; color:{COLOR["text"]}; '
+                  f'font-size:13px; line-height:1.45;">{_esc(text)}</td></tr>' if text else "")
         out.append(
             '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-            'style="font-size:13px; border-collapse:collapse; margin:0 0 12px;">'
-            f'<tr><td style="padding:3px 0; color:#1a1a2e; font-weight:700;">{html.escape(display)}</td>'
-            f'<td align="right" style="padding:3px 0; white-space:nowrap;">{chip}</td></tr>'
+            'style="font-size:13px; border-collapse:collapse; margin:0 0 6px;">'
+            f'<tr><td style="padding:2px 0; color:{COLOR["ink"]}; font-weight:700;">'
+            f'{_esc(_section_name(sec.get("name")))}</td>'
+            f'<td align="right" style="padding:2px 0; white-space:nowrap;">{_chip(chip, color)}</td></tr>'
+            f'{detail}</table>'
         )
-        if p["verdict"].endswith("-failed"):
-            summary = _audit_incomplete_summary(p)
-        elif _audit_section_deterministic(p["verdict"]):
-            summary = _audit_unverifiable_summary(p)
-        else:
-            summary = summaries.get(name) or _route_section_summary(p["routes"], p["findings"])
-        out.append(
-            f'<tr><td colspan="2" style="padding:4px 4px 2px 0; color:#3a3a4a; '
-            f'font-size:12px; line-height:1.45;">{html.escape(summary)}</td></tr>'
-        )
-        out.append('</table>')
-
+    passed = len(sections) - len(open_sections)
+    if passed:
+        out.append(_row(f"{_plural(passed, 'other section')} passed", COLOR["muted"]))
     return "".join(out)
 
 
+def _audit_incomplete_sections(audit):
+    return [sec for sec in (audit or {}).get("sections", []) or []
+            if _audit_incomplete(sec.get("verdict"))]
+
+
+def _audit_incomplete_events(audit):
+    return [_item("watch", f"Audit incomplete — {_audit_incomplete_text(sec)}")
+            for sec in _audit_incomplete_sections(audit)]
+
+
+# ── triage ───────────────────────────────────────────────────────────
+
+def _triage(applied, audit, fixes, *, steward_code=None, validation=None, heartbeat=None,
+            troubleshoot=None, remediation=None, untracked_dotfiles=None, prev_dotfiles=None,
+            public=None, p0b=None, rig_last_ok=None):
+    """Every report item, triaged once.
+
+    Needs You is only for extreme items: a service still failing (P3 could not
+    fix it, heartbeat failed, a check failing at report time); an unverified
+    rollback, Docker daemon failure, unrepairable OMP DB or a rig unhealthy
+    after reboot; a steward-code pickup left unverified or a partly applied
+    follow-up fix; a high-severity or security audit finding left for Carter;
+    or the whole maintenance phase failing. Everything else still open is
+    Watching. Changes are deduplicated and numbered for the undo appendix.
+    """
+    items = (
+        _health_events(validation, heartbeat, troubleshoot)
+        + _p1_events(applied, rig_last_ok)
+        + _route_events(audit, fixes)
+        + _steward_code_events(steward_code)
+        + _public_mirror_events(public)
+        + _host_drift_events(remediation, untracked_dotfiles, prev_dotfiles)
+        + _session_memory_events(p0b)
+        + _audit_incomplete_events(audit)
+    )
+    seen = set()
+    needs, watching, changes = [], [], []
+    for item in items:
+        key = (item["kind"], item["group"], item["text"], item["command"])
+        if key in seen:
+            continue
+        seen.add(key)
+        if item["kind"] == "needs":
+            needs.append(item)
+        elif item["kind"] == "watch":
+            watching.append(item)
+        else:
+            changes.append(item)
+    needs.sort(key=lambda i: not i["problem"])
+    changes.sort(key=lambda i: _CHANGE_GROUPS.index(i["group"]))
+    undo = []
+    for item in changes:
+        if item["undo"]:
+            undo.append(item)
+            item["ref"] = len(undo)
+    triaged = {
+        "needs": needs, "watching": watching, "changes": changes, "undo": undo,
+        "health": _health_glance(validation, heartbeat),
+        "audit_incomplete": [_section_name(s.get("name")) for s in _audit_incomplete_sections(audit)],
+        "public_published": _public_mirror_count(public),
+    }
+    triaged["verdict"] = _verdict(triaged)
+    return triaged
+
+
+def _change_counts(changes):
+    """(total, 'x updates, y deploys, z fixes') over real changes (no housekeeping)."""
+    real = [c for c in changes if c["kind"] == "change" and c["group"] != "Housekeeping"]
+    counts = {}
+    for c in real:
+        word = {"Deploys": "deploy", "Fixes by the steward": "fix"}.get(c["group"], "update")
+        counts[word] = counts.get(word, 0) + 1
+    words = {"update": ("update", "updates"), "deploy": ("deploy", "deploys"),
+             "fix": ("fix", "fixes")}
+    text = ", ".join(_plural(counts[w], *words[w]) for w in ("update", "deploy", "fix") if w in counts)
+    return len(real), text
+
+
+def _verdict(triaged):
+    """(level, text): level ok | needs | problem."""
+    needs = triaged["needs"]
+    problems = [i["problem"] for i in needs if i["problem"]]
+    if problems:
+        more = f" (+{len(needs) - 1} more)" if len(needs) > 1 else ""
+        return "problem", f"Problem: {problems[0]}{more}"
+    if needs:
+        return "needs", f"Needs you ({len(needs)})"
+    return "ok", "All good"
+
+
+def _subject(date_str, triaged):
+    total, _ = _change_counts(triaged["changes"])
+    return (f"Homelab Steward {date_str} — {triaged['verdict'][1]}"
+            + (f" · {_plural(total, 'change')}" if total else ""))
+
+
+# ── email blocks ─────────────────────────────────────────────────────
+
+def _html_banner(triaged):
+    level, verdict = triaged["verdict"]
+    color = COLOR["ok"] if level == "ok" else COLOR["danger"]
+    headline = {"ok": "All good — nothing needs you",
+                "needs": f"Needs you: {len(triaged['needs'])}"}.get(level, verdict)
+    total, breakdown = _change_counts(triaged["changes"])
+    changes = (f"{_plural(total, 'change')} tonight: {breakdown}" if total
+               else "No changes tonight")
+    needs = (f"{_plural(len(triaged['needs']), 'item')} below" if triaged["needs"] else "Nothing")
+    glance = "".join(
+        f'<tr><td width="22%" style="padding:2px 10px 2px 0; color:{COLOR["muted"]}; '
+        f'font-size:13px; vertical-align:top;">{label}</td>'
+        f'<td style="padding:2px 0; color:{COLOR["text"]}; font-size:13px;">{_esc(value)}</td></tr>'
+        for label, value in (("Health", triaged["health"]), ("Changes", changes),
+                             ("Needs you", needs))
+    )
+    return (
+        '<tr><td style="padding:22px 32px 4px;">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="background-color:{color}1f; border-left:4px solid {color}; border-radius:6px;">'
+        '<tr><td style="padding:12px 16px;">'
+        f'<p style="margin:0 0 6px; color:{color}; font-size:16px; font-weight:700;">'
+        f'{_esc(headline)}</p>'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="border-collapse:collapse;">{glance}</table>'
+        '</td></tr></table></td></tr>'
+    )
+
+
+def _html_needs_you(needs):
+    if not needs:
+        return ""
+    rows = []
+    for item in needs:
+        parts = [f'<strong>{_esc(item["text"])}</strong>']
+        if item["why"]:
+            parts.append(_esc(item["why"]))
+        todo = _esc(item["todo"]) + (f" {_code(item['command'])}" if item["command"] else "")
+        if todo:
+            parts.append(f'<strong>What to do:</strong> {todo}')
+        rows.append(_row("<br>".join(parts), margin="0 0 10px"))
+    return _section("Needs you", COLOR["danger"], "".join(rows))
+
+
+def _html_changes(changes):
+    if not changes:
+        return ""
+    out = []
+    group = None
+    for item in changes:
+        if item["group"] != group:
+            group = item["group"]
+            if group != "Housekeeping":
+                out.append(_label(group))
+        ref = (f'<sup style="font-size:10px;"><a href="#undo-{item["ref"]}" '
+               f'style="color:{COLOR["muted"]}; text-decoration:none;">[{item["ref"]}]</a></sup>'
+               if item.get("ref") else "")
+        color = {"rollback": COLOR["warn"], "chore": COLOR["muted"]}.get(item["kind"])
+        out.append(_row(_esc(item["text"]) + ref, color, "0 0 4px"))
+    return _section("What changed tonight", COLOR["ok"], "".join(out))
+
+
+def _html_watching(watching):
+    if not watching:
+        return ""
+    rows = [
+        _row(_esc(item["text"]) + (f"<br>{_code(item['command'])}" if item["command"] else ""),
+             margin="0 0 6px")
+        for item in watching
+    ]
+    return _section("Watching — no action needed", COLOR["info"], "".join(rows))
+
+
+def _html_troubleshoot(troubleshoot):
+    """P3 regression diagnosis (only when it triggered)."""
+    if not (troubleshoot or {}).get("triggered"):
+        return ""
+    if troubleshoot.get("re_validation_healthy"):
+        chip, color = "Recovered", COLOR["ok"]
+    elif troubleshoot.get("agent_status") == "diagnosed":
+        chip, color = "Needs you", COLOR["danger"]
+    else:
+        chip, color = "Undiagnosed", COLOR["danger"]
+    body = [_row(f'{_chip(chip, color)} <strong>Likely cause:</strong> '
+                 f'{_esc(str(troubleshoot.get("diagnosis") or "unknown"))}')]
+    steps = [str(s) for s in troubleshoot.get("next_steps") or []]
+    if steps:
+        body.append(_label("Suggested next steps"))
+        body.extend(_row(f"{n}. {_esc(s)}", margin="0 0 4px") for n, s in enumerate(steps, 1))
+    fixes = [r for r in troubleshoot.get("fix_actions") or [] if isinstance(r, dict)]
+    if fixes:
+        body.append(_label("Automatic repair attempts"))
+    for r in fixes:
+        endpoint = _esc(str(r.get("endpoint", "?")))
+        conf = r.get("confidence")
+        conf_text = f"confidence {conf:.2f}" if isinstance(conf, (int, float)) else "no answer"
+        if r.get("executed"):
+            text = (f"<strong>{endpoint}</strong>: ran {_esc(str(r.get('choice')))} "
+                    f"({conf_text}, exit {_esc(str(r.get('exit_code')))}) → "
+                    f"{_esc(str(r.get('outcome', 'not re-validated')))}")
+        else:
+            choice = f"chose {_esc(str(r.get('choice')))}, " if r.get("choice") else ""
+            text = (f"<strong>{endpoint}</strong>: no action ({choice}{conf_text}; "
+                    f"{_esc(str(r.get('reason', '')))})")
+        body.append(_row(text, margin="0 0 4px"))
+    return _section("Regression diagnosis", color, "".join(body))
+
+
 def _html_queue(queue_data):
-    """Render work queue as grouped tables."""
+    """Work queue: ideas, plans, status reconciles, inconsistencies ("" when all are empty)."""
+    queue_data = queue_data or {}
     ideas = queue_data.get("ideas", {}) or {}
     plans = queue_data.get("plans", {}) or {}
     inconsistencies = queue_data.get("inconsistencies", []) or []
     reconcile = queue_data.get("status_reconcile", {}) or {}
     out = []
 
-    # Ideas
     outstanding = ideas.get("outstanding", [])
     if outstanding:
-        out.append(_sub_header(f'Ideas outstanding ({len(outstanding)})'))
-        idea_rows = []
-        for idea in outstanding[:10]:
-            age = idea.get("age_days", "?")
-            heading = idea.get("heading", "") or idea.get("file", "")
-            idea_rows.append((f'{age}d', heading))
-        out.append(_kv_rows(idea_rows))
-    else:
-        out.append('<p style="margin:0; color:#9aa0b2; font-size:13px;">No open ideas.</p>')
+        out.append(_label(f"Ideas outstanding ({len(outstanding)})"))
+        out.append(_kv_rows([
+            (f'{idea.get("age_days", "?")}d',
+             _esc(str(idea.get("heading", "") or idea.get("file", ""))))
+            for idea in outstanding[:10]
+        ]))
 
-    # Plans
     plan_groups = [
-        ("Draft", plans.get("draft", []), "#1565c0"),
-        ("Approved", plans.get("approved", []), "#2e7d32"),
-        ("Implementing", plans.get("implementing", []), "#e65100"),
-        ("Done this week", plans.get("done_this_week", []), "#9aa0b2"),
+        ("Draft", plans.get("draft", []), COLOR["info"]),
+        ("Approved", plans.get("approved", []), COLOR["ok"]),
+        ("Implementing", plans.get("implementing", []), COLOR["warn"]),
+        ("Done this week", plans.get("done_this_week", []), COLOR["faint"]),
     ]
-    non_empty = [(label, items, color) for label, items, color in plan_groups if items]
-    if non_empty:
-        plan_rows = []
-        for label, items, color in non_empty:
-            for item in items[:5]:
-                detail = item.get("heading", item.get("file", "")) or ""
-                plan_rows.append((_chip(label, color), detail))
-        out.append(_sub_header("Plans"))
+    plan_rows = [
+        (_chip(label, color), _esc(str(item.get("heading", item.get("file", "")) or "")))
+        for label, items, color in plan_groups for item in items[:5]
+    ]
+    if plan_rows:
+        out.append(_label("Plans"))
         out.append(_kv_rows(plan_rows))
 
-    # Status reconciles applied this run
     applied = [
         a for a in (reconcile.get("applied") or [])
         if a.get("status") in ("updated", "dry_run")
     ]
     if applied:
-        out.append(_sub_header(f'Status updates ({len(applied)})'))
+        out.append(_label(f"Status updates ({len(applied)})"))
         rows = []
         for a in applied[:8]:
             label = a.get("new_status") or a.get("would_set") or a.get("status")
@@ -1633,559 +1941,167 @@ def _html_queue(queue_data):
             reason = a.get("reason") or ""
             if reason:
                 detail = f"{detail} — {reason[:100]}"
-            rows.append((_chip(str(label), "#2e7d32"), detail))
+            rows.append((_chip(_esc(str(label)), COLOR["ok"]), _esc(detail)))
         out.append(_kv_rows(rows))
 
-    # Inconsistencies
     if inconsistencies:
-        out.append(_sub_header("Inconsistencies"))
-        inc_rows = []
-        for inc in inconsistencies:
-            inc_rows.append((inc["type"], inc["detail"][:200]))
-        out.append(_kv_rows(inc_rows))
+        out.append(_label("Inconsistencies"))
+        out.append(_kv_rows([(_esc(str(inc["type"])), _esc(str(inc["detail"])[:200]))
+                             for inc in inconsistencies]))
+    return "".join(out)
 
-    return "".join(out) if out else \
-        '<p style="margin:0; color:#9aa0b2; font-size:13px;">Queue empty.</p>'
+
+def _usage_fresh(usage_data):
+    return any(a.get("usage_fresh") for a in (usage_data or {}).get("accounts", []) or [])
 
 
 def _html_usage(usage_data):
-    """Render OpenCode Go usage report with higher contrast bars.
+    """OpenCode Go usage bars for accounts with fresh usage ("" when none is fresh).
 
     Windows match opencode-go-proxy / ocusage: rolling is 5h (not 24h).
     Each row shows reset_in when the proxy provides it.
     """
-    accounts = usage_data.get("accounts", []) or []
     out = []
-    for acct in accounts:
-        name = acct.get("name", "?")
-        tier = acct.get("tier", "?")
-        extra_parts = [tier]
+    for acct in (usage_data or {}).get("accounts", []) or []:
         if not acct.get("usage_fresh"):
-            extra_parts.append("usage API stale")
-        extra = " · ".join(extra_parts)
+            continue
         out.append(
             f'<p style="margin:0 0 3px; font-size:13px;">'
-            f'<strong style="color:#1a1a2e;">{html.escape(str(name))}</strong> '
-            f'<span style="color:#9aa0b2; font-size:12px;">{html.escape(extra)}</span></p>'
+            f'<strong style="color:{COLOR["ink"]};">{_esc(str(acct.get("name", "?")))}</strong> '
+            f'<span style="color:{COLOR["muted"]}; font-size:13px;">{_esc(str(acct.get("tier", "?")))}</span></p>'
         )
         rows = (
             '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-            'style="font-size:12px; border-collapse:collapse; margin-bottom:10px;">'
+            'style="font-size:13px; border-collapse:collapse; margin-bottom:10px;">'
         )
         for label, pct_key, reset_key, color in [
-            ("5h", "rolling_pct", "rolling_reset_in", "#1a1a2e"),
-            ("7d", "weekly_pct", "weekly_reset_in", "#0d47a1"),
-            ("30d", "monthly_pct", "monthly_reset_in", "#4a148c"),
+            ("5h", "rolling_pct", "rolling_reset_in", COLOR["ink"]),
+            ("7d", "weekly_pct", "weekly_reset_in", COLOR["week"]),
+            ("30d", "monthly_pct", "monthly_reset_in", COLOR["month"]),
         ]:
-            pct = acct.get(pct_key, 0)
             try:
-                pct = float(pct)
+                pct = float(acct.get(pct_key, 0))
             except (TypeError, ValueError):
                 pct = 0.0
-            fill_color = "#c62828" if pct >= 90 else color
+            fill_color = COLOR["danger"] if pct >= 90 else color
             reset_in = (acct.get(reset_key) or "").strip()
             pct_cell = f"{pct:.0f}%"
             if reset_in:
                 pct_cell += (
-                    f' <span style="color:#9aa0b2; font-weight:400; font-size:11px;">'
-                    f'· reset {html.escape(reset_in)}</span>'
+                    f' <span style="color:{COLOR["muted"]}; font-weight:400; font-size:12px;">'
+                    f'· reset {_esc(reset_in)}</span>'
                 )
             rows += (
                 '<tr>'
-                f'<td width="18%" style="padding:3px 0; color:#7b7b8a; font-size:12px; '
+                f'<td width="18%" style="padding:3px 0; color:{COLOR["muted"]}; '
                 f'vertical-align:middle;">{label}</td>'
                 f'<td width="42%" style="padding:3px 0; vertical-align:middle;">'
                 f'{_mini_bar(pct, fill_color)}</td>'
-                f'<td align="right" width="40%" style="padding:3px 0; color:#2a2a36; '
+                f'<td align="right" width="40%" style="padding:3px 0; color:{COLOR["text"]}; '
                 f'font-weight:600; vertical-align:middle; white-space:nowrap;">{pct_cell}</td>'
                 '</tr>'
             )
-        rows += '</table>'
-        out.append(rows)
-    if usage_data.get("proxy_error"):
-        out.append(
-            f'<p style="margin:6px 0 0; color:#c62828; font-size:12px;">'
-            f'{_dot("danger")}Proxy unreachable: '
-            f'{html.escape(str(usage_data["proxy_error"]))}</p>'
-        )
-    if not out:
-        out.append('<p style="margin:0; color:#9aa0b2; font-size:13px;">No usage data.</p>')
+        out.append(rows + '</table>')
     return "".join(out)
 
 
-def _tldr_collect_gamingrig_updates(step):
-    """Flatten nested gaming-rig changes/failures for the TLDR."""
-    updates = []
-    n_failed = 0
-    host = step.get("host") or RIG_SSH_ALIAS
-    emitted_failure = False
-    if step.get("status") == "skipped":
-        updates.append(
-            f"{host} skipped: {str(step.get('reason') or 'not attempted')[:140]}"
-        )
-        return updates, n_failed
-
-    for sub in step.get("substeps", []) or []:
-        name = sub.get("step", "")
-        status = sub.get("status", "")
-        if name == "apt_upgrade":
-            count = sub.get("upgraded_count", 0)
-            if count:
-                new = sub.get("installed_count", 0)
-                updates.append(f"{host} apt: {count} packages upgraded"
-                               + (f", {new} newly installed" if new else ""))
-            if status in _P1_FAILURE_STATUSES:
-                n_failed += 1
-                emitted_failure = True
-                updates.append(
-                    f"{host} apt {_p1_status_label(status).lower()}: "
-                    f"{str(sub.get('error') or '')[:120]}"
-                )
-        elif name == "herdr_update":
-            if status == "ok":
-                pre = str(sub.get("pre_version") or "")
-                post = str(sub.get("post_version") or "")
-                if pre and post and pre != post:
-                    updates.append(f"{host} herdr: {pre} -> {post}")
-            elif status in _P1_FAILURE_STATUSES:
-                n_failed += 1
-                emitted_failure = True
-                updates.append(
-                    f"{host} herdr {_p1_status_label(status).lower()}: "
-                    f"{str(sub.get('error') or '')[:120]}"
-                )
-        elif name == "omp_update":
-            if status == "ok":
-                pre = str(sub.get("pre_version") or "")
-                post = str(sub.get("post_version") or "")
-                if pre and post and pre != post:
-                    updates.append(f"{host} omp: {pre} -> {post}")
-            elif status == "reverted":
-                n_failed += 1
-                emitted_failure = True
-                updates.append(
-                    f"{host} omp update rolled back to "
-                    f"{sub.get('reverted_to') or '?'} (post-update check failed)"
-                )
-            elif status in _P1_FAILURE_STATUSES:
-                n_failed += 1
-                emitted_failure = True
-                updates.append(
-                    f"{host} omp {_p1_status_label(status).lower()}: "
-                    f"{str(sub.get('error') or '')[:120]}"
-                )
-        elif name in ("health", "post_reboot_health"):
-            check_failures = []
-            for check in sub.get("checks", []) or []:
-                check_status = check.get("status", "")
-                if check_status in (_P1_FAILURE_STATUSES | {"warning"}):
-                    if check_status in _P1_FAILURE_STATUSES:
-                        n_failed += 1
-                        emitted_failure = True
-                    detail = check.get("error") or check.get("reason") or check_status
-                    check_failures.append(
-                        f"{host} {check.get('step') or 'health'} "
-                        f"{check_status}: {str(detail)[:120]}"
-                    )
-            if name == "post_reboot_health" and status in _P1_FAILURE_STATUSES:
-                if check_failures:
-                    updates.append(
-                        f"{host} post_reboot_health "
-                        f"{_p1_status_label(status).lower()}: "
-                        f"{str(sub.get('error') or 'health gate failed')[:120]}"
-                    )
-                else:
-                    n_failed += 1
-                    emitted_failure = True
-                    updates.append(
-                        f"{host} post_reboot_health "
-                        f"{_p1_status_label(status).lower()}: "
-                        f"{str(sub.get('error') or '')[:120]}"
-                    )
-            updates.extend(check_failures)
-            if (
-                status in _P1_FAILURE_STATUSES
-                and not (sub.get("checks") or [])
-                and name != "post_reboot_health"
-            ):
-                n_failed += 1
-                emitted_failure = True
-                updates.append(
-                    f"{host} health {_p1_status_label(status).lower()}: "
-                    f"{str(sub.get('error') or '')[:120]}"
-                )
-        elif name in (
-            "reboot_required", "pre_reboot_boot_id", "bootnext",
-            "reboot", "ssh_return",
-        ) and status in _P1_FAILURE_STATUSES:
-            n_failed += 1
-            updates.append(
-                f"{host} {name} {_p1_status_label(status).lower()}: "
-                f"{str(sub.get('error') or sub.get('reason') or status)[:120]}"
-            )
-        elif name == "boot_gpu_ready" and status == "warning":
-            updates.append(f"{host} {str(sub.get('reason') or 'reboot deferred')[:160]}")
-        elif name == "reboot" and status == "ok":
-            if step.get("rebooted") and step.get("post_reboot_health_passed"):
-                updates.append(f"{host} rebooted and Linux health was rechecked")
-            elif step.get("rebooted"):
-                updates.append(f"{host} rebooted; post-reboot health gate did not pass")
-            elif step.get("reboot_requested"):
-                updates.append(
-                    f"{host} reboot requested; Linux SSH return was not validated"
-                )
-
-    if step.get("status") in _P1_FAILURE_STATUSES and not emitted_failure:
-        n_failed += 1
-        updates.append(
-            f"{host} maintenance {_p1_status_label(step.get('status')).lower()}: "
-            f"{str(step.get('error') or '')[:120]}"
-        )
-    return updates, n_failed
-
-
-def _tldr_collect_gamingrig_failures(step):
-    """Return remote apply failures for TLDR health and Carter's action list."""
-    host = step.get("host") or RIG_SSH_ALIAS
-    failures = []
-    for sub in step.get("substeps", []) or []:
-        name = sub.get("step") or "maintenance"
-        status = sub.get("status", "")
-        if name in ("health", "post_reboot_health"):
-            checks = sub.get("checks") or []
-            check_failures = [
-                check for check in checks
-                if check.get("status") in _P1_FAILURE_STATUSES
-            ]
-            for check in check_failures:
-                detail = check.get("error") or check.get("reason") or check.get("status")
-                failures.append(
-                    f"{host} {name}/{check.get('step') or 'check'}: {str(detail)[:180]}"
-                )
-            if status in _P1_FAILURE_STATUSES and not check_failures:
-                failures.append(
-                    f"{host} {name}: "
-                    f"{str(sub.get('error') or 'health gate failed')[:180]}"
-                )
-        elif status in (_P1_FAILURE_STATUSES | {"reverted"}):
-            failures.append(
-                f"{host} {name}: "
-                f"{str(sub.get('error') or sub.get('reason') or status)[:180]}"
-            )
-    if step.get("status") in _P1_FAILURE_STATUSES and not failures:
-        failures.append(
-            f"{host} maintenance: "
-            f"{str(step.get('error') or step.get('reason') or 'failed')[:180]}"
-        )
-    return failures
-
-
-def _tldr_collect_updates(applied):
-    """Real local changes plus actionable remote-maintenance signals."""
-    reboot = (applied or {}).get("host_reboot")
-    updates = [reboot["text"]] if reboot else []
-    n_failed = 0
-    for s in applied.get("steps", []) or []:
-        step = s.get("step", "")
-        if step in ("gamingrig_maintenance", "gamingrig_linux", "gamingrig"):
-            rig_updates, rig_failed = _tldr_collect_gamingrig_updates(s)
-            updates.extend(rig_updates)
-            n_failed += rig_failed
-            continue
-
-        status = s.get("status", "")
-        if step == "llama_cpp":
-            pre = s.get("pre_version")
-            post = s.get("post_version")
-            if status == "ok" and pre != post:
-                updates.append(f"llama.cpp: {pre or '?'} -> {post or '?'}")
-            elif status == "reverted":
-                n_failed += 1
-                updates.append(
-                    f"llama.cpp update rolled back to "
-                    f"{s.get('reverted_to') or '?'}"
-                )
-            elif status in _P1_FAILURE_STATUSES:
-                n_failed += 1
-                updates.append(
-                    f"llama.cpp failed: {str(s.get('error') or s.get('reason') or '')[:120]}"
-                )
-            continue
-
-        if status in _P1_FAILURE_STATUSES:
-            n_failed += 1
-            updates.append(
-                f"{step} {_p1_status_label(status).lower()}: "
-                f"{str(s.get('error') or s.get('reason') or '')[:80]}"
-            )
-            continue
-        if step == "apt_upgrade" and s.get("upgraded_count", 0) > 0:
-            updates.append(f"apt: {s['upgraded_count']} packages upgraded")
-        elif step.startswith("auto_") and status == "ok":
-            pre, post = s.get("pre_version", "?"), s.get("post_version", "?")
-            pkg = step.replace("auto_", "")
-            if pre != post:
-                updates.append(f"{pkg}: {pre} -> {post}")
-        elif step in ("openwebui_update", "openwebui"):
-            text, _ = _openwebui_update_text(s)
-            if text:
-                if status == "rolled_back":
-                    n_failed += 1
-                updates.append(text)
-        elif step == "app_deploy" and status in ("ok", "rolled_back"):
-            if status == "rolled_back":
-                n_failed += 1
-            updates.append(_app_deploy_text(s)[0])
-        elif step == "dependabot_merge":
-            updates.extend(
-                text for text, color in _dependabot_merge_lines(s) if color == "#2a2a36")
-        elif step == "omp_db_repair" and status in ("ok", "warning"):
-            updates.append(_omp_db_repair_text(s)[0])
-        elif step == "worker_omp_refresh" and status == "ok":
-            updates.append(
-                f"steward worker omp: {s.get('pre_version') or '?'} -> "
-                f"{s.get('post_version') or '?'}"
-            )
-        elif step == "freshrss" and status == "bumped":
-            updates.append(f"freshrss: {s.get('current_tag')} -> {s.get('latest_tag')}")
-        elif step == "herdr_update" and status == "ok":
-            pre = str(s.get("pre_version", "")).replace("herdr ", "")
-            post = str(s.get("post_version", "")).replace("herdr ", "")
-            if pre and post and pre != post:
-                updates.append(f"herdr: {pre} -> {post}")
-        elif step == "omp_update" and status == "ok":
-            pre = str(s.get("pre_version", "")).replace("omp/", "")
-            post = str(s.get("post_version", "")).replace("omp/", "")
-            if pre and post and pre != post:
-                updates.append(f"omp: {pre} -> {post}{_omp_stale_note(s)}")
-        elif step == "omp_update" and status == "skipped" and _omp_stale_note(s):
-            updates.append(f"omp{_omp_stale_note(s)}")
-        elif step == "omp_update" and status == "reverted":
-            updates.append(f"omp update rolled back to {s.get('reverted_to','?')} "
-                           f"(post-update check failed)")
-        elif step == "searxng" and status == "ok":
-            updates.append("searxng: pulled latest image")
-    apply_failures = _tldr_collect_apply_failures(applied)
-    if apply_failures:
-        updates.insert(0, apply_failures[0])
-        if n_failed == 0:
-            n_failed = len(apply_failures)
-    elif (applied or {}).get("phase_status") == "degraded":
-        updates.insert(
-            0,
-            f"P1 maintenance degraded: {_p1_failure_detail(applied)}",
-        )
-    return updates, n_failed
-
-def _tldr_collect_apply_failures(applied):
-    """Return one deterministic local maintenance failure for TLDR health."""
-    if _p1_phase_failed(applied):
-        return [f"P1 maintenance failed: {_p1_failure_detail(applied)}"]
-    failures = []
-    for step in (applied or {}).get("steps", []) or []:
-        if not isinstance(step, dict):
-            continue
-        name = step.get("step") or "maintenance"
-        if name in ("gamingrig_maintenance", "gamingrig_linux", "gamingrig"):
-            continue
-        status = str(step.get("status") or "").lower()
-        if status in _P1_FAILURE_STATUSES:
-            detail = step.get("error") or step.get("reason") or status
-            failures.append(f"{name} {_p1_status_label(status)}: {str(detail)[:180]}")
-    return failures
-
-def _tldr_collect_health(heartbeat, validation=None):
-    """End-state host issues (empty list = healthy)."""
-    issues = []
-    if heartbeat.get("phase_failed"):
-        issues.append(f"heartbeat failed: {str(heartbeat.get('error', ''))[:80]}")
-    rb = heartbeat.get("reboot", {}) or {}
-    if rb.get("needed"):
-        issues.append("reboot needed")
-    if (heartbeat.get("llm_stack", {}) or {}).get("falling_back", False):
-        issues.append("LLM on cloud fallback")
-    for c in (validation or {}).get("checks", []) or []:
-        if not isinstance(c, dict):
-            continue
-        st = str(c.get("status") or "ok")
-        if st in ("ok", "pass", "skipped", "dry-run"):
-            continue
-        name = c.get("name") or c.get("endpoint") or "check"
-        issues.append(f"{name}: {st}")
-    return issues
-
-
-def _tldr_audit_end_state(audit, fixes):
-    """Classify the audit end state per finding route (see steward.routing)."""
-    incomplete = []
-    for sec in (audit or {}).get("sections", []) or []:
-        name = sec.get("name") or "unknown"
-        verdict = str(sec.get("verdict") or "")
-        base = verdict.removeprefix("cached-")
-        if verdict.endswith("-failed") or base in ("collector-failed", "worker-failed"):
-            error = (
-                sec.get("error") or sec.get("worker_error") or sec.get("judge_error") or verdict
-            )
-            incomplete.append({
-                "section": name, "label": name.replace("_", " "), "note": str(error)[:180],
-            })
-        elif base == "UNVERIFIABLE":
-            incomplete.append({
-                "section": name, "label": name.replace("_", " "),
-                "note": "audit could not establish a conclusion",
-            })
-
-    rows = _route_rows(audit, fixes)
-    open_items = [
-        {**row, "manual": row.get("status") in ("needs_carter", "report_only")}
-        for row in rows if _route_needs_carter(row)
-    ]
-    in_progress = [r for r in rows if r.get("status") in _IN_PROGRESS_ROUTES]
-    done = [r for r in rows if r.get("status") == "done"]
-    notes = [r for r in rows if r.get("status") == "report_only" and not _route_needs_carter(r)]
-    open_sections = {r.get("section") for r in open_items + in_progress + notes}
-    cleared = []
-    for name in dict.fromkeys(r.get("section") for r in done):
-        if name not in open_sections:
-            cleared.append({
-                "section": name,
-                "label": str(name).replace("_", " "),
-                "fixed": sum(1 for r in done if r.get("section") == name),
-            })
-    return {
-        "open": open_items,
-        "in_progress": in_progress,
-        "done": done,
-        "notes": notes,
-        "cleared": cleared,
-        "incomplete": incomplete,
-    }
-
-
-def _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation=None, steward_code=None):
-    """Typed end-state facts for the TL;DR (model input and deterministic fallback)."""
-    updates, n_failed_apply = _tldr_collect_updates(applied)
-    apply_failures = _tldr_collect_apply_failures(applied)
-    rig_apply_failures = []
-    for step in applied.get("steps", []) or []:
-        if step.get("step") in ("gamingrig_maintenance", "gamingrig_linux", "gamingrig"):
-            rig_apply_failures.extend(_tldr_collect_gamingrig_failures(step))
-    health_issues = (
-        apply_failures
-        + rig_apply_failures
-        + _tldr_collect_health(heartbeat, validation)
+def _mini_bar(pct, color=COLOR["slate"]):
+    """Inline 0-100% horizontal bar, email-safe via nested table cells. Min fill 2% when pct>0."""
+    try:
+        w = max(0.0, min(100.0, float(pct)))
+    except (TypeError, ValueError):
+        w = 0.0
+    fill_w = max(w, 2.0) if w > 0 else 0.0
+    return (
+        '<table role="presentation" cellpadding="0" cellspacing="0" width="100%" '
+        'style="border-collapse:collapse;"><tr>'
+        f'<td width="{fill_w:.0f}%" style="background-color:{color}; height:5px; '
+        f'line-height:5px; font-size:0;">&nbsp;</td>'
+        f'<td width="{100-fill_w:.0f}%" style="background-color:{COLOR["track"]}; height:5px; '
+        f'line-height:5px; font-size:0;">&nbsp;</td>'
+        '</tr></table>'
     )
-    audit_state = _tldr_audit_end_state(audit, fixes)
 
-    plans = (queue or {}).get("plans", {}) or {}
-    carter_items = [
-        f"maintenance apply failure — {failure}" for failure in apply_failures
-    ] + [
-        f"gaming-rig apply failure — {failure}" for failure in rig_apply_failures
-    ]
-    for step in applied.get("steps", []) or []:
-        if step.get("status") == "rolled_back" and step.get("step") in (
-            "app_deploy", "openwebui_update",
-        ):
-            text = (
-                _app_deploy_text(step) if step.get("step") == "app_deploy"
-                else _openwebui_update_text(step)
-            )[0]
-            carter_items.append(f"update rolled back — {text}")
-        if step.get("step") == "omp_db_repair" and step.get("needs_carter"):
-            carter_items.append(_omp_db_repair_text(step)[0])
-        if step.get("step") == "dependabot_merge":
-            carter_items.extend(
-                f"major Dependabot bump — {pr.get('repo')}#{pr.get('number')}: "
-                f"{pr.get('title')} {pr.get('url') or ''}".strip()
-                for pr in step.get("needs_carter") or []
+
+def _html_footer(triaged, usage, run_dir, dry_run=False):
+    """Reference: numbered undo commands, mirror count, usage note, run dir."""
+    out = []
+    para = f'margin:0 0 6px; color:{COLOR["muted"]}; font-size:12px; line-height:1.5;'
+    if triaged["undo"]:
+        out.append(f'<p style="{para} font-weight:700; text-transform:uppercase; '
+                   'letter-spacing:0.8px;">Undo</p>')
+        for item in triaged["undo"]:
+            commands = "<br>".join(_code(u) for u in item["undo"])
+            out.append(
+                f'<p style="{para}"><a name="undo-{item["ref"]}" id="undo-{item["ref"]}"></a>'
+                f'[{item["ref"]}] {_esc(_clip(item["text"], 90))}<br>{commands}</p>'
             )
-    carter_items.extend(f"steward code — {text}" for text in _steward_code_needs(steward_code))
-    for item in plans.get("approved", []) or []:
-        carter_items.append(f"approved plan: {item.get('heading') or item.get('file') or '?'}")
-    for item in plans.get("implementing", []) or []:
-        age = item.get("age_days")
-        label = item.get("heading") or item.get("file") or "?"
-        if age is not None and age > 2:
-            carter_items.append(f"stale implementing plan ({age}d): {label}")
+    if triaged["public_published"]:
+        out.append(f'<p style="{para}">Public mirror: published '
+                   f'{_plural(triaged["public_published"], "changed file")}</p>')
+    if not _usage_fresh(usage):
+        why = "proxy unreachable" if (usage or {}).get("proxy_error") else "proxy dormant"
+        out.append(f'<p style="{para}">OpenCode Go usage unavailable ({why})</p>')
+    engine = "steward_runner.py (dry-run)" if dry_run else "steward_runner.py"
+    out.append(
+        f'<p style="margin:8px 0 0; color:{COLOR["muted"]}; font-size:11px; text-align:center;">'
+        f'carter2099.com · Generated {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")} · '
+        f'{engine} · run dir: {_esc(str(run_dir))}</p>'
+    )
+    return "".join(out)
 
-    needs_carter = list(carter_items) + [
-        f"{o['severity']} — {o['label']}: {_clip(o.get('claim'), 200)} "
-        f"({_route_outcome_text(o)})"
-        for o in audit_state["open"]
-    ]
 
+# ── TL;DR ────────────────────────────────────────────────────────────
+
+def _build_tldr_facts(triaged):
+    """Typed end-state facts for the TL;DR (model input and deterministic fallback)."""
     return {
-        "health_ok": not health_issues,
-        "health_issues": health_issues,
-        "apply_failures": apply_failures,
-        "rig_apply_failures": rig_apply_failures,
-        "updates": updates,
-        "n_failed_apply": n_failed_apply,
-        "carter_items": carter_items,
-        "audit_open": audit_state["open"],
-        "audit_in_progress": audit_state["in_progress"],
-        "audit_done": audit_state["done"],
-        "audit_notes": audit_state["notes"],
-        "audit_cleared": audit_state["cleared"],
-        "audit_incomplete": audit_state["incomplete"],
-        "n_sections_cleared": len(audit_state["cleared"]),
-        "n_sections_open": len({o["section"] for o in audit_state["open"]}),
-        "n_sections_incomplete": len(audit_state["incomplete"]),
-        "n_real_fixes": len(audit_state["done"]),
-        "ideas_outstanding": (queue or {}).get("ideas", {}).get("total_outstanding", 0) or 0,
-        "plans_approved": len(plans.get("approved") or []),
-        "needs_carter": needs_carter,
+        "action_needed": bool(triaged["needs"]),
+        "needs_you": [
+            {"id": f"n{index}", "what": item["text"], "why": item["why"], "todo": item["todo"]}
+            for index, item in enumerate(triaged["needs"], 1)
+        ],
+        "changes": [c["text"] for c in triaged["changes"] if c["kind"] != "chore"],
+        "watching": [w["text"] for w in triaged["watching"]],
+        "audit_incomplete": triaged["audit_incomplete"],
     }
 
 
 _TLDR_RETRY_WORDS = re.compile(
     r"(?i)\b(retr(?:y|ies|ied|ying)|try(?:ing)? again|automation trouble|malformed)\b"
 )
+# The banner already states the verdict, health and change counts.
+_TLDR_BANNER_RESTATEMENT = re.compile(
+    r"(?i)\ball good\b|\bnothing (?:else )?(?:needs|requires) (?:you|carter|him)\b"
+    r"|\bno action (?:is )?needed\b|\bneeds you\s*[:(]"
+    r"|\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"(?:changes?|updates?|deploys?|fixes|fix|items?)\b"
+)
+TLDR_MAX_WORDS = 60
+TLDR_MAX_SENTENCES = 3
 
 
 def _tldr_payload(facts, date_str):
-    """Model input: typed lists, most severe first, stable ids for open problems."""
-    problems = [
-        {
-            "id": f"p{index}",
-            "severity": row["severity"],
-            "area": row["label"],
-            "problem": _clip(row.get("claim"), 300),
-            "status": _route_outcome_text(row),
-        }
-        for index, row in enumerate(facts["audit_open"][:8], 1)
-    ]
+    """Model input: Needs You items with ids, the notable changes and Watching items."""
+    needs = facts["needs_you"][:6]
     payload = {
         "date": date_str,
-        "health_issues": facts["health_issues"][:6],
-        "problems_needing_carter": problems,
-        "more_problems_not_listed": max(0, len(facts["audit_open"]) - len(problems)),
-        "other_items_for_carter": facts["carter_items"][:6],
-        "fixes_in_progress": [
-            {"area": r["label"], "problem": _clip(r.get("claim"), 160),
-             "status": _route_outcome_text(r)}
-            for r in facts["audit_in_progress"][:4]
-        ],
-        "done_automatically": [
-            {"area": r["label"], "what": _route_outcome_text(r)}
-            for r in facts["audit_done"][:6]
-        ],
-        "low_priority_notes": [
-            {"area": r["label"], "note": _clip(r.get("claim"), 160)}
-            for r in facts["audit_notes"][:4]
-        ],
-        "audit_checks_incomplete": [
-            {"area": item["label"], "detail": _clip(item.get("note"), 120)}
-            for item in facts["audit_incomplete"][:4]
-        ],
-        "updates": facts["updates"][:6],
-        "plans_approved": facts["plans_approved"],
+        "needs_you": needs,
+        "more_needs_you_not_listed": max(0, len(facts["needs_you"]) - len(needs)),
+        "changes": facts["changes"][:8],
+        "watching": facts["watching"][:6],
+        "audit_incomplete": facts["audit_incomplete"][:4],
     }
-    return payload, problems
+    return payload, needs
 
 
-def _tldr_violations(packet, *, action_needed, high_ids, problem_ids, retry_allowed):
+def _tldr_has_news(facts):
+    """Whether anything beyond the banner's verdict, health and counts is worth a summary."""
+    return bool(facts["needs_you"] or facts["changes"] or facts["watching"]
+                or facts["audit_incomplete"])
+
+
+def _tldr_violations(packet, *, action_needed, lead_ids, need_ids, retry_allowed):
     """Structural contradictions between the model's summary and its facts."""
     if not isinstance(packet, dict):
         return ["the reply was not a JSON object"]
@@ -2195,27 +2111,31 @@ def _tldr_violations(packet, *, action_needed, high_ids, problem_ids, retry_allo
         violations.append("summary is missing or shorter than one sentence")
     if summary.startswith("{") and '"type"' in summary[:80]:
         violations.append("summary contains raw event-stream text")
+    if _TLDR_BANNER_RESTATEMENT.search(summary):
+        violations.append("summary restates the banner (verdict or counts); say what is "
+                          "notable instead")
+    if len(summary.split()) > TLDR_MAX_WORDS:
+        violations.append(f"summary must be at most {TLDR_MAX_WORDS} words")
+    if len(re.findall(r"[.!?](?:\s|$)", summary)) > TLDR_MAX_SENTENCES:
+        violations.append(f"summary must be at most {TLDR_MAX_SENTENCES} sentences")
     if packet.get("action_needed") is not action_needed:
         violations.append(
             f"action_needed must be {'true' if action_needed else 'false'} for these facts"
         )
     mentioned = {str(x) for x in packet.get("mentioned_ids") or [] if x}
-    unknown = sorted(mentioned - set(problem_ids))
+    unknown = sorted(mentioned - set(need_ids))
     if unknown:
         violations.append(
             "mentioned_ids names ids that are not in the facts: " + ", ".join(unknown)
         )
-    if high_ids:
-        if str(packet.get("lead_id") or "") not in high_ids:
+    if lead_ids:
+        if str(packet.get("lead_id") or "") not in lead_ids:
             violations.append(
-                "the summary must open with a high-severity problem ("
-                + ", ".join(high_ids) + ")"
+                "the summary must open with what needs Carter (" + ", ".join(lead_ids) + ")"
             )
-        missing = [i for i in high_ids if i not in mentioned]
+        missing = [i for i in lead_ids if i not in mentioned]
         if missing:
-            violations.append(
-                "every high-severity problem must be mentioned: " + ", ".join(missing)
-            )
+            violations.append("every listed needs_you item must be mentioned: " + ", ".join(missing))
     if not retry_allowed and _TLDR_RETRY_WORDS.search(summary):
         violations.append(
             "no audit check was incomplete tonight, so nothing may be described as retried, "
@@ -2227,47 +2147,46 @@ def _tldr_violations(packet, *, action_needed, high_ids, problem_ids, retry_allo
 def _tldr_prompt(date_str, payload, session_memory):
     return (
         f"You are the Homelab Steward writing the top-of-email summary for {date_str}.\n\n"
-        "FACTS (end state after tonight's run; every list is already sorted most severe "
-        f"first):\n{json.dumps(payload, indent=2)}\n\n"
+        f"FACTS (end state after tonight's run):\n{json.dumps(payload, indent=2)}\n\n"
         "Recent session memory (context only; never report it as tonight's news):\n"
         f"{session_memory}\n\n"
-        "Write 2-4 short plain-English sentences for Carter, under 90 words in total:\n"
-        "1. If health_issues, problems_needing_carter, or other_items_for_carter is "
-        "non-empty, open with the most severe of them: say plainly what is wrong and what it "
-        "affects. Name at most three problems, most severe first, and give the count of the "
-        "rest.\n"
-        "2. Every entry in problems_needing_carter is a real, confirmed problem that is still "
-        "open. Never describe one as automation trouble or malformed, and never say it will "
-        "be retried.\n"
-        "3. Only entries in audit_checks_incomplete are the steward's own automation "
-        "trouble; only those may be described as retried automatically.\n"
-        "4. Then, briefly, what changed tonight (updates, done_automatically, "
-        "fixes_in_progress). low_priority_notes go last, only if space allows.\n"
-        "5. If nothing needs Carter, say the host is in good shape, then what changed.\n"
-        "No bullet lists, markdown, badge words (DRIFT, ATTENTION), or artifact names.\n\n"
+        f"Write 1 to {TLDR_MAX_SENTENCES} short plain-English sentences for Carter, at most "
+        f"{TLDR_MAX_WORDS} words in total. A banner directly above already shows the verdict "
+        "(all good / needs you / problem), service health and the number of changes, so never "
+        "restate them: no \"all good\", no \"nothing needs you\", no counts of changes, updates "
+        "or watched items. Say what is most notable instead:\n"
+        "1. If needs_you is non-empty, open with what needs Carter and why (at most three "
+        "items, then how many more).\n"
+        "2. needs_you items are real open problems: never call one automation trouble or "
+        "malformed, and never say it will be retried. Only audit_incomplete entries are the "
+        "steward's own trouble and may be described as running again.\n"
+        "3. Then the change(s) that matter most (a notable version, a fix, a rollback) and, "
+        "if any, the watched item worth knowing about and why it is being watched. Skip "
+        "routine bumps; the email lists every change.\n"
+        "No bullet lists, markdown, step ids, badge words, or artifact names.\n\n"
         "Return ONLY a fenced JSON object:\n"
-        '```json\n{"action_needed": true, "lead_id": "p1", "mentioned_ids": ["p1"], '
-        '"summary": "two to four sentences"}\n```\n'
-        "action_needed is true when anything needs Carter. lead_id is the id of the problem "
-        "your first sentence is about (empty if it is not about a listed problem). "
-        "mentioned_ids lists every problem id your summary mentions."
+        '```json\n{"action_needed": false, "lead_id": "", "mentioned_ids": [], '
+        '"summary": "1-3 sentences"}\n```\n'
+        "action_needed is true exactly when needs_you is non-empty. lead_id is the id of the "
+        "needs_you item your first sentence is about (empty when needs_you is empty). "
+        "mentioned_ids lists every needs_you id your summary mentions."
     )
 
 
-def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str, session_memory="",
-                validation=None, steward_code=None):
+def _build_tldr(triaged, date_str, session_memory=""):
     """Model-written end-state TL;DR, checked against the facts it was given.
 
-    The model gets typed lists: problems for Carter, incomplete audits, and
-    changes. Its declared structure is validated; a contradiction gets one
-    corrected rewrite, then the deterministic summary. Returns HTML-safe text.
+    A contradiction gets one corrected rewrite, then the deterministic summary.
+    Returns HTML-safe text; "" when the banner already says everything.
     """
-    facts = _build_tldr_facts(applied, audit, queue, fixes, heartbeat, validation, steward_code)
-    payload, problems = _tldr_payload(facts, date_str)
+    facts = _build_tldr_facts(triaged)
+    if not _tldr_has_news(facts):
+        return ""
+    payload, needs = _tldr_payload(facts, date_str)
     rules = {
-        "action_needed": bool(problems or facts["carter_items"] or facts["health_issues"]),
-        "high_ids": [p["id"] for p in problems if p["severity"] == "high"][:3],
-        "problem_ids": [p["id"] for p in problems],
+        "action_needed": facts["action_needed"],
+        "lead_ids": [n["id"] for n in needs][:3],
+        "need_ids": [n["id"] for n in needs],
         "retry_allowed": bool(facts["audit_incomplete"]),
     }
     prompt = _tldr_prompt(date_str, payload, session_memory)
@@ -2305,305 +2224,72 @@ def _build_tldr(applied, audit, queue, fixes, heartbeat, date_str, session_memor
 
 
 def _tldr_deterministic(facts):
-    """Fallback summary: what needs Carter first (most severe first), then changes."""
+    """Fallback summary: only what the banner does not already say ("" if nothing)."""
     parts = []
-    if facts.get("health_issues"):
-        parts.append("Health issues: " + "; ".join(facts["health_issues"][:4]) + ".")
-    open_rows = facts.get("audit_open") or []
-    if open_rows:
-        top = open_rows[:3]
-        rest = len(open_rows) - len(top)
-        parts.append(
-            "Needs you: " + "; ".join(_clip(r.get("claim"), 160) for r in top)
-            + (f" (plus {rest} more)" if rest else "") + "."
-        )
-    other = [
-        item for item in facts.get("carter_items") or []
-        if not item.startswith(("maintenance apply failure", "gaming-rig apply failure"))
-    ]
-    if other:
-        parts.append("Also for you: " + "; ".join(other[:3]) + ".")
-    incomplete = [item["label"] for item in facts.get("audit_incomplete") or []]
-    changes = []
-    if facts.get("audit_in_progress"):
-        n = len(facts["audit_in_progress"])
-        changes.append(f"{n} fix{'es' if n != 1 else ''} in progress.")
-    if facts.get("audit_done"):
-        n = len(facts["audit_done"])
-        changes.append(f"{n} finding{'s' if n != 1 else ''} fixed automatically.")
-    if incomplete:
-        changes.append(
-            "Audit incomplete: " + ", ".join(incomplete[:3])
-            + "; the steward will retry automatically."
-        )
-    if facts.get("updates"):
-        changes.append("Updates: " + "; ".join(facts["updates"][:3]) + ".")
-    elif facts.get("n_failed_apply"):
-        changes.append(f"{facts['n_failed_apply']} update step(s) failed.")
-    if not parts and not changes:
-        return "Quiet night — host healthy, nothing needs you."
-    if not parts:
-        parts.append("Host healthy; nothing needs you.")
-    return " ".join(parts + changes)
+    needs = facts.get("needs_you") or []
+    if needs:
+        top = needs[:3]
+        rest = len(needs) - len(top)
+        parts.append("; ".join(_clip(n["what"], 120) for n in top)
+                     + (f" (plus {rest} more)" if rest else "") + ".")
+    if facts.get("audit_incomplete"):
+        parts.append("Audit incomplete for " + ", ".join(facts["audit_incomplete"][:3])
+                     + "; it runs again next night.")
+    return " ".join(parts)
 
 
-def _html_session_memory(p0b):
-    """P0b sessions whose memoir could not be written or updated (degraded phase only)."""
-    if not p0b or p0b.get("phase_status") != "degraded":
-        return ""
-    esc = html.escape
-    rows = [s for s in (p0b.get("sessions") or [])
-            if isinstance(s, dict) and s.get("action") in P0B_PROBLEM_ACTIONS]
-    items = [esc(str(p0b.get("reason") or "degraded"))[:400]]
-    items += [
-        f"{esc(str(s.get('action')))}: <code>{esc(Path(str(s.get('path') or '?')).name)}</code>"
-        f" ({esc(str(s.get('reason') or s.get('error') or ''))[:200]})"
-        for s in rows[:20]
-    ]
-    if len(rows) > 20:
-        items.append(f"+{len(rows) - 20} more")
-    li = "".join(f"<li>{item}</li>" for item in items)
-    return (
-        '<tr><td style="padding:16px 32px 8px;">'
-        '<h2 style="margin:0; color:#e65100; font-size:15px; font-weight:700;">'
-        'Session memory degraded (memoirs left unchanged)</h2></td></tr>'
-        '<tr><td style="padding:8px 32px 16px;">'
-        f'<ul style="margin:0; padding-left:20px; color:#555; font-size:12px;">{li}</ul>'
-        '</td></tr>'
+# ── P8: render + send ────────────────────────────────────────────────
+
+def _read_artifact(run_dir, name, default):
+    path = Path(run_dir) / name
+    return read_json(path) if path.exists() else default
+
+
+def _report_inputs(run_dir, setup_data):
+    """Load every artifact the report reads and triage it (shared by P8 and P9)."""
+    date_str = setup_data["date"]
+    applied = _read_artifact(run_dir, "01-applied.json", {"steps": []})
+    host_reboot = _host_reboot_status(run_dir)
+    if host_reboot:
+        applied["host_reboot"] = host_reboot
+    # P3 re-validates after its fix menu; that result is the report-time state.
+    validation = (_read_artifact(run_dir, "02b-validation.json", None)
+                  or _read_artifact(run_dir, "02-validation.json", {"checks": []}))
+    troubleshoot = _read_artifact(run_dir, "03-troubleshoot.json", {})
+    heartbeat = _read_artifact(run_dir, "04-heartbeat.json", {})
+    queue = _read_artifact(run_dir, "05-queue.json", {})
+    audit = _read_artifact(run_dir, "07-audit.json", {"sections": []})
+    fixes = _load_fixes_with_resolutions(run_dir)
+    try:
+        prev_date = prev_workday(datetime.strptime(date_str, "%Y-%m-%d")).strftime("%Y-%m-%d")
+        prev_dotfiles = _load_prev_artifact(run_dir, prev_date, "09b-dotfiles.json") or {}
+        # P9c runs after P8, so the email reports the previous run's mirror.
+        public = _load_prev_artifact(run_dir, prev_date, "09c-public-dotfiles.json") or {}
+    except ValueError:
+        prev_dotfiles, public = {}, {}
+    rig_skipped = any(isinstance(s, dict) and s.get("step") in _RIG_STEPS
+                      and s.get("status") == "skipped" for s in applied.get("steps") or [])
+    triaged = _triage(
+        applied, audit, fixes,
+        steward_code=setup_data.get("steward_code"),
+        validation=validation,
+        heartbeat=heartbeat,
+        troubleshoot=troubleshoot,
+        remediation=_read_artifact(run_dir, "03a-remediation.json", {}),
+        untracked_dotfiles=_dotfiles_untracked_paths(),
+        prev_dotfiles=prev_dotfiles,
+        public=public,
+        p0b=_read_artifact(run_dir, "00b-session-memory.json", {}),
+        rig_last_ok=_rig_last_maintained(run_dir, date_str) if rig_skipped else None,
     )
+    return {
+        "applied": applied, "validation": validation, "troubleshoot": troubleshoot,
+        "heartbeat": heartbeat, "queue": queue, "audit": audit, "fixes": fixes,
+        "triaged": triaged,
+    }
 
 
-def _html_public_dotfiles(public):
-    """Last P9c public dotfiles run: published and held paths with reasons."""
-    if not public:
-        return ""
-    esc = html.escape
-    status = str(public.get("status") or ("failed" if public.get("phase_failed") else "unknown"))
-    summary = (
-        f"Status <strong>{esc(status)}</strong> · {int(public.get('published_count') or 0)} files public"
-        f" in {esc(str(public.get('repo') or 'carter2099/dotfiles-homelab'))}"
-    )
-    if public.get("reason") or public.get("error"):
-        summary += f" — {esc(str(public.get('reason') or public.get('error')))[:400]}"
-    items = [summary]
-    groups = (
-        ("Published (new)", "added"),
-        ("Published (changed)", "updated"),
-        ("Removed from public", "removed"),
-        ("Held (not published; decide or fix)", "held"),
-        ("Blocked by Jev veto", "blocked"),
-    )
-    for label, key in groups:
-        rows = [r for r in (public.get(key) or []) if isinstance(r, dict)]
-        if not rows:
-            continue
-        shown = "; ".join(
-            f"<code>{esc(str(r.get('path')))}</code> ({esc(str(r.get('reason') or ''))[:160]})"
-            for r in rows[:25]
-        )
-        more = f" (+{len(rows) - 25} more)" if len(rows) > 25 else ""
-        items.append(f"{label}: {shown}{more}")
-    if public.get("decisions_recorded"):
-        items.append("Jev decisions recorded: " + ", ".join(
-            f"<code>{esc(str(p))}</code>" for p in public["decisions_recorded"][:25]
-        ))
-    li = "".join(f"<li>{item}</li>" for item in items)
-    return (
-        '<tr><td style="padding:16px 32px 8px;">'
-        '<h2 style="margin:0; color:#1565c0; font-size:15px; font-weight:700;">'
-        'Public dotfiles (last P9c run)</h2></td></tr>'
-        '<tr><td style="padding:8px 32px 16px;">'
-        f'<ul style="margin:0; padding-left:20px; color:#555; font-size:12px;">{li}</ul>'
-        '</td></tr>'
-        '<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>'
-    )
-
-def _steward_code_lines(steward_code):
-    """[(text, color)] for the startup steward-code merge + live-tree pickup packet."""
-    if not isinstance(steward_code, dict):
-        return []
-    lines = []
-    merge = steward_code.get("merge") if isinstance(steward_code.get("merge"), dict) else {}
-    for pr in merge.get("merged") or []:
-        text = (f"steward-code PR #{pr.get('number')} merged ({str(pr.get('merge_commit') or '')[:8]}): "
-                f"{str(pr.get('title') or '')[:120]} — undo: {pr.get('undo') or ''}")
-        color = "#2a2a36"
-        if pr.get("reverted_by"):
-            text += (f" — REVERTED by {str(pr['reverted_by'])[:8]} "
-                     f"({pr.get('revert_reason') or 'live pickup failed'})")
-            color = "#c62828"
-        lines.append((text, color))
-    for pr in merge.get("pending") or []:
-        due = f" (merges after {pr['due']})" if pr.get("due") else ""
-        lines.append((f"steward-code PR #{pr.get('number')} pending: {pr.get('reason') or ''}{due}", "#7b7b8a"))
-    for pr in merge.get("held") or []:
-        lines.append((f"steward-code PR #{pr.get('number')} held: {pr.get('reason') or ''}", "#7b7b8a"))
-    for error in merge.get("errors") or []:
-        lines.append((f"steward-code merge: {str(error)[:200]}", "#c62828"))
-    if merge.get("status") in ("warning", "failed") and not merge.get("errors"):
-        lines.append((f"steward-code merge {merge.get('status')}: {merge.get('reason') or ''}", "#c62828"))
-    pickup = steward_code.get("pickup") if isinstance(steward_code.get("pickup"), dict) else {}
-    status = pickup.get("status")
-    reason = pickup.get("reason") or ""
-    if status == "fast_forwarded":
-        commits = [c for c in pickup.get("commits") or [] if isinstance(c, dict)]
-        paths = [str(p) for p in pickup.get("paths") or []]
-        lines.append((
-            f"live tree picked up {str(pickup.get('old') or '')[:8]}..{str(pickup.get('new') or '')[:8]}: "
-            f"{len(commits)} commit(s) — {'; '.join(str(c.get('subject') or '') for c in commits[:5])}; "
-            f"paths: {', '.join(paths[:10])}{' …' if len(paths) > 10 else ''}", "#2a2a36"))
-    elif status in ("up_to_date", "would_fast_forward"):
-        lines.append((f"{status}: {reason}", "#7b7b8a"))
-    elif status == "skipped":
-        lines.append((f"live tree pickup skipped: {reason}", "#e65100"))
-    elif status == "rolled_back":
-        text = f"live tree pickup rolled back: {reason}"
-        verify = [v for v in pickup.get("verify") or [] if isinstance(v, dict)]
-        if verify:
-            last = verify[-1]
-            text += (f" — {' '.join(str(a) for a in last.get('argv') or [])} exit "
-                     f"{last.get('returncode')}: {str(last.get('output_tail') or '')[-300:]}")
-        lines.append((text, "#c62828"))
-    elif status == "failed":
-        text = f"live tree pickup FAILED: {reason}"
-        if pickup.get("manual_recovery"):
-            text += f" — {pickup['manual_recovery']}"
-        lines.append((text, "#c62828"))
-    return lines
-
-
-def _steward_code_needs(steward_code):
-    """Steward-code packet lines that need Carter (Needs You / TL;DR)."""
-    if not isinstance(steward_code, dict):
-        return []
-    merge = steward_code.get("merge") if isinstance(steward_code.get("merge"), dict) else {}
-    pickup = steward_code.get("pickup") if isinstance(steward_code.get("pickup"), dict) else {}
-    needs = []
-    for text, _color in _steward_code_lines({"pickup": pickup}):
-        if pickup.get("status") in ("skipped", "rolled_back", "failed"):
-            needs.append(text)
-    if merge.get("status") in ("warning", "failed"):
-        errors = [str(e)[:200] for e in merge.get("errors") or []]
-        needs.append(f"steward-code merge {merge.get('status')}: "
-                     + ("; ".join(errors) or str(merge.get("reason") or "")))
-    for pr in merge.get("pending") or []:
-        if pr.get("needs_carter") or "CONFLICTING" in str(pr.get("reason") or ""):
-            needs.append(f"steward-code PR #{pr.get('number')} pending: {pr.get('reason')}")
-    return needs
-
-
-def _html_steward_code(steward_code):
-    lines = _steward_code_lines(steward_code)
-    if not lines:
-        return ""
-    li = "".join(
-        f'<li style="color:{color};">{html.escape(text)}</li>' for text, color in lines
-    )
-    return (
-        '<tr><td style="padding:16px 32px 8px;">'
-        '<h2 style="margin:0; color:#1565c0; font-size:15px; font-weight:700;">'
-        'Steward code</h2></td></tr>'
-        '<tr><td style="padding:8px 32px 16px;">'
-        f'<ul style="margin:0; padding-left:20px; font-size:12px;">{li}</ul>'
-        '</td></tr>'
-        '<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>'
-    )
-
-
-
-def _html_actions(audit, fixes, applied, steward_code=None):
-    """Top-of-email "Needs You" and "Done Automatically" rows ("" when both are empty)."""
-    rows = _route_rows(audit, fixes)
-    needs = [r for r in rows if _route_needs_carter(r)]
-    code_needs = _steward_code_needs(steward_code)
-    done = [r for r in rows if r.get("status") == "done"]
-    in_progress = [r for r in rows if r.get("status") in _IN_PROGRESS_ROUTES]
-    p1_done = [
-        s for s in (applied or {}).get("steps", []) or []
-        if isinstance(s, dict) and s.get("revert") and s.get("status") == "ok"
-        and s.get("step") != "dependabot_merge"
-    ]
-    dependabot_done = [
-        row for s in (applied or {}).get("steps", []) or []
-        if isinstance(s, dict) and s.get("step") == "dependabot_merge"
-        for row in _dependabot_done_rows(s)
-    ]
-    if not (needs or code_needs or done or in_progress or p1_done or dependabot_done):
-        return ""
-
-    def block(title, color, items):
-        return (
-            '<tr><td style="padding:14px 32px 0;">'
-            f'<h2 style="margin:0; padding-left:10px; border-left:3px solid {color}; '
-            'color:#1a1a2e; font-size:13px; font-weight:700; letter-spacing:0.6px; '
-            f'text-transform:uppercase;">{title}</h2></td></tr>'
-            f'<tr><td style="padding:8px 32px 10px;">{"".join(items)}</td></tr>'
-        )
-
-    def item(text_html, detail="", color="#2a2a36"):
-        extra = (
-            f'<br><span style="color:#7b7b8a; font-size:12px;">{html.escape(detail)}</span>'
-            if detail else ""
-        )
-        return (
-            f'<p style="margin:0 0 6px; color:{color}; font-size:13px; line-height:1.45;">'
-            f'{text_html}{extra}</p>'
-        )
-
-    out = []
-    if needs or code_needs:
-        items = [
-            item(f'{_chip("steward", "#c62828")} {html.escape(text)}') for text in code_needs
-        ]
-        for r in needs[:10]:
-            color = {"high": "#c62828", "medium": "#e65100"}.get(r["severity"], "#7b7b8a")
-            items.append(item(
-                f'{_chip(r["severity"], color)} <strong>{html.escape(r["label"])}</strong>: '
-                f'{html.escape(_clip(r.get("claim"), 260))}',
-                _route_outcome_text(r),
-            ))
-        if len(needs) > 10:
-            items.append(item(html.escape(f"…and {len(needs) - 10} more in the audit below.")))
-        out.append(block("Needs You", "#c62828", items))
-    if done or in_progress or p1_done or dependabot_done:
-        items = []
-        for r in done:
-            items.append(item(
-                f'<strong>{html.escape(r["label"])}</strong>: '
-                f'{html.escape(_route_outcome_text(r))}',
-                f"Undo: {r['revert']}" if r.get("revert") else "",
-            ))
-        for s in p1_done:
-            label = s.get("service") or s.get("step")
-            if s.get("pre_version") and s.get("post_version"):
-                what = (f"updated {_short_sha(s.get('pre_version'))} -> "
-                        f"{_short_sha(s.get('post_version'))}")
-            else:
-                what = str(s.get("reason") or "done")
-            items.append(item(
-                f"<strong>{html.escape(str(label))}</strong>: {html.escape(what)}",
-                f"Undo: {s['revert']}",
-            ))
-        for text, undo in dependabot_done:
-            label, _, rest = text.partition(": ")
-            items.append(item(
-                f"<strong>{html.escape(label)}</strong>: {html.escape(rest)}",
-                f"Undo: {undo}" if undo else "",
-            ))
-        for r in in_progress:
-            items.append(item(
-                f'<strong>{html.escape(r["label"])}</strong>: '
-                f'{html.escape(_route_outcome_text(r))}',
-                r.get("pr_url") or "",
-                "#1565c0",
-            ))
-        out.append(block("Done Automatically", "#2e7d32", items))
-    out.append(
-        '<tr><td style="padding:0 32px;"><hr style="border:none; '
-        'border-top:1px solid #ececf2; margin:4px 0;"></td></tr>'
-    )
-    return "".join(out)
-
+_TLDR_ROW = re.compile(r"<tr><td[^>]*>\s*<p[^>]*>\{\{TLDR\}\}</p>\s*</td></tr>\n?")
 
 
 def phase_8_render_send(run_dir, setup_data, dry_run=False):
@@ -2612,151 +2298,49 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
 
     date_str = setup_data["date"]
     usage = setup_data.get("usage", {})
+    data = _report_inputs(run_dir, setup_data)
+    triaged = data["triaged"]
 
-    # Load all phase data
-    applied = read_json(run_dir / "01-applied.json") if (run_dir / "01-applied.json").exists() else {"steps": []}
-    host_reboot = _host_reboot_status(run_dir)
-    if host_reboot:
-        applied["host_reboot"] = host_reboot
-    validation = read_json(run_dir / "02-validation.json") if (run_dir / "02-validation.json").exists() else {"checks": []}
-    troubleshoot = read_json(run_dir / "03-troubleshoot.json") if (run_dir / "03-troubleshoot.json").exists() else None
-    heartbeat = read_json(run_dir / "04-heartbeat.json") if (run_dir / "04-heartbeat.json").exists() else {}
-    queue = read_json(run_dir / "05-queue.json") if (run_dir / "05-queue.json").exists() else {}
-    fixes = _load_fixes_with_resolutions(run_dir)
-    audit = read_json(run_dir / "07-audit.json") if (run_dir / "07-audit.json").exists() else {"sections": []}
+    tldr = _build_tldr(triaged, date_str, session_memory=_session_memory_context())
 
-    # Phase failures anywhere in the pipeline (each artifact records phase_failed)
-    phase_failures = []
-    for art in sorted(run_dir.glob("0*.json")):
-        try:
-            if read_json(art).get("phase_failed"):
-                phase_failures.append(art.name)
-        except Exception:
-            pass
-
-    # Build TLDR (end-state after P7b, not pre-fix process counts)
-    tldr = _build_tldr(
-        applied, audit, queue, fixes, heartbeat, date_str,
-        session_memory=_session_memory_context(),
-        validation=validation,
-        steward_code=setup_data.get("steward_code"),
-    )
-
-    # Troubleshoot section
-    troubleshoot_html = ""
-    if troubleshoot and troubleshoot.get("triggered"):
-        ts_status = troubleshoot.get("agent_status", "unknown")
-        diagnosis = html.escape(str(troubleshoot.get("diagnosis", "")))
-        steps = troubleshoot.get("next_steps") or []
-        if troubleshoot.get("re_validation_healthy"):
-            badge = '<span style="color:#2e7d32; font-weight:700;">RECOVERED</span>'
-            color = "#2e7d32"
-        elif ts_status == "diagnosed":
-            badge = '<span style="color:#e65100; font-weight:700;">NEEDS CARTER</span>'
-            color = "#e65100"
-        else:
-            badge = '<span style="color:#c62828; font-weight:700;">UNDIAGNOSED</span>'
-            color = "#c62828"
-        steps_html = ""
-        if steps:
-            steps_html = (
-                '<p style="margin:0 0 4px; color:#666; font-size:12px;">Suggested next steps:</p>'
-                '<ul style="margin:0; padding-left:20px; color:#555; font-size:12px;">'
-                + "".join(f"<li>{html.escape(str(s))}</li>" for s in steps)
-                + "</ul>"
-            )
-        fix_rows = [r for r in troubleshoot.get("fix_actions") or [] if isinstance(r, dict)]
-        fix_items = []
-        for r in fix_rows:
-            endpoint = html.escape(str(r.get("endpoint", "?")))
-            conf = r.get("confidence")
-            conf_text = f"Jev confidence {conf:.2f}" if isinstance(conf, (int, float)) else "no Jev answer"
-            if r.get("executed"):
-                fix_items.append(
-                    f"<li><strong>{endpoint}</strong>: ran {html.escape(str(r.get('choice')))} "
-                    f"({conf_text}, exit {html.escape(str(r.get('exit_code')))}) &rarr; "
-                    f"{html.escape(str(r.get('outcome', 'not re-validated')))}</li>")
-            else:
-                choice = f"Jev chose {html.escape(str(r.get('choice')))}, " if r.get("choice") else ""
-                fix_items.append(
-                    f"<li><strong>{endpoint}</strong>: no action ({choice}{conf_text}; "
-                    f"{html.escape(str(r.get('reason', '')))})</li>")
-        fix_html = ""
-        if fix_items:
-            fix_html = (
-                '<p style="margin:8px 0 4px; color:#666; font-size:12px;">Fix menu (steward code, not the agent):</p>'
-                '<ul style="margin:0; padding-left:20px; color:#555; font-size:12px;">'
-                + "".join(fix_items) + "</ul>")
-        changed = any(r.get("executed") for r in fix_rows)
-        heading = "Regression diagnosis and fix menu" if changed else "Regression diagnosis (no changes made)"
-        troubleshoot_html = (
-            '<tr><td style="padding:16px 32px 8px;">'
-            f'<h2 style="margin:0; color:{color}; font-size:15px; font-weight:700;">'
-            f'{heading} {badge}</h2>'
-            '</td></tr>'
-            '<tr><td style="padding:8px 32px 16px;">'
-            f'<p style="margin:0 0 8px; color:#444; font-size:13px;"><strong>Likely cause:</strong> {diagnosis}</p>'
-            f'{steps_html}{fix_html}'
-            '</td></tr>'
-            '<tr><td style="padding:0 32px;"><hr style="border:none; border-top:1px solid #e8e8ee; margin:8px 0;"></td></tr>'
-        )
-
-    remediation = read_json(run_dir / "03a-remediation.json") if (run_dir / "03a-remediation.json").exists() else {}
-    try:
-        prev_date = prev_workday(datetime.strptime(date_str, "%Y-%m-%d")).strftime("%Y-%m-%d")
-        prev_dotfiles = _load_prev_artifact(run_dir, prev_date, "09b-dotfiles.json") or {}
-    except ValueError:
-        prev_dotfiles = {}
-    troubleshoot_html += _html_host_drift(remediation, _dotfiles_untracked_paths(), prev_dotfiles)
-    try:
-        prev_date = prev_workday(datetime.strptime(date_str, "%Y-%m-%d")).strftime("%Y-%m-%d")
-        prev_public = _load_prev_artifact(run_dir, prev_date, "09c-public-dotfiles.json") or {}
-    except ValueError:
-        prev_public = {}
-    troubleshoot_html += _html_public_dotfiles(prev_public)
-    troubleshoot_html += _html_steward_code(setup_data.get("steward_code"))
-    p0b_path = run_dir / "00b-session-memory.json"
-    troubleshoot_html += _html_session_memory(read_json(p0b_path) if p0b_path.exists() else {})
-
-    # Footer
-    engine = "steward_runner.py (dry-run)" if dry_run else "steward_runner.py"
-    footer = (f"carter2099.com · Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · "
-              f"{engine} · run dir: {run_dir}")
-
-    # Build template
-    if not TEMPLATE_PATH.exists():
-        atomic_write_text(TEMPLATE_PATH, DEFAULT_TEMPLATE)
-    template = TEMPLATE_PATH.read_text()
-
-    actions_html = _html_actions(audit, fixes, applied, setup_data.get("steward_code"))
-    if "{{ACTIONS}}" not in template:
-        template = template.replace("{{TROUBLESHOOT}}", "{{ACTIONS}}{{TROUBLESHOOT}}", 1)
-
-    html = (
-        template
-        .replace("{{DATE}}", date_str)
-        .replace("{{TLDR}}", tldr)
-        .replace("{{ACTIONS}}", actions_html)
-        .replace("{{UPDATES}}", _html_updates(applied))
-        .replace("{{TROUBLESHOOT}}", troubleshoot_html)
-        .replace("{{HEALTH}}", _html_health(
-            validation, heartbeat, applied,
+    queue_html = _html_queue(data["queue"])
+    usage_html = _html_usage(usage)
+    sections = "".join([
+        _html_needs_you(triaged["needs"]),
+        _html_troubleshoot(data["troubleshoot"]),
+        _html_changes(triaged["changes"]),
+        _html_watching(triaged["watching"]),
+        _section("Health", COLOR["health"], _html_health(
+            data["validation"], data["heartbeat"], data["applied"],
             # The sampler persists memory.json every ~60 s and finally only before
             # P9, so the email shows the samples persisted by P8 time.
             memory_mib=_read_memory_mib(run_dir),
-        ))
-        .replace("{{AUDIT}}", _html_audit(audit, fixes))
-        .replace("{{QUEUE}}", _html_queue(queue))
-        .replace("{{USAGE}}", _html_usage(usage))
-        .replace("{{FOOTER}}", footer)
+        )),
+        _section("Audit", COLOR["audit"], _html_audit(data["audit"], data["fixes"])),
+        _section("Work queue", COLOR["warn"], queue_html) if queue_html else "",
+        _section("OpenCode Go usage", COLOR["slate"], usage_html) if usage_html else "",
+    ])
+
+    if not TEMPLATE_PATH.exists():
+        atomic_write_text(TEMPLATE_PATH, DEFAULT_TEMPLATE)
+    template = TEMPLATE_PATH.read_text()
+    if not tldr:
+        # Nothing beyond the banner to say: drop the whole summary row, not just its text.
+        template = _TLDR_ROW.sub("", template)
+    page = (
+        template
+        .replace("{{DATE}}", date_str)
+        .replace("{{BANNER}}", _html_banner(triaged))
+        .replace("{{TLDR}}", tldr)
+        .replace("{{SECTIONS}}", sections)
+        .replace("{{FOOTER}}", _html_footer(triaged, usage, run_dir, dry_run))
     )
 
     email_path = run_dir / "08-email.html"
-    atomic_write_text(email_path, html)
+    atomic_write_text(email_path, page)
     print(f"[P8] rendered -> {email_path}")
 
-    # Build subject
-    subject = f"Homelab Steward {date_str}"
+    subject = _subject(date_str, triaged)
 
     if dry_run:
         print(f"  DRY RUN — would send: {subject}")
@@ -2786,81 +2370,25 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
     date_str = setup_data["date"]
     usage = setup_data.get("usage", {})
 
-    # Load key artifacts for summary
-    applied = read_json(run_dir / "01-applied.json") if (run_dir / "01-applied.json").exists() else {}
-    host_reboot = _host_reboot_status(run_dir)
-    validation = read_json(run_dir / "02-validation.json") if (run_dir / "02-validation.json").exists() else {}
-    audit = read_json(run_dir / "07-audit.json") if (run_dir / "07-audit.json").exists() else {}
-    queue = read_json(run_dir / "05-queue.json") if (run_dir / "05-queue.json").exists() else {}
-    fixes = _load_fixes_with_resolutions(run_dir)
+    data = _report_inputs(run_dir, setup_data)
+    applied, audit, triaged = data["applied"], data["audit"], data["triaged"]
 
-
-    # Build summary.md
+    # Build summary.md (mirrors the email's triage)
     lines = [
         f"# Steward Report — {date_str}",
         f"**Engine:** steward_runner.py",
+        f"**Verdict:** {triaged['verdict'][1]}",
         "",
         "## Update Status",
     ]
-    if host_reboot:
-        lines.append(f"- {host_reboot['text']}")
+    if any(isinstance(s, dict) and s.get("dry_run") for s in applied.get("steps", [])):
+        lines.append("- Dry run — no mutations")
     if _p1_phase_failed(applied):
         lines.append(f"- Maintenance: FAILED — {_p1_failure_detail(applied)}")
     elif applied.get("phase_status") == "degraded":
         lines.append(f"- Maintenance: DEGRADED — {_p1_failure_detail(applied)}")
-    for s in applied.get("steps", []):
-        if s.get("dry_run"):
-            lines.append("- Dry run — no mutations")
-            break
-        name = s.get("step", "")
-        status = s.get("status", "")
-        if name in ("gamingrig_maintenance", "gamingrig_linux", "gamingrig"):
-            for update in _tldr_collect_gamingrig_updates(s)[0]:
-                lines.append(f"- {update}")
-            continue
-
-        if name == "llama_cpp":
-            for update in _tldr_collect_updates({"steps": [s]})[0]:
-                lines.append(f"- {update}")
-            continue
-
-        if name.startswith("auto_"):
-            pkg = name.replace("auto_", "")
-            if status == "ok":
-                lines.append(f"- {pkg}: {s.get('pre_version')} -> {s.get('post_version')}")
-            elif status == "skipped":
-                lines.append(f"- {pkg}: already current ({s.get('pre_version')})")
-            else:
-                lines.append(f"- {pkg}: {_p1_status_label(status)}")
-        elif name in ("openwebui_update", "openwebui"):
-            text, _ = _openwebui_update_text(s)
-            if text:
-                lines.append(f"- {text}")
-            elif status in ("current", "skipped"):
-                lines.append(
-                    f"- open-webui: {s.get('reason') or 'current'} "
-                    f"({s.get('pre_version') or s.get('current_tag')})"
-                )
-        elif name == "app_deploy":
-            text, _ = _app_deploy_text(s)
-            if text:
-                lines.append(f"- {text}")
-        elif name == "dependabot_merge":
-            lines.extend(f"- {text}" for text, _ in _dependabot_merge_lines(s))
-        elif name == "omp_db_repair":
-            text, _ = _omp_db_repair_text(s)
-            if text:
-                lines.append(f"- {text}")
-        elif name == "worker_omp_refresh" and status == "ok":
-            lines.append(
-                f"- steward worker omp: {s.get('pre_version')} -> {s.get('post_version')}"
-            )
-
-    lines.append("")
-    lines.append("## Validation")
-    ep_ok = all(c.get("status") == "ok" for c in validation.get("checks", [])
-                if c.get("name", "").startswith("endpoint_"))
-    lines.append(f"- Endpoints: {'all passed' if ep_ok else 'SOME FAILED'}")
+    for item in triaged["changes"]:
+        lines.append(f"- {item['text']}" + (" (rolled back)" if item["kind"] == "rollback" else ""))
     memory_mib = _read_memory_mib(run_dir)
     memory_note = _steward_memory_note(memory_mib, _steward_memory_high_mib())
     if memory_note:
@@ -2868,38 +2396,41 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
         lines.append(f"- Steward memory: {text}"
                      + (" — anonymous memory above 50% of MemoryHigh" if warn else ""))
 
-    lines.append("")
-    lines.append("## Audit")
-    for sec in audit.get("sections", []):
-        lines.append(f"- {sec['name']}: {sec['verdict']}")
+    lines += ["", "## Needs You"]
+    for item in triaged["needs"]:
+        lines.append(f"- {item['text']}" + (f" — {item['why']}" if item["why"] else "")
+                     + (f" — What to do: {item['todo']}" if item["todo"] else "")
+                     + (f" {item['command']}" if item["command"] else ""))
+    if not triaged["needs"]:
+        lines.append("- Nothing")
 
-    routes = _route_rows(audit, fixes)
-    if routes:
-        lines.append("")
-        lines.append("## Findings")
-        for row in routes:
-            lines.append(
-                f"- [{row['severity']}] {row['label']}: {_route_outcome_text(row)} — "
-                f"{_clip(row.get('claim'), 140)}"
-            )
+    lines += ["", "## Watching"]
+    for item in triaged["watching"]:
+        lines.append(f"- {item['text']}" + (f": {item['command']}" if item["command"] else ""))
+    if not triaged["watching"]:
+        lines.append("- Nothing")
 
-    lines.append("")
-    lines.append("## Queue")
-    lines.append(f"- Plans approved: {len(queue.get('plans', {}).get('approved', []))}")
+    lines += ["", "## Validation", f"- {triaged['health']}"]
+
+    lines += ["", "## Audit"]
+    sections = audit.get("sections", []) or []
+    open_sections = [s for s in sections if s.get("verdict") not in ("PASS", "cached-PASS")]
+    for sec in open_sections:
+        lines.append(f"- {_section_name(sec.get('name'))}: {sec.get('verdict')}")
+    if sections and not open_sections:
+        lines.append(f"- All {len(sections)} sections passed")
 
     md_content = "\n".join(lines) + "\n"
     atomic_write_text(run_dir / "summary.md", md_content)
 
     # Append runs.jsonl
     n_sections_fired = sum(
-        1 for s in audit.get("sections", [])
+        1 for s in sections
         if s.get("verdict") not in ("cached-PASS", "dry-run-collector-only")
     )
-    n_judge_rejected = sum(
-        len(s.get("judge_rejected", [])) for s in audit.get("sections", [])
-    )
+    n_judge_rejected = sum(len(s.get("judge_rejected", [])) for s in sections)
     route_counts = {}
-    for row in routes:
+    for row in _route_rows(audit, data["fixes"]):
         route_counts[row.get("status")] = route_counts.get(row.get("status"), 0) + 1
     now = datetime.now(timezone.utc)
     duration_s, wall_s = _run_timing(run_dir, elapsed_s, now=now)
@@ -2952,4 +2483,3 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
                 pass
 
     print(f"[P9] done -> {run_dir / 'summary.md'}")
-

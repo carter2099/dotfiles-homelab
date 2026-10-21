@@ -159,53 +159,358 @@ def _audit_collector_2_versions():
     }
 
 
+_DIGEST_TOPICS = ("ai-tech", "agentic-platform", "ai-hardware", "gaming-digest", "world-digest")
+_DIGEST_DEDUP_DAYS = 5  # daily_news.catalog.CROSS_DAY_DEDUP_DAYS
+_REJECTION_RUNS_PER_TOPIC = 2
+_REJECTION_ITEMS_CAP = 8
+_REJECTION_MATCHES_CAP = 2
+# Worker/judge prompts show the first _EVIDENCE_PROMPT_CHARS of indent=2 evidence.
+# Digest quality must fit both dedup directions in it: published stories for
+# repeats and rejections for wrongly dropped events.
+_EVIDENCE_PROMPT_CHARS = 20000
+_REJECTION_EVIDENCE_CHARS = 6000
+_RUN_CORE_ARTIFACTS = ("02b-attention.json", "06-curated.json", "07-standfirst.json",
+                       "digest.html", "publication.json")
+_SUSPECT_KEY_RE = re.compile(
+    r"^[^/]+$|/(search|tag|tags|topic|topics|live|category)(/|\?|$)|[?&]q=", re.IGNORECASE
+)
+_PHASE5_DROP_RE = re.compile(r"^(fetch_failed|date_stale|date_mismatch|date_unconfirmed)\b")
+
+
+def _coverage_lookup_key(url):
+    """Approximate daily_news coverage_key: host without www + path, no scheme/query."""
+    text = (url or "").strip()
+    text = re.sub(r"^[a-z][a-z0-9+.-]*://", "", text, flags=re.IGNORECASE)
+    text = re.split(r"[?#]", text, maxsplit=1)[0]
+    host, _, path = text.partition("/")
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return f"{host}/{path}".rstrip("/") if path else host
+
+
+def _json_artifact(path, cache):
+    """(data, lines) for a JSON artifact, memoized; (None, []) when unreadable."""
+    if path not in cache:
+        try:
+            text = path.read_text()
+            cache[path] = (json.loads(text), text.splitlines())
+        except (OSError, ValueError):
+            cache[path] = (None, [])
+    return cache[path]
+
+
+def _artifact_cite(path, lines, needle, after=None):
+    """Home-relative `path:line` of the first line holding ``needle`` (after ``after``)."""
+    rel = path.relative_to(HOME).as_posix()
+    start = 0
+    if after:
+        start = next((i for i, line in enumerate(lines) if after in line), 0)
+    for index in range(start, len(lines)):
+        if needle and needle in lines[index]:
+            return f"{rel}:{index + 1}"
+    return rel
+
+
+def _coverage_index(digests_root, run_date, topic, cache):
+    """Coverage key -> earlier published stories, as Phase 3's ledger would see them.
+
+    Mirrors daily_news.contracts.load_recent_coverage_urls (previous days, every
+    section) plus the same day's other sections (cross-topic dedup).
+    """
+    index = {}
+
+    def add(key, cite, title, via):
+        if key:
+            index.setdefault(key, []).append({"story": title, "at": cite, "via": via})
+
+    for offset in range(0, _DIGEST_DEDUP_DAYS + 1):
+        day = (run_date - timedelta(days=offset)).strftime("%Y-%m-%d")
+        for other in _DIGEST_TOPICS:
+            if offset == 0 and other == topic:
+                continue
+            curated_path = digests_root / other / day / "06-curated.json"
+            data, lines = _json_artifact(curated_path, cache)
+            titles = {}
+            if isinstance(data, dict):
+                for story in data.get("fresh") or []:
+                    if not isinstance(story, dict):
+                        continue
+                    url = story.get("url") or ""
+                    title = (story.get("title") or "")[:100]
+                    cite = _artifact_cite(curated_path, lines, json.dumps(url))
+                    titles[_coverage_lookup_key(url)] = (title, cite)
+                    add(_coverage_lookup_key(url), cite, title, "story url")
+                    evidence = (story.get("attention") or {}).get("evidence") or {}
+                    for entry in evidence.get("same_event_urls") or []:
+                        if isinstance(entry, dict):
+                            add(_coverage_lookup_key(entry.get("url")), cite, title,
+                                "same_event_urls")
+                    for key in evidence.get("same_event_keys") or []:
+                        if isinstance(key, str):
+                            add(_coverage_lookup_key(key), cite, title, "same_event_keys")
+            referenced_path = digests_root / other / day / "referenced-urls.json"
+            ref, ref_lines = _json_artifact(referenced_path, cache)
+            if isinstance(ref, dict):
+                for entry in ref.get("stories") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    title, _ = titles.get(_coverage_lookup_key(entry.get("url")),
+                                          (entry.get("url") or "", None))
+                    cite = _artifact_cite(referenced_path, ref_lines,
+                                          json.dumps(entry.get("url") or ""))
+                    for url in entry.get("referenced_urls") or []:
+                        if isinstance(url, str):
+                            add(_coverage_lookup_key(url), cite, title[:100], "referenced_urls")
+    return index
+
+
+def _earlier_matches(keys, index):
+    """One line per earlier published story sharing any of ``keys`` (bounded)."""
+    matches = []
+    seen = set()
+    for key in keys:
+        for hit in index.get(_coverage_lookup_key(key), []):
+            if hit["at"] in seen:
+                continue
+            seen.add(hit["at"])
+            matches.append(f"{key[:80]} -> \"{hit['story']}\" ({hit['via']}) @ {hit['at']}")
+            if len(matches) >= _REJECTION_MATCHES_CAP:
+                return matches
+    return matches
+
+
+def _fit_lines(lines, budget, what):
+    """Leading ``lines`` whose indent=2 JSON fits ``budget`` chars, then an omitted marker."""
+    kept = []
+    used = 0
+    for index, line in enumerate(lines):
+        cost = len(json.dumps(line)) + 8  # list item indent, quotes, comma, newline
+        if used + cost > budget:
+            kept.append(f"{len(lines) - index} more {what} omitted")
+            break
+        kept.append(line)
+        used += cost
+    return kept
+
+
+def _digest_rejection_evidence():
+    """Stories the latest editions rejected, with the earlier story each matched.
+
+    Audits the opposite failure of dedup: distinct events wrongly dropped by the
+    Phase 2 ledger/judge, Phase 3 recent-coverage/cross-topic dedup, or Phase 5
+    fetch/date checks. Per-run counts plus one cited line per rejected story,
+    latest edition first and highest signal first within it (Phase 3, suspect
+    keys first; then Phase 5 drops; then Phase 2), bounded to
+    _REJECTION_EVIDENCE_CHARS.
+    """
+    digests_root = HOME / "digests"
+    cache = {}
+    summary = {}
+    ranked = []
+    for topic in _DIGEST_TOPICS:
+        topic_dir = digests_root / topic
+        if not topic_dir.is_dir():
+            continue
+        run_dirs = [
+            d for d in sorted(topic_dir.iterdir(), reverse=True)
+            if d.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d.name)
+        ][:_REJECTION_RUNS_PER_TOPIC]
+        for age, run_dir in enumerate(run_dirs):
+            run_date = datetime.strptime(run_dir.name, "%Y-%m-%d")
+            label = f"{topic} {run_dir.name}"
+            index = None
+
+            def matches(keys):
+                nonlocal index
+                if index is None:
+                    index = _coverage_index(digests_root, run_date, topic, cache)
+                return "; ".join(_earlier_matches(keys, index)) or "no earlier story found"
+
+            def add(phase_rank, text, suspect=False):
+                ranked.append(((age, phase_rank, not suspect, len(ranked)), f"{label} {text}"))
+
+            notes = []
+            p2_path = run_dir / "02-research-judged.json"
+            p2, p2_lines = _json_artifact(p2_path, cache)
+            if isinstance(p2, dict):
+                reasons = {}
+                shown_urls = set()
+                shown = 0
+                others = 0
+                for item in p2.get("rejected") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    reason = str(item.get("reason") or "")
+                    kind = (re.match(r"[A-Za-z_ /]*", reason).group(0).strip().lower()
+                            or "other")[:40]
+                    reasons[kind] = reasons.get(kind, 0) + 1
+                    finding = item.get("finding") if isinstance(item.get("finding"), dict) else {}
+                    url = finding.get("url") or ""
+                    ledger = kind == "already_covered_previous_day"
+                    # Same-run duplicates keep another copy of the event; show ledger
+                    # rejections (with the earlier story) and a few judge rejections.
+                    if (kind.startswith("duplicate") or url in shown_urls
+                            or shown >= _REJECTION_ITEMS_CAP
+                            or (not ledger and others >= 2)):
+                        continue
+                    shown_urls.add(url)
+                    shown += 1
+                    others += not ledger
+                    cite = _artifact_cite(p2_path, p2_lines, json.dumps(url), '"rejected"')
+                    text = (f"phase2 {kind}: \"{(finding.get('title') or '')[:90]}\" @ {cite} | "
+                            f"{reason[:90]}")
+                    if ledger:
+                        text += f" | matched: {matches([url])}"
+                    add(2 if ledger else 3, text)
+                note = (f"phase2 fresh {len(p2.get('fresh') or [])}, rejected "
+                        f"{json.dumps(reasons, separators=(',', ':'))}")
+                # Phase 2 pre-filter counts (by reason) when the artifact records them.
+                counts = {
+                    key: value for key, value in p2.items()
+                    if key not in ("fresh", "rejected", "reason", "status")
+                    and (isinstance(value, int) or (
+                        isinstance(value, dict)
+                        and all(isinstance(v, int) for v in value.values())))
+                }
+                if counts:
+                    note += f", counts {json.dumps(counts, separators=(',', ':'))}"
+                notes.append(note)
+            p3_path = run_dir / "03-urls-ranked.json"
+            p3, p3_lines = _json_artifact(p3_path, cache)
+            if isinstance(p3, dict):
+                for item in p3.get("recent_coverage_rejected") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    keys = [k for k in item.get("matched_keys") or [] if isinstance(k, str)]
+                    cite = _artifact_cite(p3_path, p3_lines, json.dumps(item.get("url") or ""),
+                                          '"recent_coverage_rejected"')
+                    text = (f"phase3 recent_coverage_rejected: "
+                            f"\"{(item.get('title') or '')[:100]}\" "
+                            f"@ {cite} | {str(item.get('rejection_reason') or '')[:100]} | "
+                            f"{len(keys)} matched keys")
+                    # Bare host / search / live page keys make a wrongful match likely.
+                    suspect = [k[:80] for k in keys if _SUSPECT_KEY_RE.search(k)][:3]
+                    if suspect:
+                        text += f" | suspect_keys {json.dumps(suspect)}"
+                    add(0, f"{text} | matched: {matches(keys)}", bool(suspect))
+                for item in p3.get("cross_topic_rejected") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    url = item.get("url") or ""
+                    cite = _artifact_cite(p3_path, p3_lines, json.dumps(url),
+                                          '"cross_topic_rejected"')
+                    add(0, f"phase3 cross_topic_rejected: \"{(item.get('title') or '')[:100]}\" "
+                           f"@ {cite} | matched: {matches([url])}")
+                if p3.get("paywall_dropped"):
+                    notes.append(f"phase3 paywall_dropped {len(p3['paywall_dropped'])}")
+            p5_path = run_dir / "05-summaries-judged.json"
+            p5, p5_lines = _json_artifact(p5_path, cache)
+            if isinstance(p5, list):
+                for item in p5:
+                    if not isinstance(item, dict) or item.get("judge_verdict") != "drop":
+                        continue
+                    issue = next((str(i) for i in item.get("judge_issues") or []
+                                  if _PHASE5_DROP_RE.match(str(i))), None)
+                    if issue is None:
+                        continue
+                    url = item.get("url") or ""
+                    add(1, f"phase5 drop: {issue[:120]} | {(item.get('title') or '')[:100]} | "
+                           f"{url.split('?', 1)[0][:150]} | "
+                           f"published {item.get('date_published')} | "
+                           f"fetch_alternates {len(item.get('fetch_alternates') or [])} @ "
+                           f"{_artifact_cite(p5_path, p5_lines, json.dumps(url))}")
+            if notes:
+                summary[label] = "; ".join(notes)
+    ranked.sort(key=lambda entry: entry[0])
+    budget = _REJECTION_EVIDENCE_CHARS - len(json.dumps(summary, indent=2))
+    return {"runs": summary,
+            "items": _fit_lines([text for _, text in ranked], budget, "rejections")}
+
+
+def _published_story_lines(digests_root, budget):
+    """Published titles per date and section, newest first, for repeat detection.
+
+    Covers the latest edition plus the cross-day dedup window, bounded to
+    ``budget`` chars (older dates drop first).
+    """
+    dates = sorted({
+        d.name for topic in _DIGEST_TOPICS if (digests_root / topic).is_dir()
+        for d in (digests_root / topic).iterdir()
+        if d.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d.name)
+    }, reverse=True)[:_DIGEST_DEDUP_DAYS + 1]
+    lines = []
+    for day in dates:
+        for topic in _DIGEST_TOPICS:
+            try:
+                curated = json.loads((digests_root / topic / day / "06-curated.json").read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(curated, dict):
+                continue
+            titles = [(story.get("title") or "")[:80] for story in curated.get("fresh") or []
+                      if isinstance(story, dict)]
+            if titles:
+                lines.append(f"{day} {topic}: " + " || ".join(titles))
+    return _fit_lines(lines, budget, "section editions")
+
+
 def _audit_collector_3_digest_quality():
-    """Collector: digest quality metrics over trailing 7 days."""
-    evidence = {"topics": {}, "placeholder_leakage": 0, "fallback_count": 0}
-    topics = ["ai-tech", "agentic-platform", "ai-hardware", "gaming-digest", "world-digest"]
+    """Collector: digest quality metrics over trailing 7 days plus latest rejections.
+
+    Compact, high-signal keys first: the worker and judge prompts show only the
+    first _EVIDENCE_PROMPT_CHARS of the serialized evidence.
+    """
+    digests_root = HOME / "digests"
+    placeholder_total = 0
+    run_checks = {"days": 7, "runs": 0, "missing_sections": [], "missing_artifacts": [],
+                  "degraded_stages": [], "placeholder_leaks": []}
     now = datetime.now()
-    for topic in topics:
-        topic_dir = HOME / "digests" / topic
-        tev = {"exists": topic_dir.exists(), "runs": []}
-        if topic_dir.exists():
-            for d in sorted(topic_dir.iterdir(), reverse=True):
-                if not d.is_dir():
-                    continue
-                try:
-                    d_date = datetime.strptime(d.name, "%Y-%m-%d")
-                except ValueError:
-                    continue
-                if (now - d_date).days > 7:
-                    continue
-                artifacts = sorted([f.name for f in d.iterdir() if f.is_file()])
-                html_files = [f for f in artifacts if f.endswith(".html")]
-                placeholder_count = 0
-                for hf in html_files:
-                    html = (d / hf).read_text()
-                    placeholder_count += len(re.findall(r"\{\{[A-Z_]+\}\}", html))
-                # Phase 9 archival copy (top-level YYYY-MM-DD.md, digest_md_path) lives
-                # outside the run dir and was never scanned — it has hidden fabricated
-                # example.com stories and raw prompt echoes (digest-quality audit gap).
-                top_md = topic_dir / f"{d.name}.md"
-                if top_md.exists():
-                    top_text = top_md.read_text()
-                    placeholder_count += len(re.findall(r"\{\{[A-Z_]+\}\}", top_text))
-                    placeholder_count += len(re.findall(r"https?://example\.com\b", top_text))
-                    placeholder_count += len(re.findall(
-                        r"Any notable stories or angles that were missed today", top_text))
-                tev["runs"].append({
-                    "date": d.name,
-                    "artifacts": artifacts,
-                    "placeholder_leaks": placeholder_count,
-                    "attention_artifact": "02b-attention.json" in artifacts,
-                    "standfirst_artifact": "07-standfirst.json" in artifacts,
-                })
-                evidence["placeholder_leakage"] += placeholder_count
-        evidence["topics"][topic] = tev
+    for topic in _DIGEST_TOPICS:
+        topic_dir = digests_root / topic
+        if not topic_dir.exists():
+            run_checks["missing_sections"].append(topic)
+            continue
+        for d in sorted(topic_dir.iterdir(), reverse=True):
+            if not d.is_dir():
+                continue
+            try:
+                d_date = datetime.strptime(d.name, "%Y-%m-%d")
+            except ValueError:
+                continue
+            if (now - d_date).days > 7:
+                continue
+            run_checks["runs"] += 1
+            label = f"{topic} {d.name}"
+            artifacts = sorted([f.name for f in d.iterdir() if f.is_file()])
+            missing = [name for name in _RUN_CORE_ARTIFACTS if name not in artifacts]
+            if missing:
+                run_checks["missing_artifacts"].append(f"{label}: {', '.join(missing)}")
+            degraded = [name.removesuffix(".status.json") for name in artifacts
+                        if name.endswith(".status.json")]
+            if degraded:
+                run_checks["degraded_stages"].append(f"{label}: {', '.join(degraded)}")
+            placeholder_count = 0
+            for hf in (f for f in artifacts if f.endswith(".html")):
+                html = (d / hf).read_text()
+                placeholder_count += len(re.findall(r"\{\{[A-Z_]+\}\}", html))
+            # Phase 9 archival copy (top-level YYYY-MM-DD.md, digest_md_path) lives
+            # outside the run dir and was never scanned — it has hidden fabricated
+            # example.com stories and raw prompt echoes (digest-quality audit gap).
+            top_md = topic_dir / f"{d.name}.md"
+            if top_md.exists():
+                top_text = top_md.read_text()
+                placeholder_count += len(re.findall(r"\{\{[A-Z_]+\}\}", top_text))
+                placeholder_count += len(re.findall(r"https?://example\.com\b", top_text))
+                placeholder_count += len(re.findall(
+                    r"Any notable stories or angles that were missed today", top_text))
+            if placeholder_count:
+                run_checks["placeholder_leaks"].append(f"{label}: {placeholder_count}")
+            placeholder_total += placeholder_count
     # Published-site contract: every completed date has one durable JSON artifact
     # per category, an atomically activated static build, one mail marker, and a
     # configured target in the existing R2 backup.
-    news_root = HOME / "digests" / "news"
+    news_root = digests_root / "news"
     publications_dir = news_root / "publications"
     publication_dates = []
     if publications_dir.exists():
@@ -217,7 +522,9 @@ def _audit_collector_3_digest_quality():
             entries = {}
             for slug in ("ai-tech", "agents", "ai-hardware", "gaming", "world"):
                 path = date_dir / f"{slug}.json"
-                entry = {"exists": path.exists(), "valid": False, "stories": 0}
+                # Each category reports only failed checks; schema/ranking versions
+                # are part of `valid`.
+                entry = {"stories": 0, "failed_checks": ["exists"]}
                 if path.exists():
                     try:
                         publication_text = path.read_text()
@@ -227,7 +534,7 @@ def _audit_collector_3_digest_quality():
                         attention_path = (
                             news_root / "attention" / date_dir.name / f"{slug}.json"
                         )
-                        entry.update({
+                        checks = {
                             "valid": (
                                 publication.get("date") == date_dir.name
                                 and publication.get("slug") == slug
@@ -236,11 +543,6 @@ def _audit_collector_3_digest_quality():
                                     date_dir.name < "2026-08-25"
                                     or publication.get("ranking_schema_version") == 3
                                 )
-                            ),
-                            "status": publication.get("status", ""),
-                            "stories": len(stories),
-                            "ranking_schema_version": publication.get(
-                                "ranking_schema_version"
                             ),
                             "significance_complete": all(
                                 story.get("editorial_significance")
@@ -302,13 +604,18 @@ def _audit_collector_3_digest_quality():
                                     re.IGNORECASE,
                                 ))
                             ),
+                        }
+                        entry = {
+                            "stories": len(stories),
+                            "status": publication.get("status", ""),
+                            "failed_checks": [name for name, ok in checks.items() if not ok],
                             "placeholder_leaks": len(re.findall(
                                 r"\{\{[A-Z_]+\}\}|https?://example\.com\b",
                                 publication_text,
                             )),
-                        })
+                        }
                     except (json.JSONDecodeError, OSError) as error:
-                        entry["error"] = str(error)
+                        entry = {"stories": 0, "failed_checks": ["valid"], "error": str(error)}
                 entries[slug] = entry
             publication_dates.append({
                 "date": date_dir.name,
@@ -328,22 +635,26 @@ def _audit_collector_3_digest_quality():
         backup_config = backup_config_path.read_text()
     except OSError:
         backup_config = ""
-    evidence["publication"] = {
-        "contract_started": "2026-08-25",
-        "dates": publication_dates,
-        "site_current_is_symlink": current_site.is_symlink(),
-        "site_index_exists": (current_site / "index.html").exists(),
-        "build": build,
-        "r2_target_configured": (
-            "name: daily-news-data" in backup_config
-            and "source: /home/carter/digests/news" in backup_config
-        ),
-        "backup_config_mtime": (
-            datetime.fromtimestamp(
-                backup_config_path.stat().st_mtime, timezone.utc
-            ).isoformat()
-            if backup_config_path.exists() else ""
-        ),
+    evidence = {
+        "publication": {
+            "contract_started": "2026-08-25",
+            "dates": publication_dates,
+            "site_current_is_symlink": current_site.is_symlink(),
+            "site_index_exists": (current_site / "index.html").exists(),
+            "build": build,
+            "r2_target_configured": (
+                "name: daily-news-data" in backup_config
+                and "source: /home/carter/digests/news" in backup_config
+            ),
+            "backup_config_mtime": (
+                datetime.fromtimestamp(
+                    backup_config_path.stat().st_mtime, timezone.utc
+                ).isoformat()
+                if backup_config_path.exists() else ""
+            ),
+        },
+        "placeholder_leakage": placeholder_total,
+        "run_checks": run_checks,
     }
 
     # llm-proxy fallback count in digest window
@@ -355,9 +666,16 @@ def _audit_collector_3_digest_quality():
     evidence["fallback_count"] = fallback_log.count("X-Fallback: true")
 
     # Per-topic durations from .digests.log
-    digests_log = HOME / "digests" / ".digests.log"
+    digests_log = digests_root / ".digests.log"
     if digests_log.exists():
         evidence["durations"] = digests_log.read_text()[-2000:]
+    # Both dedup directions, each bounded: rejections (wrongly dropped events)
+    # and published titles (repeats that slipped through) in the rest of the
+    # prompt window.
+    evidence["rejections"] = _digest_rejection_evidence()
+    used = len(json.dumps(evidence, indent=2, default=str))
+    evidence["published_stories"] = _published_story_lines(
+        digests_root, _EVIDENCE_PROMPT_CHARS - used - 200)
     return evidence
 
 
@@ -886,7 +1204,27 @@ AUDIT_SECTIONS = [
             "not fully collected are left out and listed in evidence.sources_excluded. Check deterministic "
             "priority fields, durable attention records, one mail marker after the 2026-08-25 "
             "cutover, and the daily-news-data R2 target. Do not reopen known historical empty days. "
-            "Judge from the evidence and local files only; you cannot fetch web pages."
+            "Judge from the evidence and local files only; you cannot fetch web pages. "
+            "Check dedup in BOTH directions. (1) Repeats that slipped through, from "
+            "evidence.published_stories (newest first, one line per date and section listing "
+            "the titles in digests/<section>/<date>/06-curated.json; read that file to cite "
+            "lines): the same event published again in another section or within 5 days. "
+            "(2) Distinct events wrongly rejected, from evidence.rejections (latest two runs "
+            "per section; per-run counts plus one line per rejected story citing its artifact "
+            "line and the earlier published story it matched): Phase 2 "
+            "`already_covered_previous_day` and judge rejections, Phase 3 "
+            "`recent_coverage_rejected`/cross-topic rejections, Phase 5 fetch_failed/date_stale/"
+            "date_mismatch/date_unconfirmed drops. A rejection is wrong when the matched key is "
+            "a home page, search page, bare host, or live blog (`suspect_keys`); when the earlier "
+            "story is a different event in a continuing topic; when it pairs a preview or "
+            "announcement with the actual event (launch, ruling, release); when a date check "
+            "dated an evergreen page (store page, changelog) instead of the event; or when a "
+            "fetch failed while a fetchable alternate existed. Compare the rejected title with "
+            "the matched story title before deciding. Route a wrongful-rejection pattern like "
+            "other digest code defects: action code_fix with target.repo \"/home/carter\" and "
+            "the dedup/fetch/date code in target.paths (scripts/daily_news/research.py, "
+            "attention_match.py, contracts.py, news_publish.py), citing the rejection and the "
+            "matched story artifact lines. Digest editorial quality is never severity high."
         ),
     },
     {
@@ -1058,10 +1396,14 @@ _JUDGE_DOWNGRADE_ACTIONS = ("needs_carter", "report_only")
 _NO_ROUTE_NOTE = "no route proposed"
 
 _SEVERITY_RUBRIC = """\
-  - high: data loss or backup/restore failure; security exposure or credential risk; a
-    production service down or silently wrong; automation silently failing its core job.
-  - medium: user-visible defects without data risk (wrong or duplicate content), stale
-    production deploys, maintenance automation failing with a workaround.
+  - high: reserved for security exposure (network/firewall exposure such as allow rules
+    to unknown hosts, credentials or secrets exposed, public exposure of a private
+    service), data-loss risk (including backup/restore failure), or a production service
+    down. Nothing else is high.
+  - medium: user-visible defects without data risk (wrong, missing, or duplicate content,
+    including digest editorial quality: repeats and wrongly rejected stories), automation
+    failing its job, stale production deploys, maintenance automation failing with a
+    workaround.
   - low: documentation drift, version currency, cosmetic, hygiene."""
 
 _WORKER_PACKET_SCHEMA = """\
@@ -1675,7 +2017,7 @@ Rules:
 {_date_context()}
 
 COLLECTED EVIDENCE:
-{json.dumps(evidence, indent=2, default=str)[:20000]}
+{json.dumps(evidence, indent=2, default=str)[:_EVIDENCE_PROMPT_CHARS]}
 
 RECENT SESSION MEMORY (Carter's recent interactive omp sessions — context for interpreting homelab state):
 {session_memory}
@@ -1736,7 +2078,7 @@ SECTION GUIDANCE:
 {section["guidance"]}
 
 COLLECTED EVIDENCE:
-{json.dumps(evidence, indent=2, default=str)[:20000]}
+{json.dumps(evidence, indent=2, default=str)[:_EVIDENCE_PROMPT_CHARS]}
 
 WORKER VERDICT + FINDINGS:
 {json.dumps(worker_packet, indent=2)}

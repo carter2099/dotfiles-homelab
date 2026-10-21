@@ -58,6 +58,13 @@
     "reason": "SIL OFL 1.1 web font (subset, renamed DN Blackletter); Carter approved publishing this exact content",
     "scope": "public"
   },
+  "scripts/test_steward_code_prs.py": {
+    "blob": "fcabd8a2c107990e0dbecbf9d0e3ddd3a9ad7057",
+    "by": "carter",
+    "date": "2026-10-20",
+    "reason": "Steward code-PR tests; credential-looking strings are runtime-built fakes. Carter approved publishing this exact content (2026-10-20 session).",
+    "scope": "public"
+  },
   "scripts/test_steward_resolver.py": {
     "blob": "7f1eb9ec9ae8dbb6d438dd9bbdf1a0929c488317",
     "by": "carter",

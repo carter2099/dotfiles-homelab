@@ -406,9 +406,11 @@ class ResolverTests(unittest.TestCase):
         self.assertIn("not pushed", record["reason"])
         self.assertEqual(result["phase_status"], "degraded")
         fixes = report._load_fixes_with_resolutions(self.fx.run_dir)
-        page = report._html_actions({"sections": []}, fixes, {"steps": []})
-        self.assertIn("Needs You", page)
-        self.assertIn(record["commit"][:12], page)
+        (needs,) = report._triage({"steps": []}, {"sections": []}, fixes)["needs"]
+        self.assertIn(record["commit"][:12], needs["why"])
+        self.assertEqual(needs["command"], f"undo: {record['undo']}")
+        page = report._html_needs_you([needs])
+        self.assertIn("Needs you", page)
         self.assertIn(f"undo: {record['undo']}", report.html.unescape(page))
 
     def test_executed_actions_survive_a_crash_before_the_artifact(self) -> None:
@@ -651,40 +653,50 @@ class ReportResolutionTests(unittest.TestCase):
     ROUTE = {"section": "config-doc-drift", "finding_id": "finding-1", "claim": "rig edits uncommitted",
              "severity": "low", "action": "needs_carter", "status": "needs_carter", "decision": "commit or revert"}
 
-    def render(self, resolution: dict, steward_code=None) -> str:
+    def render(self, resolution: dict, steward_code=None) -> dict:
         fixes = report._apply_resolutions({"routes": [dict(self.ROUTE)]}, {"items": [resolution]})
-        return report._html_actions({"sections": []}, fixes, {"steps": []}, steward_code)
+        return report._triage({"steps": []}, {"sections": []}, fixes, steward_code=steward_code)
 
-    def test_needs_you_row_carries_recommendation_and_approve_command(self) -> None:
-        page = self.render({"source": "route", "section": "config-doc-drift", "finding_id": "finding-1",
-                            "status": "recommended", "action": "commit", "certainty": 0.7,
-                            "approve_command": "steward-approve 2026-09-29 config-doc-drift-finding-1"})
-        self.assertIn("Needs You", page)
-        self.assertIn("resolver recommends commit (Jev certainty 0.70)", page)
-        self.assertIn("approve with: steward-approve 2026-09-29 config-doc-drift-finding-1", page)
+    def test_recommendation_is_watching_with_its_approve_command(self) -> None:
+        triaged = self.render({"source": "route", "section": "config-doc-drift", "finding_id": "finding-1",
+                               "status": "recommended", "action": "commit", "certainty": 0.7,
+                               "approve_command": "steward-approve 2026-09-29 config-doc-drift-finding-1"})
+        self.assertEqual(triaged["needs"], [])
+        (item,) = triaged["watching"]
+        self.assertIn("a commit is ready; approve it with", item["text"])
+        self.assertEqual(item["command"], "steward-approve 2026-09-29 config-doc-drift-finding-1")
+        self.assertNotIn("certainty", item["text"])
 
-    def test_autonomous_action_moves_to_done_with_undo(self) -> None:
-        page = self.render({"source": "route", "section": "config-doc-drift", "finding_id": "finding-1",
-                            "status": "done", "action": "commit", "summary": "Committed the rig edits.",
-                            "undo": "git revert abc"})
-        self.assertNotIn("Needs You", page)
-        self.assertIn("Committed the rig edits.", page)
-        self.assertIn("Undo: git revert abc", page)
+    def test_held_already_fixed_item_is_dropped(self) -> None:
+        triaged = self.render({"source": "route", "section": "config-doc-drift", "finding_id": "finding-1",
+                               "status": "held", "already_fixed": True, "reason": "fixed earlier"})
+        self.assertEqual((triaged["needs"], triaged["watching"], triaged["changes"]), ([], [], []))
+
+    def test_autonomous_action_moves_to_changes_with_undo(self) -> None:
+        triaged = self.render({"source": "route", "section": "config-doc-drift", "finding_id": "finding-1",
+                               "status": "done", "action": "commit", "summary": "Committed the rig edits.",
+                               "undo": "git revert abc"})
+        self.assertEqual(triaged["needs"], [])
+        (change,) = triaged["changes"]
+        self.assertEqual(change["text"], "Config vs docs: Committed the rig edits.")
+        self.assertEqual(change["undo"], ["git revert abc"])
 
     def test_failed_live_tree_pickup_needs_carter(self) -> None:
         code = {"pickup": {"step": "dotfiles_pickup", "status": "failed", "reason": "verify failed",
                            "manual_recovery": "git reset --hard OLD"}}
-        page = report._html_actions({"sections": []}, {"routes": []}, {"steps": []}, code)
-        self.assertIn("live tree pickup FAILED: verify failed — git reset --hard OLD", page)
-        facts = report._build_tldr_facts({"steps": []}, {"sections": []}, {}, {"routes": []}, {},
-                                         steward_code=code)
-        self.assertTrue(any("live tree pickup FAILED" in item for item in facts["carter_items"]))
+        triaged = report._triage({"steps": []}, {"sections": []}, {"routes": []}, steward_code=code)
+        (needs,) = triaged["needs"]
+        self.assertEqual((needs["why"], needs["command"]), ("verify failed", "git reset --hard OLD"))
+        facts = report._build_tldr_facts(triaged)
+        self.assertTrue(facts["action_needed"])
+        self.assertEqual(facts["needs_you"][0]["what"], needs["text"])
 
-    def test_degraded_resolver_is_reported(self) -> None:
+    def test_degraded_resolver_is_watching(self) -> None:
         fixes = report._apply_resolutions({"routes": [dict(self.ROUTE)]},
-                                          {"phase_status": "degraded", "reason": "P7c failed: boom", "items": []})
-        page = report._html_actions({"sections": []}, fixes, {"steps": []})
-        self.assertIn("The Needs You resolver (P7c) did not finish: P7c failed: boom", page)
+                                          {"phase_status": "degraded", "reason": "boom", "items": []})
+        triaged = report._triage({"steps": []}, {"sections": []}, fixes)
+        self.assertEqual(triaged["needs"], [])
+        self.assertTrue(any("did not finish: boom" in w["text"] for w in triaged["watching"]))
 
 
 if __name__ == "__main__":

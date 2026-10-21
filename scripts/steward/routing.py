@@ -17,6 +17,9 @@ Executors and their boundaries:
   A finding on steward/dotfiles code (``~/scripts/**``) is repaired in a
   scratch clone of the private dotfiles repository and proposed as a
   ``steward-auto`` PR there (``code_prs``); protected paths stay needs_carter.
+  When a fix is already queued (an open steward-code PR changes the same
+  paths, or tonight's one PR slot is used) the route is ``deferred``: nothing
+  for Carter or the P7c resolver to decide, the audit re-raises it next night.
 """
 from __future__ import annotations
 
@@ -57,9 +60,11 @@ ROUTE_KEYS = (
     "section", "finding_id", "claim", "severity", "action", "status",
     "summary", "detail", "decision", "revert", "pr_url", "commit", "iteration",
 )
+# "deferred": a steward-code fix is already queued (an open PR changes the same
+# paths, or tonight's PR slot is used); the audit re-raises it next night.
 ROUTE_STATUSES = (
     "done", "pr_opened", "pr_auto_merge", "needs_carter", "report_only",
-    "failed", "handled_by_p1",
+    "failed", "handled_by_p1", "deferred",
 )
 # P1 step rows (01-applied.json) that execute version_update routes.
 VERSION_STEPS = {
@@ -988,7 +993,7 @@ def _execute_steward_code_fix(ctx, name, finding, flat):
     blocker = code_prs.blocking_pr(ctx, flat["paths"])
     if blocker:
         url, why = blocker
-        return _row(name, finding, "report_only", f"Deferred: {why}.", url), None
+        return _row(name, finding, "deferred", f"Deferred: {why}.", url, pr_url=url), None
     scratch, base = code_prs.prepare_scratch(ctx, flat["paths"])
     try:
         work = {key: flat[key] for key in ("id", "claim", "evidence", "fix", "paths")}
@@ -1015,9 +1020,9 @@ def _route_steward_code(ctx, items):
     for index, (order, name, finding, flat) in enumerate(items):
         if index >= code_prs.MAX_PRS_PER_NIGHT:
             rows.append((order, _row(
-                name, finding, "report_only",
-                "Deferred: the steward proposes at most one steward-code PR per night.",
-                "the audit raises this finding again on a later night")))
+                name, finding, "deferred",
+                "Deferred: tonight's steward-code PR slot is used; retried next night.",
+                "the steward proposes at most one steward-code PR per night")))
             continue
         result = None
         try:

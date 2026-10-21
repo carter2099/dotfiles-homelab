@@ -270,14 +270,14 @@ class PhaseStatusTests(unittest.TestCase):
         self.assertIn("1 skipped_deadline", data["reason"])
         self.assertEqual(workflow._with_canonical_status("session-memory", dict(data))
                          ["phase_status"], "degraded")
-        email = report._html_session_memory(data)
-        self.assertIn("s.jsonl", email)
-        self.assertIn("1 skipped_deadline", email)
+        (item,) = report._session_memory_events(data)
+        self.assertEqual(item["command"], "s.jsonl")
+        self.assertIn("1 skipped deadline", item["text"])
 
     def test_clean_run_stays_succeeded_and_adds_nothing_to_the_email(self):
         self.assertEqual(setup._p0b_problems([{"action": "documented"},
                                               {"action": "up_to_date"}], {"ok": True}), [])
-        self.assertEqual(report._html_session_memory({"sessions": []}), "")
+        self.assertEqual(report._session_memory_events({"sessions": []}), [])
 
 
 class ChunkBlocksTests(unittest.TestCase):

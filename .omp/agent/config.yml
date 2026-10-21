@@ -5,7 +5,7 @@ setupVersion: 2
 modelRoles:
   default: anthropic/claude-opus-5-5:high
   smol: anthropic/claude-sonnet-5-5:high
-  tiny: anthropic/claude-haiku-4-5-20251001:medium
+  tiny: anthropic/claude-haiku-5-5:medium
   slow: anthropic/claude-opus-5-5:max
   task: anthropic/claude-opus-5-5:medium
 advisor:
@@ -17,23 +17,38 @@ providers:
 dev:
   autoqaConsent: denied
 task:
-  agentPrewalk:
-    {}
-  agentModelOverrides:
-    {}
+  agentPrewalk: {}
+  agentModelOverrides: {}
 composer:
   shape: box
 statusLine:
   compactThinkingLevel: false
-  # Default preset minus "pi": OMP drops the model before the logo, so on a
-  # 45-column phone the logo cost the model + thinking level.
   preset: custom
-  leftSegments: [vim, model, mode, collab, stream, path, git, pr, context_pct, cost]
-  rightSegments: [session_name]
+  leftSegments:
+    - vim
+    - model
+    - mode
+    - collab
+    - stream
+    - path
+    - git
+    - pr
+    - context_pct
+    - cost
+  rightSegments:
+    - session_name
   segmentOptions:
-    model: { showThinkingLevel: true }
-    path: { abbreviate: true, maxLength: 40, stripWorkPrefix: true }
-    git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true }
+    model:
+      showThinkingLevel: true
+    path:
+      abbreviate: true
+      maxLength: 40
+      stripWorkPrefix: true
+    git:
+      showBranch: true
+      showStaged: true
+      showUnstaged: true
+      showUntracked: true
 tui:
   codexResetFireworks: false
 github:

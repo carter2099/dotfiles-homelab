@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .attention import canonicalize_publisher_url, event_terms
-from .contracts import coverage_key, hard_paywall_domain, is_asset_cdn_url, is_listing_url
+from .contracts import coverage_key, hard_paywall_domain, is_event_url, is_non_article_page
 from jev import JevClient, JevUnavailable
 
 TOKEN = re.compile(r"[a-z0-9]+(?:\.[0-9]+)*")
@@ -116,7 +116,7 @@ class Index:
                 self.inverted[token].append(index)
             for url in _row_urls(row):
                 key = coverage_key(url)
-                if key and len(key.split("/", 1)[-1]) > 8:
+                if key and is_event_url(key):
                     self.by_url[key].append(index)
         self.size = len(rows)
 
@@ -127,7 +127,7 @@ class Index:
 def _doc_key(row: dict[str, Any]) -> str:
     url = row.get("url") or ""
     key = coverage_key(url) if url else ""
-    if key and len(key.split("/", 1)[-1]) > 8:
+    if key and is_event_url(key):
         return key
     return "title:" + " ".join(toks(row.get("title") or row.get("text") or ""))[:160]
 
@@ -404,8 +404,7 @@ def _is_publisher_article(url: str, own: str) -> bool:
         and domain != own and domain not in PR_DOMAINS
         and not any(host == item or host.endswith(f".{item}") for item in AGGREGATOR_HOSTS)
         and hard_paywall_domain(url) is None
-        and not is_asset_cdn_url(url)
-        and not is_listing_url(url)
+        and not is_non_article_page(url)
     )
 
 
@@ -440,8 +439,10 @@ def same_event_keys(docs: list[dict[str, Any]], index: Index) -> list[str]:
     """Coverage keys of every row Jev judged to report the candidate's exact event.
 
     Any source counts, uncapped, but only a row's primary URLs: aggregator ``more``
-    lists (Kagi clusters, Techmeme) can span developments. Short paths are skipped
-    as in ``Index``. Phase 3 matches these against the recent-coverage ledger.
+    lists (Kagi clusters, Techmeme) can span developments. Keys that cannot name
+    one event (``is_event_url``: bare hosts, home, search, live-blog, and listing
+    pages) are skipped as in ``Index``. Phase 3 matches these against the
+    recent-coverage ledger.
     """
     keys: set[str] = set()
     for doc in docs:
@@ -451,6 +452,6 @@ def same_event_keys(docs: list[dict[str, Any]], index: Index) -> list[str]:
             row = index.rows[row_index]
             for url in row.get("urls") or ([row["url"]] if row.get("url") else []):
                 key = coverage_key(url)
-                if key and len(key.split("/", 1)[-1]) > 8:
+                if key and is_event_url(key):
                     keys.add(key)
     return sorted(keys)
