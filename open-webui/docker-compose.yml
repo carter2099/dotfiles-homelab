@@ -22,6 +22,12 @@ services:
       - WEBUI_NAME=Homelab Chat
     volumes:
       - open-webui:/app/backend/data
+      # 2026-10 eMudhra CA compromise: use the host's patched trust store (dir = bundle + OpenSSL hash dir); remove once upstream image ships certifi >= 2026.10.19 and patched ca-certificates.
+      - /etc/ssl/certs:/etc/ssl/certs:ro
+      - /etc/ssl/certs/ca-certificates.crt:/usr/local/lib/python3.11/site-packages/certifi/cacert.pem:ro
+      - /etc/ssl/certs/ca-certificates.crt:/usr/local/lib/python3.11/site-packages/pip/_vendor/certifi/cacert.pem:ro
+      - /etc/ssl/certs/ca-certificates.crt:/usr/local/lib/python3.11/site-packages/botocore/cacert.pem:ro
+      - /etc/ssl/certs/ca-certificates.crt:/usr/local/lib/python3.11/site-packages/grpc/_cython/_credentials/roots.pem:ro
     networks:
       owui-host:             # dedicated host-access bridge; attach nothing else to it
         gw_priority: 1       # default route (egress) via br-owui
