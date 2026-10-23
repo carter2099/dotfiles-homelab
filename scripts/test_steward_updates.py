@@ -3294,6 +3294,47 @@ class EmailTriageTests(unittest.TestCase):
         self.assertIn("blog container out of memory", page)
         self.assertIn("still failing after the automatic repair attempts", page)
 
+    DEAD = {"provider": "anthropic", "status": "dead", "login_command": "omp login anthropic"}
+
+    def test_dead_omp_login_is_needs_you_with_the_login_command(self):
+        triaged = report._triage({"steps": []}, {"sections": []}, {"routes": []}, omp_login=self.DEAD)
+        (needs,) = triaged["needs"]
+        self.assertEqual(needs["command"], "omp login anthropic")
+        self.assertEqual(triaged["verdict"], ("problem", "Problem: omp login expired"))
+        self.assertIn("omp login anthropic", report._html_needs_you([needs]))
+
+    def test_healthy_unprobed_or_inconclusive_omp_login_never_reaches_needs_you(self):
+        for login in (None, {}, {"provider": "anthropic", "status": "ok"},
+                      {"provider": "opencode-go", "status": "not_applicable"}):
+            with self.subTest(login=login):
+                t = report._triage({"steps": []}, {"sections": []}, {"routes": []}, omp_login=login)
+                self.assertEqual((t["needs"], t["watching"]), ([], []))
+        t = report._triage({"steps": []}, {"sections": []}, {"routes": []},
+                           omp_login={"provider": "anthropic", "status": "unknown", "detail": "timed out"})
+        self.assertEqual(t["needs"], [])
+        self.assertIn("Could not check", t["watching"][0]["text"])
+
+    def test_report_rechecks_a_dead_or_inconclusive_login(self):
+        def inputs(recheck, setup_data):
+            with tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(report, "_omp_login_probe", return_value=recheck) as probe, \
+                    patch.object(report, "_dotfiles_untracked_paths", return_value=[]):
+                run_dir = Path(tmp) / "2026-10-22"
+                run_dir.mkdir()
+                return report._report_inputs(run_dir, setup_data)["triaged"], probe
+        base = {"date": "2026-10-22"}
+        t, p = inputs({"status": "ok", "provider": "anthropic"}, {**base, "omp_login": self.DEAD})
+        self.assertEqual(t["needs"], [])
+        p.assert_called_once()
+        t, _ = inputs({"status": "unknown", "provider": "anthropic"}, {**base, "omp_login": self.DEAD})
+        self.assertEqual(len(t["needs"]), 1)  # inconclusive recheck keeps P0's verdict
+        t, _ = inputs({"status": "dead", "provider": "anthropic"},
+                      {**base, "omp_login": {"provider": "anthropic", "status": "unknown"}})
+        self.assertEqual(len(t["needs"]), 1)  # P0's probe hit the failing refresh
+        t, p = inputs({"status": "dead"}, base)  # no P0 record → no probe
+        self.assertEqual(t["needs"], [])
+        p.assert_not_called()
+
 
 class RunTimingAndMemoryTests(unittest.TestCase):
     MIB = 1048576
@@ -3331,7 +3372,8 @@ class RunTimingAndMemoryTests(unittest.TestCase):
                 patch.object(report, "SESSION_DIR", self.root / "sessions"), \
                 patch.object(report, "_current_boot_id", return_value="boot-after"), \
                 patch.object(report, "run_capture", return_value="6.8.0-146-generic"), \
-                patch.object(report, "_steward_memory_high_mib", return_value=6144):
+                patch.object(report, "_steward_memory_high_mib", return_value=6144), \
+                patch.object(report, "_dotfiles_untracked_paths", return_value=[]):
             report.phase_9_archive(self.run_dir, {"date": "2026-10-13"}, elapsed_s)
         return json.loads((self.root / "runs.jsonl").read_text().splitlines()[-1])
 

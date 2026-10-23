@@ -80,6 +80,7 @@ from .runtime import (
     _load_prev_artifact,
     _message_error_str,
     _ndjson_looks_like_event_stream,
+    _omp_login_probe,
     _reboot_if_needed,
     apt_installed_version,
     apt_upgradable,
@@ -156,6 +157,10 @@ def phase_0_setup(args, run_dir=None):
         except Exception as e:
             dep["error"] = str(e)
             print(f"  dependabot: stop failed — {e}")
+    # Before the first model call (P0b). `omp token` also performs the refresh an
+    # expired access token needs, so a dead refresh token surfaces here as a dead
+    # login instead of N silent "No API key found" failures. Read-only, so dry runs too.
+    omp_login = _omp_login_probe()
     data = {
         "date": date_str,
         "run_dir": str(run_dir),
@@ -165,6 +170,7 @@ def phase_0_setup(args, run_dir=None):
         "resume": args.resume,
         "usage": usage,
         "dependabot": dep,
+        "omp_login": omp_login,
         # Startup steward-code merge + live-tree pickup (steward_runner.py).
         "steward_code": startup_packet(),
     }
@@ -189,6 +195,7 @@ def phase_0_setup(args, run_dir=None):
             f"monthly={a['monthly_pct']}%{extra}{reset_s}"
         )
     print(f"[P0] setup -> {artifact}")
+    print(f"  omp login ({omp_login['provider']}): {omp_login['status']}")
     if usage["proxy_error"]:
         print(f"  proxy: UNREACHABLE ({usage['proxy_error']})")
     else:

@@ -90,6 +90,7 @@ from .runtime import (
     _load_prev_artifact,
     _message_error_str,
     _ndjson_looks_like_event_stream,
+    _omp_login_probe,
     _reboot_if_needed,
     apt_installed_version,
     apt_upgradable,
@@ -1291,6 +1292,28 @@ def _steward_code_events(steward_code):
     return items
 
 
+def _omp_login_events(omp_login):
+    """P0's omp login probe: a dead login silently fails every scheduled model job."""
+    if not isinstance(omp_login, dict):
+        return []
+    provider = str(omp_login.get("provider") or "anthropic")
+    status = omp_login.get("status")
+    if status == "dead":
+        return [_item(
+            "needs", f"The {provider} model login is no longer valid",
+            why="omp's stored login was rejected and disabled, so every scheduled model job "
+                "fails until it is renewed: this report's audit and summary, Daily News, "
+                "Hyperliquid and Dependabot. Audit sections show as incomplete meanwhile.",
+            todo="Sign in again from an interactive omp session on the ThinkPad:",
+            command=str(omp_login.get("login_command") or f"omp login {provider}"),
+            problem="omp login expired",
+        )]
+    if status == "unknown":
+        return [_item("watch", f"Could not check the {provider} model login: "
+                      f"{_clip(omp_login.get('detail') or 'probe inconclusive', 160)}")]
+    return []
+
+
 def _public_mirror_events(public):
     """Last night's public dotfiles mirror: held/blocked files and failures."""
     if not public:
@@ -1704,14 +1727,15 @@ def _audit_incomplete_events(audit):
 
 def _triage(applied, audit, fixes, *, steward_code=None, validation=None, heartbeat=None,
             troubleshoot=None, remediation=None, untracked_dotfiles=None, prev_dotfiles=None,
-            public=None, p0b=None, rig_last_ok=None):
+            public=None, p0b=None, rig_last_ok=None, omp_login=None):
     """Every report item, triaged once.
 
     Needs You is only for extreme items: a service still failing (P3 could not
     fix it, heartbeat failed, a check failing at report time); an unverified
     rollback, Docker daemon failure, unrepairable OMP DB or a rig unhealthy
-    after reboot; a steward-code pickup left unverified or a partly applied
-    follow-up fix; a high-severity or security audit finding left for Carter;
+    after reboot; a dead omp model login; a steward-code pickup left unverified
+    or a partly applied follow-up fix; a high-severity or security audit finding
+    left for Carter;
     or the whole maintenance phase failing. Everything else still open is
     Watching. Changes are deduplicated and numbered for the undo appendix.
     """
@@ -1720,6 +1744,7 @@ def _triage(applied, audit, fixes, *, steward_code=None, validation=None, heartb
         + _p1_events(applied, rig_last_ok)
         + _route_events(audit, fixes)
         + _steward_code_events(steward_code)
+        + _omp_login_events(omp_login)
         + _public_mirror_events(public)
         + _host_drift_events(remediation, untracked_dotfiles, prev_dotfiles)
         + _session_memory_events(p0b)
@@ -2269,9 +2294,19 @@ def _report_inputs(run_dir, setup_data):
         prev_dotfiles, public = {}, {}
     rig_skipped = any(isinstance(s, dict) and s.get("step") in _RIG_STEPS
                       and s.get("status") == "skipped" for s in applied.get("steps") or [])
+    omp_login = setup_data.get("omp_login")
+    if isinstance(omp_login, dict) and omp_login.get("status") in ("dead", "unknown"):
+        # P0 may be cached from before a fix (--resume after `omp login`), and P0's own
+        # probe may be the call whose refresh fails (omp disables the credential only
+        # afterwards): re-probe so a login that is dead now is Needs You and a renewed one
+        # is quiet. An inconclusive recheck keeps P0's verdict.
+        recheck = _omp_login_probe()
+        if recheck["status"] in ("ok", "dead"):
+            omp_login = recheck
     triaged = _triage(
         applied, audit, fixes,
         steward_code=setup_data.get("steward_code"),
+        omp_login=omp_login,
         validation=validation,
         heartbeat=heartbeat,
         troubleshoot=troubleshoot,

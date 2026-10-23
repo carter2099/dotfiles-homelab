@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from daily_news import archive, attention, attention_sources, catalog, contracts, copy as copy_module, editorial, research, runtime, workflow  # noqa: E402
 import jev  # noqa: E402
+import digest_runner  # noqa: E402
 
 
 def check(condition: bool, message: str) -> None:
@@ -837,6 +838,42 @@ def test_cross_day_wording_dedup_keeps_new_events_in_continuing_topics() -> None
         check("headline/event wording" in rejected["rejection_reason"], rejected)
 
 
+def test_recent_coverage_blocks_redated_url_of_same_article() -> None:
+    """A publisher re-dating a covered article's URL cannot re-run the story.
+
+    Regression for 2026-10-17/18 AI & Tech: TechCrunch's Replit/Anthropic story
+    ran as /2026/10/16/<slug> and again as /2026/10/17/<slug>/ under a new
+    headline sharing little wording. Short recurring slugs stay new editions.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        prior = root / catalog.TOPICS["ai-tech"]["category"] / "2026-10-17"
+        prior.mkdir(parents=True)
+        original = "https://techcrunch.com/2026/10/16/replit-is-no-longer-working-with-anthropic-ceo-says"
+        recurring = "https://techcrunch.com/2026/10/16/daily-crunch"
+        (prior / "06-curated.json").write_text(json.dumps({"fresh": [
+            {"url": original}, {"url": recurring},
+        ]}))
+        redated = "https://techcrunch.com/2026/10/17/replit-is-no-longer-working-with-anthropic-ceo-says/"
+        next_edition = "https://techcrunch.com/2026/10/17/daily-crunch"
+        fresh = [
+            {"title": "Masad explains the switch to OpenAI models", "url": redated,
+             "editorial_significance": "high", "date_published": "2026-10-17"},
+            {"title": "Daily Crunch: chip export rules tighten", "url": next_edition,
+             "editorial_significance": "high", "date_published": "2026-10-17"},
+        ]
+        run_dir = root / catalog.TOPICS["ai-tech"]["category"] / "2026-10-18"
+        run_dir.mkdir(parents=True)
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(catalog.TOPICS["ai-tech"], fresh, run_dir)
+        check([item["url"] for item in queue] == [next_edition], f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["url"] == redated, rejected)
+        check(rejected["matched_keys"] == [contracts.coverage_key(original)], rejected)
+        check("re-dated" in rejected["rejection_reason"], rejected)
+
+
 
 
 def _shared_url_findings(today: str) -> tuple[str, list[dict]]:
@@ -1142,6 +1179,112 @@ def test_runtime_preflight_fails_closed_on_missing_symbol() -> None:
             check(raised, "preflight accepted a forced search language")
 
 
+def test_model_credential_preflight_requires_a_usable_research_provider() -> None:
+    declared = {"opencode-go": {"baseUrl": "http://proxy.test/v1", "models": {"deepseek-v4.1-flash"}}}
+    dead = 'No active credential found for provider "anthropic".'
+
+    def run(models, states, offline=""):
+        checked: list[str] = []
+
+        def fake_error(provider):
+            checked.append(provider)
+            result = states.get(provider)
+            return result.pop(0) if isinstance(result, list) else result
+
+        out = io.StringIO()
+        error = None
+        with patch.dict(os.environ, {"DAILY_NEWS_OFFLINE": offline}), \
+             patch("daily_news.runtime._load_providers", return_value=declared), \
+             patch.object(runtime, "MODEL", models[0]), \
+             patch.object(runtime, "MODEL_FALLBACK", models[1]), \
+             patch.object(runtime, "MODEL_REVIEWER", models[2]), \
+             patch.object(runtime, "omp_credential_error", side_effect=fake_error), \
+             patch.object(workflow, "OMP_CREDENTIAL_RETRY_SECONDS", 0), \
+             contextlib.redirect_stdout(out):
+            try:
+                workflow.validate_model_credentials()
+            except RuntimeError as raised:
+                error = str(raised)
+        return error, checked, out.getvalue()
+
+    opus, sonnet = "anthropic/claude-opus-5-5:medium", "anthropic/claude-sonnet-5-5:high"
+    codex, bare = "openai-codex/gpt-5.6-luna", "deepseek-v4.1-flash"
+
+    error, checked, out = run((opus, sonnet, opus), {})
+    check(error is None and checked == ["anthropic"] and "WARN" not in out, (error, checked, out))
+
+    error, _, _ = run((opus, sonnet, opus), {"anthropic": dead})
+    check(error is not None and "No active credential found" in error and "research" in error, error)
+
+    error, _, out = run((opus, codex, opus), {"anthropic": dead})
+    check(error is None and "WARN" in out and "anthropic" in out, (error, out))
+
+    error, _, _ = run((opus, codex, opus), {"anthropic": dead, "openai-codex": "expired"})
+    check(error is not None and "anthropic" in error and "openai-codex" in error, error)
+
+    error, _, out = run((opus, sonnet, codex), {"openai-codex": "expired"})
+    check(error is None and "openai-codex" in out, (error, out))
+
+    error, checked, _ = run((bare, bare, bare), {"anthropic": dead})
+    check(error is None and checked == [], (error, checked))
+
+    error, _, out = run((bare, sonnet, bare), {"anthropic": dead})
+    check(error is None and "WARN" in out, (error, out))
+
+    # A transient probe failure is retried once before it can cancel the edition.
+    error, checked, out = run((opus, sonnet, opus), {"anthropic": ["refresh timed out", None]})
+    check(error is None and checked == ["anthropic", "anthropic"] and "WARN" not in out,
+          (error, checked, out))
+
+    error, checked, out = run((opus, sonnet, opus), {"anthropic": dead}, offline="1")
+    check(error is None and checked == [] and "skipped" in out, (error, checked, out))
+
+
+def test_omp_credential_probe_never_captures_the_token() -> None:
+    calls = []
+
+    class Done:
+        def __init__(self, returncode, stderr=""):
+            self.returncode, self.stderr, self.stdout = returncode, stderr, None
+
+    results = iter([
+        Done(0),
+        Done(1, 'No active credential found for provider "anthropic".\nConfigured providers: openai-codex\n'),
+        Done(1),
+        FileNotFoundError("omp"),
+        runtime.subprocess.TimeoutExpired(["omp"], 30),
+    ])
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        outcome = next(results)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    with patch("daily_news.runtime.subprocess.run", side_effect=fake_run):
+        ok, dead, silent, missing, hung = (runtime.omp_credential_error("anthropic") for _ in range(5))
+    check(ok is None, ok)
+    check(dead == 'No active credential found for provider "anthropic".', dead)
+    check("exited 1" in silent and "did not complete" in missing and "did not complete" in hung,
+          (silent, missing, hung))
+    for cmd, kwargs in calls:
+        check(cmd == ["omp", "token", "anthropic"], cmd)
+        check(kwargs["stdout"] is runtime.subprocess.DEVNULL, "token stdout must be discarded")
+
+
+def test_preflight_entrypoint_fails_on_dead_model_login() -> None:
+    raised = False
+    with patch.object(digest_runner, "validate_runtime_contract"), \
+         patch.object(digest_runner, "validate_model_credentials",
+                      side_effect=RuntimeError("Daily News preflight failed: dead login")):
+        try:
+            digest_runner.main(["--preflight"])
+        except RuntimeError as error:
+            raised = "dead login" in str(error)
+    check(raised, "preflight swallowed a dead model login")
+
+
 def test_phase_inputs_include_actual_code_hashes() -> None:
     baseline = runtime.phase_inputs("contract-test", upstream={"value": 1})
     check(len(baseline["code_hash"]) == 64, baseline)
@@ -1203,6 +1346,32 @@ def test_empty_phase_has_explicit_durable_outcome() -> None:
             validator=lambda value: isinstance(value, dict),
         )
         check(resumed == {"items": [], "reason": "no input"}, resumed)
+
+
+def test_new_phase_attempt_clears_stale_empty_status_sidecar() -> None:
+    """2026-10-22 audit: a recovered phase kept its earlier attempt's sidecar and read as degraded."""
+    with tempfile.TemporaryDirectory() as temporary:
+        run_dir = Path(temporary) / "2026-09-01"
+        artifact = run_dir / "01-research-raw.json"
+        sidecar = run_dir / "01-research-raw.status.json"
+
+        def attempt(code_hash: str):
+            return runtime.begin_or_load_phase(
+                run_dir, "research", inputs={"code_hash": code_hash, "upstream": []},
+                artifact_path=artifact, schema_version=1,
+                validator=lambda value: isinstance(value, list),
+            )
+
+        state, _ = attempt("first")
+        runtime.complete_phase_json(state, "research", artifact, [], outcome="empty", reason="no findings")
+        check(runtime.write_phase_status(artifact, status="empty", reason="no findings") == sidecar, sidecar)
+        _, cached = attempt("first")
+        check(cached == [] and sidecar.exists(), "a resumed empty phase lost its status sidecar")
+
+        state, cached = attempt("second")
+        check(cached is None, cached)
+        runtime.complete_phase_json(state, "research", artifact, [{"title": "Story"}])
+        check(not sidecar.exists(), "a recovered phase kept the stale empty-status sidecar")
 
 
 class _PhaseJev:
@@ -3250,6 +3419,7 @@ def main() -> None:
         test_cross_topic_blocks_earlier_sections_same_event_evidence,
         test_recent_publication_blocks_same_event_without_shared_keys,
         test_cross_day_wording_dedup_keeps_new_events_in_continuing_topics,
+        test_recent_coverage_blocks_redated_url_of_same_article,
         test_phase_two_shared_url_findings_keep_their_own_metadata,
         test_phase_two_drops_unidentified_shared_url_finding,
         test_phase_two_restores_approvals_with_altered_urls,
@@ -3258,8 +3428,12 @@ def main() -> None:
         test_phase_two_rejects_id_url_conflict,
         test_phase_two_applies_judge_significance,
         test_runtime_preflight_fails_closed_on_missing_symbol,
+        test_model_credential_preflight_requires_a_usable_research_provider,
+        test_omp_credential_probe_never_captures_the_token,
+        test_preflight_entrypoint_fails_on_dead_model_login,
         test_phase_inputs_include_actual_code_hashes,
         test_empty_phase_has_explicit_durable_outcome,
+        test_new_phase_attempt_clears_stale_empty_status_sidecar,
         test_attention_phase_persists_durable_observations,
         test_attention_phase_leaves_out_failed_sources_and_unadjudicated_stories,
         test_offline_attention_phase_never_reaches_the_network,

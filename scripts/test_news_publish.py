@@ -807,6 +807,70 @@ def test_legacy_ongoing_key_is_ignored() -> None:
             check(f"{title} lead story" in pages["front"], key)
 
 
+def test_publish_refuses_an_edition_with_no_fresh_story() -> None:
+    """2026-10-22: a dead model login left five empty sections that were activated and mailed."""
+    good_date, empty_date, mailed_date = "2026-08-24", "2026-08-25", "2026-08-26"
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        digests = root / "digests"
+        news_dir = digests / "news"
+        assets = write_assets(root)
+        sent: list[str] = []
+
+        def write_runs(issue_date: str, *, empty: bool) -> None:
+            for key in news.TOPIC_ORDER:
+                topic = news.TOPICS[key]
+                run_dir = digests / topic["category"] / issue_date
+                run_dir.mkdir(parents=True, exist_ok=True)
+                publication = sample_publication(topic, issue_date, topic["web_title"])
+                if empty:
+                    publication.update(
+                        status="empty", fresh=[],
+                        standfirst="No publishable stories were selected for this section.",
+                    )
+                (run_dir / "publication.json").write_text(json.dumps(publication))
+
+        def publish(issue_date: str, **kwargs):
+            return news.publish(
+                issue_date, digests_dir=digests, news_dir=news_dir, asset_dir=assets,
+                send_func=lambda subject, body, recipients: sent.append(subject), **kwargs,
+            )
+
+        write_runs(good_date, empty=False)
+        publish(good_date)
+        live = (news_dir / "current").resolve()
+        releases = sorted(path.name for path in (news_dir / "releases").iterdir())
+        check(len(sent) == 1, sent)
+
+        write_runs(empty_date, empty=True)
+        for send_email in (True, False):
+            try:
+                publish(empty_date, send_email=send_email)
+            except RuntimeError as error:
+                check("every section" in str(error) and empty_date in str(error), error)
+            else:
+                raise AssertionError("published an edition with no fresh story")
+        check((news_dir / "current").resolve() == live, "empty edition replaced the live release")
+        check(sorted(path.name for path in (news_dir / "releases").iterdir()) == releases,
+              "empty edition built a release")
+        check(len(sent) == 1, f"empty edition was mailed: {sent}")
+        check(not (news_dir / "mail" / f"{empty_date}.sent.json").exists(), "empty edition wrote a mail marker")
+
+        # A date whose mail already shipped (even empty) may be rebuilt, and never re-mailed.
+        write_runs(mailed_date, empty=True)
+        (news_dir / "mail" / f"{mailed_date}.sent.json").write_text(json.dumps({"date": mailed_date}))
+        shipped = publish(mailed_date)
+        check(not shipped["email_sent"] and len(sent) == 1, shipped)
+
+        # One story in any section is a real edition.
+        topic = news.TOPICS["world"]
+        (digests / topic["category"] / empty_date / "publication.json").write_text(
+            json.dumps(sample_publication(topic, empty_date, "World"))
+        )
+        recovered = publish(empty_date)
+        check(recovered["email_sent"] and len(sent) == 2, (recovered, sent))
+
+
 def main() -> None:
     tests = [
         test_legacy_html_migration,
@@ -820,6 +884,7 @@ def main() -> None:
         test_tracked_assets_stay_within_byte_budgets,
         test_publisher_never_silently_uses_stale_or_out_of_window_content,
         test_legacy_ongoing_key_is_ignored,
+        test_publish_refuses_an_edition_with_no_fresh_story,
     ]
     for test in tests:
         test()

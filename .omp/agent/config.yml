@@ -53,3 +53,5 @@ tui:
   codexResetFireworks: false
 github:
   enabled: true
+codexResets:
+  autoRedeem: "yes"

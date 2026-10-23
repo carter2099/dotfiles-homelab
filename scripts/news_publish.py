@@ -1495,6 +1495,19 @@ def publish(
     if issue_date not in editions:
         raise RuntimeError(f"no curated digest artifacts found for {issue_date}")
 
+    # A dead model login (2026-10-22) leaves every section 'empty': five valid
+    # but story-less publications that used to be activated and mailed. A date
+    # whose mail already went out is the shipped truth and may still be rebuilt.
+    shipped = (news_dir / "mail" / f"{issue_date}.sent.json").exists()
+    if not shipped and not any(
+        publication["fresh"] for publication in editions[issue_date].values()
+    ):
+        raise RuntimeError(
+            f"every section of {issue_date} is empty (0 fresh stories in "
+            f"{len(editions[issue_date])} sections); refusing to activate or "
+            "mail it. Check the curation logs and the omp login"
+        )
+
     release = build_site(editions, news_dir, asset_dir)
     print(f"[site] activated {release.name} ({len(editions)} dates)")
 

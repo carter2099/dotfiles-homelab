@@ -536,6 +536,35 @@ def _omp_agent_environment() -> dict[str, str]:
     env["HOME"] = str(Path.home())
     return env
 
+OMP_TOKEN_PROBE_TIMEOUT = 30
+
+def omp_credential_error(provider: str) -> str | None:
+    """None when omp holds a usable credential for ``provider``, else why not.
+
+    ``omp token`` prints the secret on stdout, so stdout goes to /dev/null and is
+    never read, logged, or shown. It makes no model call and refreshes only an
+    expired access token; never add --force-refresh (refresh tokens rotate).
+    A missing, hung, or failing omp counts as unusable: the ``omp -p`` calls
+    this guards would fail the same way.
+    """
+    try:
+        result = subprocess.run(
+            ["omp", "token", provider],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=OMP_TOKEN_PROBE_TIMEOUT,
+            cwd="/tmp",
+            env=_omp_agent_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"omp token {provider} did not complete: {error}"
+    if result.returncode == 0:
+        return None
+    lines = (result.stderr or "").strip().splitlines()
+    return (lines[0] if lines else f"omp token {provider} exited {result.returncode}")[:300]
+
 def _call_omp_no_tools(
     system: str,
     user: str,
@@ -920,6 +949,8 @@ def begin_or_load_phase(
     if cached is not None:
         print(f"  [skip] {phase} output validated: {artifact_path}")
         return state, cached
+    # A new attempt supersedes an earlier attempt's empty-status sidecar.
+    phase_status_path(artifact_path).unlink(missing_ok=True)
     state.begin_phase(
         phase,
         inputs=inputs,
@@ -985,6 +1016,7 @@ def begin_or_load_text_phase(
     )
     if cached is not None:
         return state, cached
+    phase_status_path(artifact_path).unlink(missing_ok=True)
     state.begin_phase(
         phase, inputs=inputs, artifact_path=artifact_path,
         schema_version=schema_version,
@@ -992,9 +1024,17 @@ def begin_or_load_text_phase(
     return state, None
 
 
+def phase_status_path(artifact_path: Path) -> Path:
+    """Status sidecar for a phase; begin_or_load_*phase removes it on a new attempt."""
+    return artifact_path.with_name(f"{artifact_path.stem}.status.json")
+
+
 def write_phase_status(path: Path, *, status: str, reason: str, **details: Any) -> Path:
-    """Write a deterministic status sidecar for an empty/no-input phase."""
+    """Write a deterministic status sidecar for an empty/no-input phase.
+
+    ``path`` must be the phase's registered artifact_path so a new attempt
+    removes the sidecar."""
     payload = {"status": status, "reason": reason, **details}
-    status_path = path.with_name(f"{path.stem}.status.json")
+    status_path = phase_status_path(path)
     atomic_write_json(status_path, payload)
     return status_path

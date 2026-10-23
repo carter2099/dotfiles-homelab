@@ -128,6 +128,57 @@ def validate_runtime_contract() -> None:
         raise RuntimeError("Daily News preflight failed: " + "; ".join(errors))
 
 
+# One retry so a transient refresh/network failure cannot cancel an edition.
+OMP_CREDENTIAL_RETRY_SECONDS = 20
+
+
+def validate_model_credentials() -> None:
+    """Fail before research when no research model has a usable omp login.
+
+    Only models `_call_llm_proxy` sends through ``omp -p`` (``anthropic/``,
+    ``openai-codex/``) need a stored login; bare OpenCode Go IDs POST to :8082
+    and always count as usable. Research is MODEL then MODEL_FALLBACK, so it
+    fails only when every research model's login is dead; a dead second
+    research provider or a dead critic (MODEL_REVIEWER) is a WARN.
+    2026-10-22: Anthropic invalid_grant disabled the login and every `omp -p`
+    call failed while the run still published an empty edition.
+    DAILY_NEWS_OFFLINE=1 (verify-daily-news.sh, CI: no omp installed) skips it.
+    """
+    if os.environ.get("DAILY_NEWS_OFFLINE") == "1":
+        print("Daily News credential preflight skipped (DAILY_NEWS_OFFLINE=1)")
+        return
+
+    def omp_providers(models: tuple[str, ...]) -> list[str]:
+        return list(dict.fromkeys(
+            model.split("/", 1)[0] for model in models if runtime._omp_authenticated(model)
+        ))
+
+    research_models = (runtime.MODEL, runtime.MODEL_FALLBACK)
+    research = omp_providers(research_models)
+    critic = omp_providers((runtime.MODEL_REVIEWER,))
+    unusable: dict[str, str] = {}
+    for provider in dict.fromkeys(research + critic):
+        reason = runtime.omp_credential_error(provider)
+        if reason:
+            time.sleep(OMP_CREDENTIAL_RETRY_SECONDS)
+            reason = runtime.omp_credential_error(provider)
+        if reason:
+            unusable[provider] = reason
+    every_research_model_needs_login = all(
+        runtime._omp_authenticated(model) for model in research_models
+    )
+    if every_research_model_needs_login and all(provider in unusable for provider in research):
+        raise RuntimeError(
+            "Daily News preflight failed: no research model has a usable omp credential ("
+            + "; ".join(f"{provider}: {unusable[provider]}" for provider in research)
+            + "); run `omp login "
+            + research[0]
+            + "` interactively before the next run"
+        )
+    for provider, reason in unusable.items():
+        print(f"WARN  omp credential for {provider} is unusable: {reason}")
+
+
 def _write_test_report(
     run_dir: Path,
     topic: dict[str, Any],

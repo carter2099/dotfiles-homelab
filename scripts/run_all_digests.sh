@@ -27,7 +27,8 @@ _cleanup() { # shellcheck disable=SC2329
 trap _cleanup TERM INT HUP
 
 # Fail before expensive research when an automated code change removes a
-# load-bearing runtime symbol or topic contract.
+# load-bearing runtime symbol or topic contract, or when no research model has
+# a usable omp login (2026-10-22: a dead login published an all-empty edition).
 if ! python3 "$HOME/scripts/digest_runner.py" --preflight; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) PREFLIGHT FAIL — curation not started" | tee -a "$LOGFILE" || true
     exit 1

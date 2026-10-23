@@ -1000,6 +1000,13 @@ def phase_3_rank(
     from news_publish import _frequency_of
 
     event_frequency = _frequency_of([{"fresh": event_corpus + eligible_fresh}])
+    # A publisher re-dating the same article's URL (/2026/10/16/<slug> ->
+    # /2026/10/17/<slug>) defeats exact key matches and often the wording test.
+    recent_dateless: dict[str, str] = {}
+    for key in sorted(recent_coverage):
+        dateless = dateless_coverage_key(key)
+        if dateless:
+            recent_dateless.setdefault(dateless, key)
     recent_coverage_rejected = []
     kept_fresh = []
     for item in eligible_fresh:
@@ -1021,6 +1028,12 @@ def phase_3_rank(
                 matched = [coverage_key(matched_story.get("url", ""))]
                 reason = (f"same event published in the previous {CROSS_DAY_DEDUP_DAYS} days "
                           "(headline/event wording)")
+        if not matched:
+            dateless = dateless_coverage_key(coverage_key(item.get("url", "")))
+            if dateless in recent_dateless:
+                matched = [recent_dateless[dateless]]
+                reason = (f"same article re-dated under a new URL in the previous "
+                          f"{CROSS_DAY_DEDUP_DAYS} days")
         if not matched:
             kept_fresh.append(item)
             continue

@@ -12,7 +12,7 @@ import argparse
 from daily_news.catalog import TOPICS
 from daily_news.runtime import configure_test_mode
 from daily_news import runtime
-from daily_news.workflow import run_digest, validate_runtime_contract
+from daily_news.workflow import run_digest, validate_model_credentials, validate_runtime_contract
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.preflight:
         validate_runtime_contract()
+        validate_model_credentials()
         print("Daily News preflight passed")
         return 0
     if args.topic is None:

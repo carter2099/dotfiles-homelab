@@ -2,6 +2,7 @@
 """P0b memoirs: long sessions are checked in chunks, never from a truncated transcript
 (F258), and an up-to-date memoir costs no model call (J008). Fake model calls only."""
 from __future__ import annotations
+import argparse
 import json
 import os
 import re
@@ -325,6 +326,57 @@ class DeadlineCarryOverTests(unittest.TestCase):
         with patch.object(setup, "SESSION_INTERACTIVE_DIR", root / "sessions"), \
                 patch.object(setup, "RUN_DIR_BASE", root / "runs"):
             self.assertEqual(list(setup._sessions_to_scan(START, root / "runs" / "x")), [])
+
+
+class OmpLoginProbeTests(unittest.TestCase):
+    NONE = 'No active credential found for provider "anthropic"'
+
+    def probe(self, returncode=0, stderr="", model=runtime.STEWARD_MODEL, side_effect=None):
+        done = subprocess.CompletedProcess([], returncode, None, stderr)
+        with patch.object(runtime.subprocess, "run", return_value=done,
+                          side_effect=side_effect) as run:
+            return runtime._omp_login_probe(model), run
+
+    def test_usable_login_discards_stdout_and_never_forces_a_refresh(self):
+        result, run = self.probe()
+        self.assertEqual((result["status"], result["provider"]), ("ok", "anthropic"))
+        argv, kwargs = run.call_args.args[0], run.call_args.kwargs
+        self.assertEqual(argv[1:], ["token", "anthropic"])
+        self.assertNotIn("--force-refresh", argv)
+        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)  # the secret is never read
+        self.assertNotIn("capture_output", kwargs)
+
+    def test_only_a_missing_credential_is_dead(self):
+        result, _ = self.probe(1, self.NONE)
+        self.assertEqual((result["status"], result["login_command"]),
+                         ("dead", "omp login anthropic"))
+        for rc, err in ((1, "boom"), (2, self.NONE)):
+            with self.subTest(rc=rc):
+                self.assertEqual(self.probe(rc, err)[0]["status"], "unknown")
+
+    def test_missing_binary_and_timeout_are_unknown_not_dead(self):
+        for exc in (FileNotFoundError("omp"), subprocess.TimeoutExpired("omp", 60)):
+            with self.subTest(exc=type(exc).__name__):
+                self.assertEqual(self.probe(side_effect=exc)[0]["status"], "unknown")
+
+    def test_api_key_providers_are_not_probed(self):
+        result, run = self.probe(model="opencode-go/kimi")
+        self.assertEqual(result["status"], "not_applicable")
+        run.assert_not_called()
+
+
+class SetupRecordsOmpLoginTests(unittest.TestCase):
+    def test_artifact_records_the_probe(self):
+        probe = {"provider": "anthropic", "status": "dead", "login_command": "omp login anthropic"}
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "2026-10-22"
+            with patch.object(setup, "_omp_login_probe", return_value=probe), \
+                    patch.object(setup, "RUN_DIR_BASE", Path(tmp)), \
+                    patch.object(setup, "startup_packet", return_value={}), \
+                    patch.object(setup.urllib.request, "urlopen", side_effect=OSError("offline")):
+                setup.phase_0_setup(argparse.Namespace(dry_run=True, resume=False), run_dir=run_dir)
+            saved = json.loads((run_dir / "00-setup.json").read_text())
+        self.assertEqual(saved["omp_login"], probe)
 
 
 if __name__ == "__main__":

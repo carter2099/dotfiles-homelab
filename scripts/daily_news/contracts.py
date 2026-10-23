@@ -455,6 +455,36 @@ def coverage_key(url: str) -> str:
     """Canonical dedup key: publisher canonicalization, then URL normalization."""
     return normalize_url(canonicalize_publisher_url(url or ""))
 
+# A /YYYY/MM/DD/ path run followed by more path. Publishers re-date an
+# article's URL when they revise it (steward digest-quality finding
+# 2026-10-21: TechCrunch's Replit/Anthropic story ran in AI & Tech on 10-17 as
+# /2026/10/16/<slug> and on 10-18 as /2026/10/17/<slug>/).
+_DATE_PATH_RUN = re.compile(
+    r"/(?:19|20)\d{2}"
+    r"/(?:0?[1-9]|1[0-2]|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)"
+    r"/(?:0?[1-9]|[12]\d|3[01])(?=/)"
+)
+# A re-dated key only counts as the same article when its final slug is this
+# specific; short recurring slugs (`/2026/10/17/daily-crunch`) are new editions.
+DATELESS_SLUG_MIN_WORDS = 4
+
+def dateless_coverage_key(key: str) -> str:
+    """Return a coverage key with its /YYYY/MM/DD date segments removed.
+
+    Empty when ``key`` has no date run before its final segment or when that
+    slug has fewer than DATELESS_SLUG_MIN_WORDS hyphenated words.
+    """
+    host, sep, rest = (key or "").partition("/")
+    if not sep:
+        return ""
+    stripped, count = _DATE_PATH_RUN.subn("", "/" + rest)
+    if not count:
+        return ""
+    slug = stripped.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    if len([word for word in slug.split("-") if word]) < DATELESS_SLUG_MIN_WORDS:
+        return ""
+    return host + stripped
+
 def load_recent_coverage_ledger(digests_root: Path, today: date, days: int) -> set[str]:
     """Collect canonical URLs any section covered in the previous `days` days.
 

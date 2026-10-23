@@ -128,6 +128,43 @@ def user_env():
     return env
 
 
+# Providers whose credential is omp's stored login (OAuth in ~/.omp/agent/agent.db).
+# Others (llm-proxy, opencode-go) authenticate per call instead, so `omp token` has nothing to find.
+OMP_LOGIN_PROVIDERS = frozenset({"anthropic", "openai-codex"})
+OMP_LOGIN_PROBE_TIMEOUT = 60
+_OMP_NO_CREDENTIAL = "No active credential found"
+
+
+def _omp_login_probe(model=STEWARD_MODEL):
+    """Is omp's stored login for ``model``'s provider usable? Never raises.
+
+    `omp token <provider>` PRINTS THE SECRET ACCESS TOKEN on stdout, so stdout goes to
+    /dev/null and is never read, logged or stored. It makes no model call and refreshes
+    only an expired access token (never --force-refresh: refresh tokens rotate).
+    status: ok | dead | unknown | not_applicable. Only exit 1 with "No active
+    credential found" is dead (omp disables a credential whose refresh failed, e.g.
+    invalid_grant); a missing binary, timeout or other failure is unknown.
+    """
+    provider = model.partition("/")[0]
+    if provider not in OMP_LOGIN_PROVIDERS:
+        return {"provider": provider, "status": "not_applicable"}
+    result = {"provider": provider, "login_command": f"omp login {provider}"}
+    try:
+        cp = subprocess.run(
+            [str(HOME / ".bun/bin/omp"), "token", provider],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, timeout=OMP_LOGIN_PROBE_TIMEOUT,
+            env={**user_env(), "HOME": str(HOME)},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {**result, "status": "unknown", "detail": f"{type(exc).__name__}: {exc}"[:200]}
+    if cp.returncode == 0:
+        return {**result, "status": "ok"}
+    stderr = (cp.stderr or "").strip()
+    dead = cp.returncode == 1 and _OMP_NO_CREDENTIAL in stderr
+    return {**result, "status": "dead" if dead else "unknown", "detail": stderr[:200]}
+
+
 def write_json(path, data):
     """Write a phase artifact atomically and durably."""
     return atomic_write_json(path, data)
