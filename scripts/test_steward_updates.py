@@ -2618,18 +2618,21 @@ class PhaseOneOrderTests(unittest.TestCase):
             updates, "DEPLOY_REGISTRY", {"blog": {}}
         ), patch.object(updates, "_p1_docker_cleanup", cleanup), patch.object(
             updates, "_p1_omp_db_repair", step("omp_db_repair")
+        ), patch.object(
+            updates.toolchains, "p1_toolchain",
+            lambda name, **kwargs: step(name)(),
         ):
             result = updates.phase_1_apply(Path(tmp))
         self.assertEqual(calls, [
             "gamingrig_maintenance", "omp_db_repair", "apt_upgrade", "freshrss", "openwebui_update",
             "herdr_update", "searxng", "llama_cpp", "omp_update",
-            "dependabot_merge", "app_deploy:blog", "docker_cleanup",
+            "dependabot_merge", "app_deploy:blog", *updates.toolchains.STEP_NAMES,
+            "docker_cleanup",
         ])
         # Cleanup sees every earlier row (to find superseded images).
         self.assertIn("openwebui_update", seen["cleanup_saw"])
-        self.assertEqual(result["steps"][-2],
-                         {"step": "app_deploy", "service": "blog",
-                          "status": "skipped", "reason": "current"})
+        self.assertIn({"step": "app_deploy", "service": "blog",
+                       "status": "skipped", "reason": "current"}, result["steps"])
 
 
 def _make_omp_db(path, *, corrupt_index=False):

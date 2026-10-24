@@ -98,7 +98,7 @@ from .runtime import (
     user_env,
     write_json,
 )
-from . import public_dotfiles
+from . import public_dotfiles, toolchains
 
 def _audit_collector_1_agents_md():
     """Collector: AGENTS.md truth-check evidence."""
@@ -146,6 +146,13 @@ def _upstream_versions():
     return upstream
 
 
+def _toolchain_evidence():
+    try:
+        return toolchains.evidence()
+    except Exception as error:
+        return {"error": str(error)[:200]}
+
+
 def _audit_collector_2_versions():
     """Collector: current version strings plus latest upstream releases."""
     return {
@@ -153,6 +160,9 @@ def _audit_collector_2_versions():
         "node": run_capture(["node", "-v"]),
         "rbenv": run_capture(["rbenv", "versions"]),
         "nvim": run_capture(["nvim", "--version"]).split("\n", 1)[0],
+        # Both Go installs, fnm default, rbenv global, ~/.local/nvim and each
+        # toolchain's last P1 outcome (status/target/newer_line/error).
+        "toolchains": _toolchain_evidence(),
         "docker_images": run_capture(
             ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}"]),
         "upstream": _upstream_versions(),
@@ -985,10 +995,14 @@ def _audit_collector_4_security():
 
 def _audit_collector_5_config_drift():
     """Collector: config vs tracked drift."""
+    # status.showUntrackedFiles=all is set on the dotfiles repo (P9b needs every
+    # new file); here one untracked directory must stay one line, or a single
+    # large tree (a 283 MB ~/.local/go*.bak on 2026-10-22) truncates the evidence.
     dotfiles_status = run_capture(
         ["/usr/bin/git", "--git-dir", str(HOME / ".dotfiles-homelab"),
-         "--work-tree", str(HOME), "status", "--short"])
-    notes_status = run_capture(["git", "-C", str(HOME / "notes"), "status", "--short"])
+         "--work-tree", str(HOME), "status", "--short", "--untracked-files=normal"])
+    notes_status = run_capture(["git", "-C", str(HOME / "notes"), "status", "--short",
+                                "--untracked-files=normal"])
 
     deploy_repos = {}
     for name, path in [
@@ -1177,11 +1191,20 @@ AUDIT_SECTIONS = [
         "artifact": "07-audit-2-versions.json",
         "timeout": 600,
         "guidance": (
-            "Compare current versions (in evidence) against latest upstream stable for components NOT "
-            "auto-updated by P1: Go, Node, Ruby (rbenv), and neovim. "
+            "Compare current versions (in evidence) against latest upstream stable. Go (both "
+            "~/.local/go and /usr/local/go), Node (fnm default), Ruby (rbenv global) and Neovim "
+            "(~/.local/nvim) are auto-updated by P1 within their installed line (Node: same "
+            "major; others: same major.minor), so a newer patch on the same line is NOT a "
+            "finding. Report for them only (a) a newer major/minor line upstream "
+            "(evidence.toolchains.p1_last.<key>.newer_line or evidence.upstream), or (b) a "
+            "toolchain whose P1 step did not succeed tonight (p1_last status warning, reverted or "
+            "failed, with its error). /usr/local/go is deliberately held on the 1.26 line "
+            "(homelab-dashboard staticcheck); report a newer line there as informational only. "
+            "Project Rubies pinned by a repo .ruby-version (e.g. 3.4.x) or an RBENV_VERSION "
+            "pin are project choices, not host drift. "
             "Do NOT report freshrss, open-webui, herdr, omp, the pinned searxng image, or llama.cpp "
             "on the gaming rig — P1 updates those earlier in the same run after their safety gates. "
-            "Report per component: current / latest / status (current | behind | behind-major). "
+            "Report per component: current / latest / status (current | behind-line | failed-update). "
             "Do NOT exec into containers — the docker images evidence IS the current version. "
             "Latest upstream releases are in evidence.upstream (collected by the steward; you "
             "have no network or shell tools). An upstream entry with an error is UNVERIFIABLE. "

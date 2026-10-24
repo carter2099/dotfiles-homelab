@@ -5,6 +5,7 @@ import contextlib
 import shutil
 import sqlite3
 
+from . import toolchains
 from .config import (
     AUTO_PKGS,
     DEFAULT_TEMPLATE,
@@ -3398,6 +3399,13 @@ def _p1_omp_db_repair(dry_run=False, *, db_dir=None, state_dir=None, now=None):
     return {**result, "status": "ok"}
 
 
+def _p1_toolchain_steps(steps, persist, *, dry_run=False):
+    """Same-line Node/Ruby/Go/Neovim updates (``toolchains``), one row per toolchain."""
+    deadline = time.monotonic() + toolchains.BUDGET_S
+    for name in toolchains.STEP_NAMES:
+        _p1_run_step(steps, name, lambda name=name: toolchains.p1_toolchain(
+            name, dry_run=dry_run, deadline=deadline), persist)
+
 
 def phase_1_apply(run_dir, dry_run=False, *, progress=None):
     """Phase 1: apply safe updates, checkpointing each substep atomically."""
@@ -3427,6 +3435,8 @@ def phase_1_apply(run_dir, dry_run=False, *, progress=None):
     _p1_run_step(steps, "omp_db_repair",
                  lambda: _p1_omp_db_repair(dry_run=dry_run), persist)
     if dry_run:
+        # Toolchain steps only read upstream indexes and report what they would do.
+        _p1_toolchain_steps(steps, persist, dry_run=True)
         return _finish_p1(
             run_dir,
             {"dry_run": True, "steps": steps},
@@ -3525,6 +3535,9 @@ def phase_1_apply(run_dir, dry_run=False, *, progress=None):
         _p1_run_step(steps, "app_deploy",
                      lambda service=service, spec=spec: _p1_app_deploy(service, spec),
                      persist, service=service)
+    # Same-line toolchain updates after the deploys, so a long Ruby build never
+    # delays them; each step is bounded by the shared toolchain budget.
+    _p1_toolchain_steps(steps, persist)
     # Docker hygiene last: it sees every superseded image of this run, and app
     # deploys have already used (and so kept warm) the build cache they need.
     _p1_run_step(steps, "docker_cleanup", lambda: _p1_docker_cleanup(steps), persist)

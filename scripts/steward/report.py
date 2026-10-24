@@ -302,6 +302,11 @@ _STEP_NAMES = {
     "docker_settle": "Docker restart",
     "docker_daemon_assert": "Docker daemon check",
     "dependabot_merge": "Dependabot auto-merge",
+    "toolchain_node": "Node.js",
+    "toolchain_ruby": "Ruby (rbenv global)",
+    "toolchain_go_user": "Go (~/.local/go)",
+    "toolchain_go_root": "Go (/usr/local/go)",
+    "toolchain_nvim": "Neovim",
 }
 
 _CHECK_NAMES = {
@@ -650,6 +655,28 @@ def _dependabot_events(step):
     return items
 
 
+def _toolchain_events(step):
+    """A same-line toolchain update: change with undo, Watching for a skipped or
+    verified-rolled-back update, Needs You only for an unverified rollback."""
+    label = _step_name(step)
+    status = step.get("status", "")
+    pre, post, target = step.get("pre_version"), step.get("post_version"), step.get("target")
+    items = []
+    if status == "ok" and pre != post:
+        items.append(_item("change", f"{label} {_arrow(pre, post)}", undo=step.get("revert") or ""))
+    elif status == "reverted":
+        items.append(_item("watch", f"{label} update to {target or '?'} rolled back to {pre} "
+                           f"({_detail(step)}); {_RETRIES}"))
+    elif status == "warning":
+        items.append(_item("watch", f"{label} update not applied — {_detail(step)}; {_RETRIES}"))
+    elif status in _P1_FAILURE_STATUSES:
+        items.append(_step_failure(step))
+    if step.get("pruned"):
+        items.append(_item("chore", f"{label}: removed replaced {', '.join(step['pruned'])} "
+                           "(kept 7 days for rollback)", group="Housekeeping"))
+    return items
+
+
 def _p1_events(applied, rig_last_ok=None):
     """Every P1 maintenance step as report items, signal only (no-op steps vanish)."""
     applied = applied if isinstance(applied, dict) else {}
@@ -709,6 +736,8 @@ def _p1_events(applied, rig_last_ok=None):
             elif status == "skipped" and re.search(
                     r"(?i)\b(ci|checks?|dirty|fast-forward|branch)\b", _detail(s)):
                 items.append(_item("watch", f"{label} deploy waiting — {_detail(s)}"))
+        elif name.startswith("toolchain_"):
+            items.extend(_toolchain_events(s))
         elif name == "omp_db_repair":
             detail = _clip(s.get("error") or s.get("reason") or "", 400)
             if status == "ok":
