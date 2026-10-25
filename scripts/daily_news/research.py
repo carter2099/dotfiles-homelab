@@ -263,6 +263,9 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
     recent_coverage = load_recent_coverage_ledger(
         run_dir.parent.parent, today, CROSS_DAY_DEDUP_DAYS
     )
+    # Re-dated republications (/2026/10/16/<slug> -> /2026/10/17/<slug>) are
+    # the same covered article (10-17/18 AI & Tech TechCrunch Replit story).
+    recent_dateless = dateless_coverage_index(recent_coverage)
     phase_inputs = runtime.phase_inputs(
         "judge-research", topic=topic,
         upstream={
@@ -303,7 +306,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
     ledger_rejected: list[dict] = []
 
     for f in findings:
-        if coverage_key(f.get("url", "")) in recent_coverage:
+        if recent_coverage_match(f.get("url", ""), recent_coverage, recent_dateless):
             ledger_rejected.append({"finding": f, "reason": "already_covered_previous_day"})
             pre_filter["already_covered_previous_day"] += 1
             continue
@@ -462,7 +465,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         url = normalize_url(f.get("url", ""))
         if url and url in seen_urls:
             dedup_rejected.append({"finding": f, "reason": "crossbatch_duplicate"})
-        elif coverage_key(f.get("url", "")) in recent_coverage:
+        elif recent_coverage_match(f.get("url", ""), recent_coverage, recent_dateless):
             dedup_rejected.append({"finding": f, "reason": "already_covered_previous_day"})
         else:
             if url:
@@ -1002,11 +1005,7 @@ def phase_3_rank(
     event_frequency = _frequency_of([{"fresh": event_corpus + eligible_fresh}])
     # A publisher re-dating the same article's URL (/2026/10/16/<slug> ->
     # /2026/10/17/<slug>) defeats exact key matches and often the wording test.
-    recent_dateless: dict[str, str] = {}
-    for key in sorted(recent_coverage):
-        dateless = dateless_coverage_key(key)
-        if dateless:
-            recent_dateless.setdefault(dateless, key)
+    recent_dateless = dateless_coverage_index(recent_coverage)
     recent_coverage_rejected = []
     kept_fresh = []
     for item in eligible_fresh:
@@ -1029,9 +1028,9 @@ def phase_3_rank(
                 reason = (f"same event published in the previous {CROSS_DAY_DEDUP_DAYS} days "
                           "(headline/event wording)")
         if not matched:
-            dateless = dateless_coverage_key(coverage_key(item.get("url", "")))
-            if dateless in recent_dateless:
-                matched = [recent_dateless[dateless]]
+            redated = recent_coverage_match(item.get("url", ""), recent_coverage, recent_dateless)
+            if redated:
+                matched = [redated]
                 reason = (f"same article re-dated under a new URL in the previous "
                           f"{CROSS_DAY_DEDUP_DAYS} days")
         if not matched:

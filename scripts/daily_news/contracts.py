@@ -485,6 +485,29 @@ def dateless_coverage_key(key: str) -> str:
         return ""
     return host + stripped
 
+def dateless_coverage_index(covered: set[str]) -> dict[str, str]:
+    """Map each re-datable ledger key's dateless form to its (first sorted) key."""
+    index: dict[str, str] = {}
+    for key in sorted(covered):
+        dateless = dateless_coverage_key(key)
+        if dateless:
+            index.setdefault(dateless, key)
+    return index
+
+def recent_coverage_match(url: str, covered: set[str], dateless_index: dict[str, str]) -> str:
+    """Return the ledger key ``url`` repeats, or "" when it is not covered.
+
+    Matches the exact coverage key, then the same host and article slug with
+    only the /YYYY/MM/DD path segments changed (a re-dated republication).
+    """
+    key = coverage_key(url)
+    if not key:
+        return ""
+    if key in covered:
+        return key
+    dateless = dateless_coverage_key(key)
+    return dateless_index.get(dateless, "") if dateless else ""
+
 def load_recent_coverage_ledger(digests_root: Path, today: date, days: int) -> set[str]:
     """Collect canonical URLs any section covered in the previous `days` days.
 

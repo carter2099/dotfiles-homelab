@@ -874,6 +874,54 @@ def test_recent_coverage_blocks_redated_url_of_same_article() -> None:
         check("re-dated" in rejected["rejection_reason"], rejected)
 
 
+def test_phase_two_ledger_drops_redated_url_of_covered_article() -> None:
+    """Phase 2's recent-coverage ledger drops a re-dated republication.
+
+    Regression for 2026-10-17/18 AI & Tech: TechCrunch moved the Replit/Anthropic
+    story from /2026/10/16/<slug> to /2026/10/17/<slug>/; the exact ledger key
+    missed it. Same-slug matching must stay host-bound and skip short slugs.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        today = "2026-10-18"
+        run_dir = root / catalog.TOPICS["ai-tech"]["category"] / today
+        run_dir.mkdir(parents=True)
+        prior = root / catalog.TOPICS["ai-tech"]["category"] / "2026-10-17"
+        prior.mkdir(parents=True)
+        (prior / "06-curated.json").write_text(json.dumps({"fresh": [
+            {"url": "https://techcrunch.com/2026/10/16/replit-is-no-longer-working-with-anthropic-ceo-says"},
+            {"url": "https://techcrunch.com/2026/10/16/daily-crunch"},
+        ]}))
+
+        def finding(title: str, url: str) -> dict:
+            return {
+                "title": title, "url": url, "source_domain": "example.com",
+                "date_published": "2026-10-17", "summary": f"{title} summary.",
+                "category": "AI", "editorial_significance": "medium",
+                "event": title, "event_terms": [title, "event"],
+            }
+
+        findings = [
+            finding("Replit makes OpenAI its default over Anthropic, CEO says",
+                    "https://techcrunch.com/2026/10/17/replit-is-no-longer-working-with-anthropic-ceo-says/"),
+            finding("Other outlet same slug",
+                    "https://example.com/2026/10/17/replit-is-no-longer-working-with-anthropic-ceo-says"),
+            finding("Daily Crunch next edition", "https://techcrunch.com/2026/10/17/daily-crunch"),
+        ]
+        with patch(
+            "daily_news.runtime._call_llm_proxy",
+            return_value=json.dumps({"approved": copy.deepcopy(findings), "rejected": []}),
+        ):
+            fresh = research.phase_2_judge_research(
+                catalog.TOPICS["ai-tech"], copy.deepcopy(findings), run_dir,
+            )
+        check(
+            sorted(item["title"] for item in fresh)
+            == ["Daily Crunch next edition", "Other outlet same slug"],
+            f"re-dated covered article re-entered Phase 2: {fresh!r}",
+        )
+
+
 
 
 def _shared_url_findings(today: str) -> tuple[str, list[dict]]:
@@ -3420,6 +3468,7 @@ def main() -> None:
         test_recent_publication_blocks_same_event_without_shared_keys,
         test_cross_day_wording_dedup_keeps_new_events_in_continuing_topics,
         test_recent_coverage_blocks_redated_url_of_same_article,
+        test_phase_two_ledger_drops_redated_url_of_covered_article,
         test_phase_two_shared_url_findings_keep_their_own_metadata,
         test_phase_two_drops_unidentified_shared_url_finding,
         test_phase_two_restores_approvals_with_altered_urls,
