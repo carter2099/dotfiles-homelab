@@ -39,6 +39,12 @@ _MONTH_ONLY_DATE = re.compile(r"^\d{4}-\d{2}$")
 # half their title/event vocabulary and run within two days of the original.
 CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP = 0.45
 CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS = 2
+# A candidate below that overlap still repeats a published story when every
+# one of its (at least this many) distinctive event terms appears in the
+# story's title, event or summary (10-22/23 AI & Tech: the AI-found PHP
+# vulnerabilities ran twice; the headlines differed but the earlier summary
+# named the same fix, researchers and model).
+CROSS_DAY_EVENT_MIN_TERMS = 2
 
 def refetch_article_date(url: str, title: str) -> str | None:
     """Re-fetch an article to independently extract its publication date.
@@ -735,13 +741,17 @@ def _research_alternates(research_findings: list[dict]) -> list[dict]:
             alternates.append({**finding, "url": url})
     return alternates
 
-def _alternate_candidates(item: dict, research_alternates: list[dict], blocked_keys: set[str]) -> list[dict]:
+def _alternate_candidates(
+    item: dict, research_alternates: list[dict], blocked_keys: set[str], repeats: Any,
+) -> list[dict]:
     """Ordered other-outlet versions of ``item``'s story.
 
     Research findings for the same story come first (best overlap first, ties
     keep research order), then the item's Phase 2b ``same_event_urls`` in
     order. Every entry is fetchable, on another registrable domain than the
-    item, outside ``blocked_keys`` and unique by coverage key.
+    item, outside ``blocked_keys`` and unique by coverage key. ``repeats``
+    (alternate view -> rejection dict or None) drops an alternate whose
+    headline repeats a story published on a previous day.
     """
     own_domain = attention_match.registrable_domain(item.get("url", ""))
     seen: set[str] = set()
@@ -777,25 +787,29 @@ def _alternate_candidates(item: dict, research_alternates: list[dict], blocked_k
         for field in ("date_published", "summary"):
             if alternate.get(field):
                 entry[field] = alternate[field]
-        candidates.append(entry)
+        if repeats({**item, **entry}) is None:
+            candidates.append(entry)
     same_event = ((item.get("attention") or {}).get("evidence") or {}).get("same_event_urls") or []
     for entry in same_event:
         url = _fetchable_alternate_url(entry.get("url", "")) if isinstance(entry, dict) else ""
         if not usable(url):
             continue
-        candidates.append({
+        alternate = {
             "url": url,
             "title": entry.get("title") or item.get("title", ""),
             "source_domain": entry.get("domain") or attention_match.registrable_domain(url),
             "origin": f"attention:{entry.get('source', '')}",
             "overlap": None,
-        })
+        }
+        if repeats({**item, **alternate}) is None:
+            candidates.append(alternate)
     return candidates
 
 def resolve_hard_paywalls(
     candidates: list[dict],
     research_findings: list[dict],
     blocked_keys: set[str],
+    repeats: Any,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Keep hard-paywalled candidates away from Phase 4.
 
@@ -804,7 +818,8 @@ def resolve_hard_paywalls(
     ``same_event_urls`` (publisher articles Jev judged to report the same
     event). Without either, the candidate is dropped. An alternate URL is
     fetchable, substitutes at most once, never duplicates a URL already ranked
-    on its own, and never has a blocked coverage key.
+    on its own, never has a blocked coverage key, and never repeats a story
+    published on a previous day (``repeats``).
     Returns (kept, substituted, dropped); the last two are audit records.
     """
     taken = {coverage_key(item.get("url", "")) for item in candidates} | set(blocked_keys)
@@ -818,7 +833,7 @@ def resolve_hard_paywalls(
         if domain is None:
             kept.append(item)
             continue
-        options = _alternate_candidates(item, alternates, taken)
+        options = _alternate_candidates(item, alternates, taken, repeats)
         if not options:
             dropped.append({
                 **item,
@@ -850,6 +865,7 @@ def assign_fetch_alternates(
     queue: list[dict],
     research_findings: list[dict],
     blocked_keys: set[str],
+    repeats: Any,
 ) -> None:
     """Give each queue item up to FETCH_ALTERNATE_LIMIT ordered ``fetch_alternates``.
 
@@ -859,7 +875,8 @@ def assign_fetch_alternates(
     alternates = _research_alternates(research_findings)
     blocked = set(blocked_keys) | {coverage_key(item.get("url", "")) for item in queue}
     for item in queue:
-        item["fetch_alternates"] = _alternate_candidates(item, alternates, blocked)[:FETCH_ALTERNATE_LIMIT]
+        item["fetch_alternates"] = _alternate_candidates(
+            item, alternates, blocked, repeats)[:FETCH_ALTERNATE_LIMIT]
 
 def _recent_published_events(digests_root: Path, today: date) -> tuple[list[dict], Any]:
     """Published stories from the previous CROSS_DAY_DEDUP_DAYS plus a token corpus.
@@ -889,8 +906,10 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     """True when ``item`` re-reports the event of ``story``, published on an earlier day.
 
     Beyond news_publish._same_event, the two must share
-    CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP of the smaller title/event vocabulary and
-    be dated at most CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS apart. An undated
+    CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP of the smaller title/event vocabulary,
+    or every one of ``item``'s (at least CROSS_DAY_EVENT_MIN_TERMS) event terms
+    must appear in the story's title/event/summary, and they must be dated at
+    most CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS apart. An undated
     candidate counts as published at the start of the freshness window
     (yesterday); an undated story as published on its edition date.
     """
@@ -904,7 +923,11 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     story_tokens = _story_event_tokens(story)
     item_tokens = _story_event_tokens(item)
     shared = story_tokens & item_tokens
-    if len(shared) / min(len(story_tokens), len(item_tokens)) < CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP:
+    if (len(shared) / min(len(story_tokens), len(item_tokens)) < CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP
+            and not attention_match.terms_all_present(
+                item.get("event_terms"),
+                " ".join(str(story.get(key) or "") for key in ("title", "event", "summary")),
+                CROSS_DAY_EVENT_MIN_TERMS)):
         return False
     story_date = (parse_date(str(story.get("date_confirmed") or "").strip())
                   or parse_date(str(story.get("date_published") or "").strip())
@@ -967,6 +990,7 @@ def phase_3_rank(
             "hard_paywall_domains": sorted(HARD_PAYWALL_DOMAINS),
             "fetch_alternate_limit": FETCH_ALTERNATE_LIMIT,
             "cross_day_event_min_token_overlap": CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP,
+            "cross_day_event_min_terms": CROSS_DAY_EVENT_MIN_TERMS,
             "cross_day_event_max_date_gap_days": CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS,
         },
     )
@@ -1006,9 +1030,9 @@ def phase_3_rank(
     # A publisher re-dating the same article's URL (/2026/10/16/<slug> ->
     # /2026/10/17/<slug>) defeats exact key matches and often the wording test.
     recent_dateless = dateless_coverage_index(recent_coverage)
-    recent_coverage_rejected = []
-    kept_fresh = []
-    for item in eligible_fresh:
+
+    def _repeat_of(item: dict) -> dict | None:
+        """Rejection record when ``item`` repeats covered or already-selected coverage."""
         evidence = (item.get("attention") or {}).get("evidence") or {}
         keys = set(evidence.get("same_event_keys") or [])
         matched = sorted(keys & recent_coverage)
@@ -1034,8 +1058,7 @@ def phase_3_rank(
                 reason = (f"same article re-dated under a new URL in the previous "
                           f"{CROSS_DAY_DEDUP_DAYS} days")
         if not matched:
-            kept_fresh.append(item)
-            continue
+            return None
         rejection = {
             "url": item.get("url", ""), "title": item.get("title", ""),
             "matched_keys": matched, "rejection_reason": reason,
@@ -1045,9 +1068,33 @@ def phase_3_rank(
                 "url": matched_story.get("url", ""), "title": matched_story.get("title", ""),
                 "event": matched_story.get("event", ""),
             }
+        return rejection
+
+    recent_coverage_rejected = []
+    kept_fresh = []
+    for item in eligible_fresh:
+        rejection = _repeat_of(item)
+        if rejection is None:
+            kept_fresh.append(item)
+            continue
         recent_coverage_rejected.append(rejection)
-        print(f"  [Phase 3 event dedup] dropped {item.get('url', '')}: {reason} ({', '.join(matched[:3])})")
+        print(f"  [Phase 3 event dedup] dropped {item.get('url', '')}: "
+              f"{rejection['rejection_reason']} ({', '.join(rejection['matched_keys'][:3])})")
     eligible_fresh = kept_fresh
+    # Paywall and fetch alternates carry another outlet's headline for the
+    # candidate's event; an alternate repeating a published story is never
+    # substituted (10-23 AI & Tech re-ran the 10-22 PHP vulnerability story
+    # through a Phase 4 substitution from the NSA advisory).
+    alternate_rejected: list[dict] = []
+
+    def _alternate_repeat(view: dict) -> dict | None:
+        rejection = _repeat_of(view)
+        if rejection is not None:
+            alternate_rejected.append(rejection)
+            print(f"  [Phase 3 alternate dedup] skipped {view.get('url', '')}: "
+                  f"{rejection['rejection_reason']}")
+        return rejection
+
     # URL-host validation: a candidate whose URL sits on a publisher asset CDN
     # (e.g. assets.theregister.com) is not an article and must never reach
     # fetch or curation (digest-quality audit 2026-08-24: research invented
@@ -1071,6 +1118,7 @@ def phase_3_rank(
         eligible_fresh,
         research_findings,
         other_topic_urls | recent_coverage,
+        _alternate_repeat,
     )
     if paywall_substituted or paywall_dropped:
         print(f"  [Phase 3 paywall] {len(paywall_substituted)} story(s) moved to a "
@@ -1090,7 +1138,9 @@ def phase_3_rank(
         item["ranking_schema_version"] = RANKING_SCHEMA_VERSION
     # Phase 4 falls back to these when a primary fetch fails; they clear the
     # same blocked keys as the paywall swap.
-    assign_fetch_alternates(phase_4_queue, research_findings, other_topic_urls | recent_coverage)
+    assign_fetch_alternates(
+        phase_4_queue, research_findings, other_topic_urls | recent_coverage, _alternate_repeat,
+    )
 
     output = {
         "ranking_schema_version": RANKING_SCHEMA_VERSION,
@@ -1098,6 +1148,7 @@ def phase_3_rank(
         "pool_a": pool_a,
         "cross_topic_rejected": cross_topic_rejected,
         "recent_coverage_rejected": recent_coverage_rejected,
+        "alternate_recent_coverage_rejected": alternate_rejected,
         "paywall_substituted": paywall_substituted,
         "paywall_dropped": paywall_dropped,
         "status": "ok" if phase_4_queue else "empty",

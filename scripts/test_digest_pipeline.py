@@ -874,6 +874,98 @@ def test_recent_coverage_blocks_redated_url_of_same_article() -> None:
         check("re-dated" in rejected["rejection_reason"], rejected)
 
 
+PHP_FLAWS_STORY = {
+    "title": "OpenAI and Wiz agents find critical PHP flaws",
+    "event": "AI agents from OpenAI and Wiz uncovered critical PHP vulnerabilities",
+    "summary": "The NSA warned administrators to patch after PHP 8.5.12 fixed remote code "
+               "execution flaws found by Calif using GPT-5.6 Sol and by Wiz.",
+    "url": "https://www.securityweek.com/openai-wiz-agents-php-flaws/",
+    "editorial_significance": "high", "date_published": "2026-10-21",
+}
+
+
+def test_recent_publication_blocks_repeat_named_by_event_terms() -> None:
+    """A repeat whose headline shares too little wording is caught by its event terms.
+
+    Regression for 2026-10-22/23 AI & Tech: the AI-found PHP vulnerabilities ran
+    on consecutive days under different headlines; the earlier summary already
+    named every distinctive term of the repeat (8.5.12, Calif, Wiz).
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        published = root / "news" / "publications" / "2026-10-22"
+        published.mkdir(parents=True)
+        (published / f"{catalog.TOPICS['ai-tech']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [PHP_FLAWS_STORY],
+        }))
+        run_dir = root / catalog.TOPICS["ai-tech"]["category"] / "2026-10-23"
+        run_dir.mkdir(parents=True)
+        repeat = {
+            "title": "AI-assisted researchers disclose critical PHP RCE vulnerabilities as NSA urges patching",
+            "event": "AI-assisted researchers disclosed critical PHP RCE vulnerabilities; NSA urges patching",
+            "event_terms": ["PHP 8.5.12", "Calif", "Wiz"],
+            "url": "https://www.econotimes.com/AI-researchers-PHP-RCE-1730000",
+            "editorial_significance": "high", "date_published": "2026-10-22",
+        }
+        unrelated = {
+            "title": "Wiz raises new funding round",
+            "event": "Wiz raised a funding round",
+            "event_terms": ["Wiz funding round", "Calif"],
+            "url": "https://example.com/2026/10/22/wiz-funding",
+            "editorial_significance": "medium", "date_published": "2026-10-22",
+        }
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(
+                catalog.TOPICS["ai-tech"], [copy.deepcopy(repeat), copy.deepcopy(unrelated)], run_dir)
+        check([item["url"] for item in queue] == [unrelated["url"]], f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["url"] == repeat["url"]
+              and rejected["matched_story"]["url"] == PHP_FLAWS_STORY["url"], rejected)
+
+
+def test_fetch_alternate_repeating_published_story_is_not_assigned() -> None:
+    """Another outlet's headline for a new candidate cannot re-run a published story.
+
+    Regression for 2026-10-23 AI & Tech: the NSA advisory candidate passed the
+    repeat checks, then Phase 4 substituted an econotimes article that re-ran the
+    10-22 PHP vulnerability story.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        published = root / "news" / "publications" / "2026-10-22"
+        published.mkdir(parents=True)
+        (published / f"{catalog.TOPICS['ai-tech']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [PHP_FLAWS_STORY],
+        }))
+        run_dir = root / catalog.TOPICS["ai-tech"]["category"] / "2026-10-23"
+        run_dir.mkdir(parents=True)
+        repeating = "https://www.econotimes.com/OpenAI-Wiz-agents-PHP-flaws-1730001"
+        clean = "https://www.bleepingcomputer.com/news/security/nsa-php-advisory/"
+        advisory = {
+            "title": "NSA urges organizations to apply PHP security update",
+            "event": "NSA issued an advisory urging PHP administrators to update",
+            "event_terms": ["NSA advisory", "PHP security update"],
+            "url": "https://www.nsa.gov/Press-Room/advisories/php-security-update/",
+            "editorial_significance": "high", "date_published": "2026-10-22",
+            "attention": {"status": "ok", "evidence": {"same_event_urls": [
+                {"url": repeating, "domain": "econotimes.com",
+                 "title": "OpenAI and Wiz agents uncover critical PHP flaws", "source": "panel"},
+                {"url": clean, "domain": "bleepingcomputer.com",
+                 "title": "NSA advisory tells admins to apply PHP security update", "source": "panel"},
+            ]}},
+        }
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(catalog.TOPICS["ai-tech"], [copy.deepcopy(advisory)], run_dir, [])
+        check([item["url"] for item in queue] == [advisory["url"]], f"queue={queue!r}")
+        check([entry["url"] for entry in queue[0]["fetch_alternates"]] == [clean],
+              queue[0]["fetch_alternates"])
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["alternate_recent_coverage_rejected"]
+        check(rejected["url"] == repeating
+              and rejected["matched_story"]["url"] == PHP_FLAWS_STORY["url"], rejected)
+
+
 def test_phase_two_ledger_drops_redated_url_of_covered_article() -> None:
     """Phase 2's recent-coverage ledger drops a re-dated republication.
 
@@ -3468,6 +3560,8 @@ def main() -> None:
         test_recent_publication_blocks_same_event_without_shared_keys,
         test_cross_day_wording_dedup_keeps_new_events_in_continuing_topics,
         test_recent_coverage_blocks_redated_url_of_same_article,
+        test_recent_publication_blocks_repeat_named_by_event_terms,
+        test_fetch_alternate_repeating_published_story_is_not_assigned,
         test_phase_two_ledger_drops_redated_url_of_covered_article,
         test_phase_two_shared_url_findings_keep_their_own_metadata,
         test_phase_two_drops_unidentified_shared_url_finding,

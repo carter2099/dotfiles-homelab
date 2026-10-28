@@ -85,6 +85,21 @@ def entity_tokens(text: Any) -> set[str]:
     return found
 
 
+def terms_all_present(terms: Any, text: Any, minimum: int) -> bool:
+    """True when at least ``minimum`` distinct terms are given and every one
+    occurs in ``text`` as a contiguous token phrase (same tokenizer as retrieval)."""
+    phrases = {tuple(toks(term)) for term in terms if isinstance(term, str)} if isinstance(terms, list) else set()
+    phrases.discard(())
+    if len(phrases) < minimum:
+        return False
+    words = toks(text)
+    return all(
+        any(tuple(words[start:start + len(phrase)]) == phrase
+            for start in range(len(words) - len(phrase) + 1))
+        for phrase in phrases
+    )
+
+
 def registrable_domain(url_or_host: str) -> str:
     value = url_or_host or ""
     host = (urlsplit(value).hostname or "") if "://" in value else value
