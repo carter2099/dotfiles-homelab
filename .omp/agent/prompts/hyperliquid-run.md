@@ -18,8 +18,7 @@ Read `~/agent-state/hyperliquid-sdk.md` in full. Note:
 - All known gaps and their statuses (🔧 bugs, 🟡 queued, 🔴 needs_approval, 📝 planned)
 - Any approved architectural changes ready to implement
 - The `### Plan Queue` at the top of `## Approved Architectural Changes`: its
-  `approved:` line, every row's status and prerequisites, and row RB's
-  **Last check:**
+  `approved:` line, and every row's status and prerequisites
 - Todos/housekeeping items
 
 ## Step 2: Ensure on dev branch and up to date
@@ -137,26 +136,14 @@ For each gap found:
 
 Update the upstream SHA and scan date in the state file for any source actually scanned.
 
-<!-- rbsecp256k1-fork:begin -->
-**rbsecp256k1 release watch** — run only while `~/dev/hyperliquid/Gemfile` contains `carter2099/rbsecp256k1`:
-
-```bash
-RBENV_VERSION=3.4.11 ruby ~/agent-state/hyperliquid-sdk-fixtures/check_rbsecp256k1_release.rb
-```
-
-- `RBSECP256K1_TRIGGER=none|soaking|unsafe …` → copy the line and today's date into Plan Queue row RB's **Last check:** field; nothing else.
-- `RBSECP256K1_TRIGGER=ready version=<V> … sha256=<SHA> …` → set row RB to 🟢 triggered (version `<V>`, sha256 `<SHA>`). Step 5 selects it in this same run, exclusively.
-- Any other output or a non-zero exit → record "rbsecp256k1 watch: check failed" in the email; do not trigger.
-<!-- rbsecp256k1-fork:end -->
-
 ## Step 5: Define scope for this run
 
 Select work from the state file after both queue-producing passes (Dependabot
 reconciliation and upstream scanning):
-- **Priority order:** repairing a red Step 2 baseline (exclusive) → a 🟢
-  triggered Plan Queue row RB → 🔧 bugs that name no Plan Queue row → eligible
-  Dependabot entries → the next Plan Queue row → oldest 🟡 work across Known
-  Gaps and DevOps / Repo Hygiene that no Plan Queue row covers → housekeeping.
+- **Priority order:** repairing a red Step 2 baseline (exclusive) → 🔧 bugs
+  that name no Plan Queue row → eligible Dependabot entries → the next Plan
+  Queue row → oldest 🟡 work across Known Gaps and DevOps / Repo Hygiene that
+  no Plan Queue row covers → housekeeping.
 - 🔧/`📝 bug` entries that name a Plan Queue row (W1, O-A, IT-A, D2) or the
   release flow are fixed by that row or by the release; never select them
   separately. 📝 entries are only ever implemented through their Plan Queue row.
@@ -173,9 +160,6 @@ reconciliation and upstream scanning):
   nothing else (no other gap, no Dependabot entry) joins it. A docs-only row
   (D1/D2) is at most 3 docs units as the docs plan defines them. Never flip
   Known Gaps markers to make a row selectable; the queue table drives selection.
-<!-- rbsecp256k1-fork:begin -->
-- A 🟢 triggered Plan Queue row RB ("rbsecp256k1 fork-pin removal") runs alone: select only it (no API gaps, no plan row, no Dependabot entries) and follow Part B of `~/agent-state/hyperliquid-plans/rbsecp256k1.md` instead of Step 6.
-<!-- rbsecp256k1-fork:end -->
 - If Dependabot work is selected by the priority order, make this run
   dependency-only and select up to 5 oldest eligible Dependabot entries,
   matching the established DevOps queue pace. Do not mix dependency and API or
@@ -235,22 +219,14 @@ For selected `bundler` entries:
    and select a newer, unsoaked release.
 3. Build `.dependabot.Gemfile` beside the real Gemfile:
    - Preserve the real source and `gemspec` declarations verbatim.
-   <!-- rbsecp256k1-fork:begin -->
-   - Only while `Gemfile` contains `carter2099/rbsecp256k1`: also preserve
-     `gem 'rbsecp256k1', github: 'carter2099/rbsecp256k1', ref: '<sha>'`
-     verbatim, never edit that git source/ref, and never select, pin, or
-     `--update` `rbsecp256k1` (the pin is removed only by the "rbsecp256k1
-     fork-pin removal" plan). An `rbsecp256k1` entry stays 🟡 with note
-     `deferred: fork pin active until cutover` and is not eligible.
-   <!-- rbsecp256k1-fork:end -->
    - For selected gems declared directly in `Gemfile`, copy their declarations
      with `= <target_version>`, preserving any options.
    - Append exact declarations for selected runtime dependencies supplied by
      the gemspec.
-   - `rubyzip` (and, once no fork pin exists, `rbsecp256k1`) are ordinary
-     entries, but a resolve that adds or changes a `GIT` block, locks rubyzip
-     below 3.4, or locks rbsecp256k1 below 6.0.1 fails this step: take the
-     failure path below (entry back to 🟡 with the failure note).
+   - `rubyzip` and `rbsecp256k1` are ordinary entries, but a resolve that adds
+     or changes a `GIT` block, locks rubyzip below 3.4, or locks rbsecp256k1
+     below 6.0.1 fails this step: take the failure path below (entry back to
+     🟡 with the failure note).
 4. Resolve and normalize:
    ```bash
    cd ~/dev/hyperliquid
@@ -435,7 +411,7 @@ Edit `~/agent-state/hyperliquid-sdk.md`:
 - For a Plan Queue row: mark it ✅ (`<date> run #N <sha>`) and mark ✅ the
   Known Gaps / Bug Fixes entries it closes; on failure leave it not ✅ with a
   one-line failure note (it is retried next run unless its plan's stop rule
-  sets ⛔). Keep row RB's **Last check:** current.
+  sets ⛔).
 - Record the intake digest, newly queued/refreshed/no-longer-open Dependabot
   entries, selected PR numbers, resolved versions, and close outcomes.
 - Preserve every unselected eligible and newly discovered Dependabot entry as
