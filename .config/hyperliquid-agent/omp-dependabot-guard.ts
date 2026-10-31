@@ -17,7 +17,7 @@ const manifestPath = process.env.HYPERLIQUID_DEPENDABOT_MANIFEST ?? "";
 
 interface PullRequest {
   number: number;
-  ecosystem: "bundler" | "github_actions";
+  ecosystem: "bundler" | "github_actions" | "pip";
   dependency: string;
   target_version: string;
   base_ref: "main" | "dev";
@@ -138,11 +138,18 @@ function loadManifest(source: string): IntakeManifest {
     ) {
       throw new Error("manifest PR numbers are invalid, duplicated, or unsorted");
     }
-    if (!/^(bundler|github_actions)$/.test(pullRequest.ecosystem)) {
+    if (!/^(bundler|github_actions|pip)$/.test(pullRequest.ecosystem)) {
       throw new Error(`manifest PR #${pullRequest.number} has an invalid ecosystem`);
     }
     if (!/^[A-Za-z0-9][A-Za-z0-9_.\-/]*$/.test(pullRequest.dependency)) {
       throw new Error(`manifest PR #${pullRequest.number} has an invalid dependency`);
+    }
+    // pip is only accepted for the parity-capture pins in tools/parity/requirements.txt.
+    if (
+      pullRequest.ecosystem === "pip" &&
+      !/^tools\/parity\/[A-Za-z0-9](?:[A-Za-z0-9_.\-]*[A-Za-z0-9])?$/.test(pullRequest.dependency)
+    ) {
+      throw new Error(`manifest PR #${pullRequest.number} has an invalid pip dependency`);
     }
     if (!/^\d[A-Za-z0-9_.+\-]*$/.test(pullRequest.target_version)) {
       throw new Error(`manifest PR #${pullRequest.number} has an invalid target version`);
@@ -198,7 +205,7 @@ const allowedCloseCommands = new Set(
 );
 
 const ghCommand = /(?:^|[\/\s])gh(?:\s|$)/;
-const pullRef = /(?:refs\/pull\/|dependabot\/(?:bundler|github_actions)\/)/;
+const pullRef = /(?:refs\/pull\/|dependabot\/(?:bundler|github_actions|pip)\/)/;
 const ownGithubUrl = /(?:(?:api\.)?github\.com\/(?:repos\/)?|raw\.githubusercontent\.com\/)carter2099\/hyperliquid(?:[\s/#?]|$)/i;
 const githubApi = /api\.github\.com/i;
 const githubGraphql = /api\.github\.com\/graphql/i;

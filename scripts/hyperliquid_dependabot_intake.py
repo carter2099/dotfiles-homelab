@@ -25,9 +25,14 @@ MAX_CLASSIFIER_TEXT_BYTES = 1 << 20
 MAX_CLASSIFIER_RESPONSE_BYTES = 64 << 10
 DEPENDABOT_AUTHORS = {"app/dependabot", "dependabot[bot]"}
 HEAD_REF_RE = re.compile(
-    r"\Adependabot/(?P<ecosystem>bundler|github_actions)/"
+    r"\Adependabot/(?P<ecosystem>bundler|github_actions|pip)/"
     r"(?P<dependency>[A-Za-z0-9][A-Za-z0-9_.\-/]*?)-"
     r"(?P<target>v?\d[A-Za-z0-9_.+\-]*)\Z"
+)
+# pip is only accepted for the parity-capture pins (GitHub security updates for
+# tools/parity/requirements.txt); any other pip directory fails closed.
+PIP_DEPENDENCY_RE = re.compile(
+    r"\Atools/parity/[A-Za-z0-9](?:[A-Za-z0-9_.\-]*[A-Za-z0-9])?\Z"
 )
 SHA_RE = re.compile(r"\A[0-9a-f]{40}\Z")
 
@@ -184,6 +189,10 @@ def parse_pull_request(raw: object) -> tuple[dict[str, Any], str]:
         or any(part in {"", ".", ".."} for part in dependency.split("/"))
     ):
         raise IntakeError(f"PR #{number} has invalid dependency name {dependency!r}")
+    if match.group("ecosystem") == "pip" and PIP_DEPENDENCY_RE.fullmatch(dependency) is None:
+        raise IntakeError(
+            f"PR #{number} has unsupported pip directory in branch {head_ref!r}"
+        )
 
     head_sha = raw.get("headRefOid")
     if not isinstance(head_sha, str) or SHA_RE.fullmatch(head_sha) is None:

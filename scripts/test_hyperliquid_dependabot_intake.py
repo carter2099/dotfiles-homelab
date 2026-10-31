@@ -138,6 +138,62 @@ def test_non_dependabot_and_unsupported_refs_are_rejected() -> None:
             raise AssertionError(f"unsafe PR metadata was accepted: {candidate}")
 
 
+def test_pip_parity_security_updates_are_accepted() -> None:
+    manifest = build_manifest(
+        [
+            pull_request(27, head_ref="dependabot/pip/tools/parity/certifi-2026.10.19"),
+            pull_request(
+                31,
+                head_ref="dependabot/pip/tools/parity/charset-normalizer-3.6.0",
+            ),
+            pull_request(
+                32,
+                head_ref="dependabot/pip/tools/parity/typing_extensions-4.16.0",
+            ),
+        ],
+        safe_classifier([]),
+        generated_at=datetime(2026, 10, 30, tzinfo=timezone.utc),
+    )
+
+    check(
+        manifest["pull_requests"][0]
+        == {
+            "number": 27,
+            "ecosystem": "pip",
+            "dependency": "tools/parity/certifi",
+            "target_version": "2026.10.19",
+            "base_ref": "main",
+            "head_ref": "dependabot/pip/tools/parity/certifi-2026.10.19",
+            "head_sha": f"{27:040x}",
+        },
+        manifest,
+    )
+    check(
+        [(pr["dependency"], pr["target_version"]) for pr in manifest["pull_requests"][1:]]
+        == [
+            ("tools/parity/charset-normalizer", "3.6.0"),
+            ("tools/parity/typing_extensions", "4.16.0"),
+        ],
+        manifest,
+    )
+
+
+def test_pip_outside_tools_parity_is_rejected() -> None:
+    for head_ref in (
+        "dependabot/pip/requests-2.0",
+        "dependabot/pip/other/dir/requests-1.0",
+        "dependabot/pip/tools/parity/nested/requests-1.0",
+        "dependabot/pip/tools/parityx/requests-1.0",
+        "dependabot/pip/tools/parity/../requests-1.0",
+    ):
+        try:
+            build_manifest([pull_request(40, head_ref=head_ref)], safe_classifier([]))
+        except IntakeError as exc:
+            check("PR #40" in str(exc), exc)
+        else:
+            raise AssertionError(f"pip branch outside tools/parity was accepted: {head_ref}")
+
+
 def test_empty_intake_does_not_require_classifier() -> None:
     def must_not_classify(_text: str) -> dict[str, object]:
         raise AssertionError("classifier should not run without PRs")
@@ -172,6 +228,8 @@ def main() -> None:
         test_flagged_pr_rejects_the_entire_batch,
         test_classifier_failure_rejects_the_entire_batch,
         test_non_dependabot_and_unsupported_refs_are_rejected,
+        test_pip_parity_security_updates_are_accepted,
+        test_pip_outside_tools_parity_is_rejected,
         test_empty_intake_does_not_require_classifier,
         test_manifest_write_is_private_and_complete,
     ]

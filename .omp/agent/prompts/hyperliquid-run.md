@@ -245,6 +245,24 @@ For a selected `github_actions` entry, update existing local
 `uses: <dependency>@...` references under `.github/workflows/` to its target
 major/ref (`target_version` `7` means `@v7`). Never fetch its Dependabot branch.
 
+For a selected `pip` entry (a GitHub security update for the Python-SDK parity
+capture pins; dev tooling only, not shipped in the gem), `dependency` is
+`tools/parity/<package>`. In `tools/parity/requirements.txt`, find the single
+existing `<package>==<old>` line, matching the package name case-insensitively
+with `-`, `_`, and `.` treated alike (PEP 503), and replace it with
+`<package>==<target_version>`, keeping the file's spelling of the name. A pin
+already at the target or a newer version is satisfied and must not be
+downgraded. If no such line exists, the entry fails: take the failure path below
+(entry back to 🟡 with the failure note). Never fetch its Dependabot branch.
+When the batch changed any parity pin, this gate must also pass before Step 7:
+```bash
+cd ~/dev/hyperliquid
+RBENV_VERSION=3.4.11 bundle exec rake parity:check
+```
+It rebuilds the parity venv from the pins and diffs freshly regenerated
+fixtures against `spec/fixtures/parity`; any failure or diff takes the failure
+path below.
+
 If any selected entry cannot be applied or verified, capture the error, restore
 only tracked paths changed by this dependency attempt to `HEAD`, remove
 `.dependabot.Gemfile*`, verify the checkout is clean, return the selected queue
@@ -343,13 +361,14 @@ Then push only through the **push protocol** below.
 A docs-only row stages only the files its plan run names.
 
 For a dependency run, stage `Gemfile.lock`, the specific changed workflow
-files, and only the exact source/test files needed for a proven
-dependency-induced compatibility fix. Confirm `git status --short` contains no
-temporary resolver file or unrelated change.
+files, `tools/parity/requirements.txt` when a parity pin changed, and only the
+exact source/test files needed for a proven dependency-induced compatibility
+fix. Confirm `git status --short` contains no temporary resolver file or
+unrelated change.
 
 ```bash
 cd ~/dev/hyperliquid
-git add Gemfile.lock .github/workflows/<changed-workflow>.yml <specific-compatibility-file-if-any>
+git add Gemfile.lock .github/workflows/<changed-workflow>.yml tools/parity/requirements.txt <specific-compatibility-file-if-any>
 git commit -m "chore(deps): apply Dependabot batch
 
 Co-Authored-By: hyperliquid-run agent <noreply@carter2099.com>"

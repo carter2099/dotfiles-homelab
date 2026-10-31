@@ -2,7 +2,7 @@
 /** Behavioral contracts for the Hyperliquid Dependabot agent guard. */
 
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -29,6 +29,15 @@ const pullRequests = [
     number: 6,
     target_version: "2.4.0",
   },
+  {
+    base_ref: "main",
+    dependency: "tools/parity/certifi",
+    ecosystem: "pip",
+    head_ref: "dependabot/pip/tools/parity/certifi-2026.10.19",
+    head_sha: "89abcdef0123456789abcdef0123456789abcdef",
+    number: 27,
+    target_version: "2026.10.19",
+  },
 ];
 const actionable = {
   repository: "carter2099/hyperliquid",
@@ -45,7 +54,7 @@ const manifest = {
   classification: {
     policy: "title_and_body_per_pr_then_sanitized_handoff",
     result: "SAFE",
-    classified_pull_requests: 1,
+    classified_pull_requests: 2,
     max_pull_request_score: 0.01,
     sanitized_handoff_score: 0.01,
   },
@@ -117,6 +126,10 @@ try {
       toolName: "read",
       input: { path: "https://api.github.com/repos/carter2099/hyper%6Ciquid/pulls" },
     },
+    {
+      toolName: "bash",
+      input: { command: "git -C ~/dev/hyperliquid fetch origin dependabot/pip/tools/parity/certifi-2026.10.19" },
+    },
   ];
   for (const blockedCase of blockedCases) {
     const result = await handler(blockedCase) as { block?: boolean } | undefined;
@@ -129,6 +142,10 @@ try {
     {
       toolName: "bash",
       input: { command: "gh pr close 6 --repo carter2099/hyperliquid --comment \"Applied to dev by the scheduled Hyperliquid SDK maintenance run.\"" },
+    },
+    {
+      toolName: "bash",
+      input: { command: "gh pr close 27 --repo carter2099/hyperliquid --comment \"Applied to dev by the scheduled Hyperliquid SDK maintenance run.\"" },
     },
     {
       toolName: "bash",
@@ -159,6 +176,54 @@ try {
     !tamperedResult.reason?.includes("manifest changed after validation")
   ) {
     throw new Error(`tampered manifest was not rejected: ${JSON.stringify(tamperedResult)}`);
+  }
+
+  // pip entries outside tools/parity must fail closed at manifest validation.
+  const rootPipPullRequests = [
+    {
+      base_ref: "main",
+      dependency: "requests",
+      ecosystem: "pip",
+      head_ref: "dependabot/pip/requests-2.33.0",
+      head_sha: "89abcdef0123456789abcdef0123456789abcdef",
+      number: 31,
+      target_version: "2.33.0",
+    },
+  ];
+  const rootPipManifestPath = join(temporaryDirectory, "root-pip-intake.json");
+  await Bun.write(
+    rootPipManifestPath,
+    `${JSON.stringify({
+      ...manifest,
+      intake_sha256: createHash("sha256")
+        .update(
+          canonicalJson({ repository: manifest.repository, pull_requests: rootPipPullRequests }),
+          "ascii",
+        )
+        .digest("hex"),
+      classification: { ...manifest.classification, classified_pull_requests: 1 },
+      pull_requests: rootPipPullRequests,
+    })}\n`,
+  );
+  chmodSync(rootPipManifestPath, 0o600);
+  process.env.HYPERLIQUID_DEPENDABOT_MANIFEST = rootPipManifestPath;
+  // Fresh module instance: the guard validates the manifest named by the env at
+  // initialization, and Bun's module cache ignores URL query strings, so load a copy.
+  const rootPipGuardPath = join(temporaryDirectory, "root-pip-guard.ts");
+  copyFileSync(guardPath, rootPipGuardPath);
+  const rootPipGuard = await import(pathToFileURL(rootPipGuardPath).href);
+  let rootPipHandler: ((event: unknown) => Promise<unknown>) | undefined;
+  rootPipGuard.default({
+    on: (_event: string, callback: (event: unknown) => Promise<unknown>) => {
+      rootPipHandler = callback;
+    },
+  });
+  const rootPipResult = await rootPipHandler?.({
+    toolName: "bash",
+    input: { command: "git pull origin dev" },
+  }) as { block?: boolean; reason?: string } | undefined;
+  if (!rootPipResult?.block || !rootPipResult.reason?.includes("invalid pip dependency")) {
+    throw new Error(`root-level pip manifest was not rejected: ${JSON.stringify(rootPipResult)}`);
   }
 
   console.log("ALL PASSED");

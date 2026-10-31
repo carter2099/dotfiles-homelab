@@ -115,6 +115,16 @@ run_cli_fixture() {
     "isDraft": false,
     "title": "Another untrusted title",
     "body": "Another untrusted body"
+  },
+  {
+    "number": 27,
+    "author": {"login": "app/dependabot", "is_bot": true},
+    "baseRefName": "main",
+    "headRefName": "dependabot/pip/tools/parity/certifi-2026.10.19",
+    "headRefOid": "3333333333333333333333333333333333333333",
+    "isDraft": false,
+    "title": "Untrusted pip security title",
+    "body": "Untrusted pip security body"
   }
 ]
 JSON
@@ -191,12 +201,17 @@ import os
 from pathlib import Path
 
 manifest = json.loads(Path(os.environ["MANIFEST"]).read_text(encoding="utf-8"))
-if [item["number"] for item in manifest["pull_requests"]] != [3, 9]:
+if [item["number"] for item in manifest["pull_requests"]] != [3, 9, 27]:
     raise SystemExit("fixture PRs were not sorted")
 if manifest["classification"]["result"] != "SAFE":
     raise SystemExit("fixture intake was not classified SAFE")
-if manifest["classification"]["classified_pull_requests"] != 2:
+if manifest["classification"]["classified_pull_requests"] != 3:
     raise SystemExit("fixture classification count is wrong")
+pip_entry = manifest["pull_requests"][2]
+if (pip_entry["ecosystem"], pip_entry["dependency"], pip_entry["target_version"]) != (
+    "pip", "tools/parity/certifi", "2026.10.19",
+):
+    raise SystemExit(f"pip fixture entry is wrong: {pip_entry}")
 serialized = json.dumps(manifest).casefold()
 if "untrusted title" in serialized or "untrusted body" in serialized:
     raise SystemExit("untrusted title/body entered the manifest")
