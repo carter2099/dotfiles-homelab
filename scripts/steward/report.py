@@ -2518,10 +2518,12 @@ def phase_9_archive(run_dir, setup_data, elapsed_s):
     with open(RUNS_LOG, "a") as f:
         f.write(json.dumps(runs_entry) + "\n")
 
-    # Prune run dirs >30 days
+    # Prune run dirs >30 days, never the run being archived (its summary.md was
+    # just written; a backdated run_dir must not delete itself).
     cutoff = datetime.now() - timedelta(days=30)
+    current = Path(run_dir).resolve()
     for d in RUN_DIR_BASE.iterdir():
-        if d.is_dir() and len(d.name) == 10:  # YYYY-MM-DD
+        if d.is_dir() and len(d.name) == 10 and d.resolve() != current:  # YYYY-MM-DD
             try:
                 d_date = datetime.strptime(d.name, "%Y-%m-%d")
                 if d_date < cutoff:
