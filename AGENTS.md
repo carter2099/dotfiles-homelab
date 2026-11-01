@@ -137,6 +137,8 @@ Detailed deploy runbook at [`~/notes/docs/homelab/deployment.md`](notes/docs/hom
 **k3s is retired:** uninstalled on 2026-09-25 (no `k3s`/`kubectl`, no `~/k3s` or `~/.kube`; homelab-backup and the steward no longer depend on it). FreshRSS moved to Docker Compose. Details and rollback: [`k3s.md`](notes/docs/homelab/k3s.md).
 
 **UFW source of truth:** `~/system-config/ufw-expected-rules.txt` lists the exact `sudo ufw show added` lines (`br-owui` 8081 and 8082; 8082 from rig `192.168.4.103`; 22 from `192.168.4.0/22`; the k3s `cni0` rule was removed). Change rules by editing that file and running `sudo bash ~/system-config/ufw-rebuild.sh`, which validates before mutating and deletes only rules not listed. Steward P3a reports drift and never changes UFW.
+
+**Temporary kernel stopgaps (since 2026-11-01):** separate nftables table `inet cve_2026_98432` (root unit `cve-2026-98432-nft.service`, drops IPv4 TCP carrying IP options, CVE-2026-98432) and `/etc/modprobe.d/zdi-can-33367.conf` (blocks esp4/esp6/nlmon/act_pedit, ZDI-CAN-33367), from `~/system-config/kernel-mitigations/` (`install.sh apply|status|remove`). UFW/Docker rules are untouched and `nftables.service` must stay disabled (its default config flushes the ruleset). Retire each per the removal criteria in [`security-mitigations.md`](notes/docs/homelab/security-mitigations.md). Rig: pending apply.
 ## App Details
 
 Each app has a reference doc in `~/notes/docs/homelab/`:
@@ -325,6 +327,7 @@ Verbose architecture for subsystems an agent only needs when actively working on
 - [`searxng.md`](notes/docs/homelab/searxng.md) — metasearch backend, config
 - [`cloudflare.md`](notes/docs/homelab/cloudflare.md) — API token, tunnel ingress, DNS
 - [`opencode-go-proxy.md`](notes/docs/homelab/opencode-go-proxy.md) — multi-account usage API routing, no client auth / UFW gate
+- [`security-mitigations.md`](notes/docs/homelab/security-mitigations.md) — temporary host-level security stopgaps and their removal criteria
 
 `journal/` contains research notes and project records (not maintained). `logs/sessions/` contains chronological session memoirs.
 
