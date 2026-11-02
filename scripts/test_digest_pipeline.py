@@ -924,6 +924,58 @@ def test_recent_publication_blocks_repeat_named_by_event_terms() -> None:
               and rejected["matched_story"]["url"] == PHP_FLAWS_STORY["url"], rejected)
 
 
+def test_recent_publication_blocks_repeat_sharing_precise_figures() -> None:
+    """A re-report with different wording is caught by its shared precise figures.
+
+    Regression for 2026-10-26/27 AI Hardware: the RTX 20/30/40 tensor-throttle
+    unlock ran on consecutive days under headlines sharing only "RTX"; both
+    summaries gave the RTX 4090's 165.6 -> 331.6 TFLOPS.
+    """
+    original = {
+        "title": "GeForce Unlocked: Modders Boost RTX 20, RTX 30, and RTX 40 Compute "
+                 "Performance by Up to 2x",
+        "event": "Modders unlocked full-rate FP16/BF16 tensor throughput on GeForce RTX "
+                 "20, 30 and 40 GPUs",
+        "summary": "The mod lifts RTX 4090 FP16/BF16 tensor throughput from 165.6 to 331.6 "
+                   "TFLOPS, and RTX 3090 Ti BF16 matrix math runs up to 80% faster.",
+        "url": "https://www.techpowerup.com/351234/geforce-unlocked-modders-boost-rtx-compute",
+        "editorial_significance": "medium", "date_published": "2026-10-26",
+    }
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        published = root / "news" / "publications" / "2026-10-26"
+        published.mkdir(parents=True)
+        (published / f"{catalog.TOPICS['ai-hardware']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [original],
+        }))
+        run_dir = root / catalog.TOPICS["ai-hardware"]["category"] / "2026-10-27"
+        run_dir.mkdir(parents=True)
+        repeat = {
+            "title": "Nvidia RTX 20, 30, and 40-series GPUs hacked to remove a half-speed AI throttle",
+            "event": "Hackers removed Nvidia's half-rate AI throttle on consumer GeForce cards",
+            "summary": "RTX 4090 tensor throughput doubles from 165.6 to 331.6 TFLOPS.",
+            "event_terms": ["half-speed AI throttle", "Nvidia RTX"],
+            "url": "https://www.tomshardware.com/pc-components/gpus/nvidia-rtx-gpus-hacked-ai-throttle",
+            "editorial_significance": "medium", "date_published": "2026-10-27",
+        }
+        unrelated = {
+            "title": "Nvidia RTX 5090 Super rumored with 32GB of GDDR7",
+            "event": "A leak suggested an RTX 5090 Super with 32GB GDDR7 memory",
+            "summary": "The rumored card would run memory at 30.5 Gbps.",
+            "event_terms": ["RTX 5090 Super", "GDDR7"],
+            "url": "https://example.com/2026/10/27/rtx-5090-super-rumor",
+            "editorial_significance": "low", "date_published": "2026-10-27",
+        }
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(
+                catalog.TOPICS["ai-hardware"], [copy.deepcopy(repeat), copy.deepcopy(unrelated)], run_dir)
+        check([item["url"] for item in queue] == [unrelated["url"]], f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["url"] == repeat["url"]
+              and rejected["matched_story"]["url"] == original["url"], rejected)
+
+
 def test_fetch_alternate_repeating_published_story_is_not_assigned() -> None:
     """Another outlet's headline for a new candidate cannot re-run a published story.
 
@@ -3561,6 +3613,7 @@ def main() -> None:
         test_cross_day_wording_dedup_keeps_new_events_in_continuing_topics,
         test_recent_coverage_blocks_redated_url_of_same_article,
         test_recent_publication_blocks_repeat_named_by_event_terms,
+        test_recent_publication_blocks_repeat_sharing_precise_figures,
         test_fetch_alternate_repeating_published_story_is_not_assigned,
         test_phase_two_ledger_drops_redated_url_of_covered_article,
         test_phase_two_shared_url_findings_keep_their_own_metadata,

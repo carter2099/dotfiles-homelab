@@ -45,6 +45,30 @@ CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS = 2
 # vulnerabilities ran twice; the headlines differed but the earlier summary
 # named the same fix, researchers and model).
 CROSS_DAY_EVENT_MIN_TERMS = 2
+# A re-report worded too differently for either test above still repeats a
+# published story when both cite at least this many of the same precise
+# decimal figures (four or more digits, e.g. "165.6", "331.6") and share a
+# headline word (10-26/27 AI Hardware: the RTX 20/30/40 tensor-throttle
+# unlock ran twice; both reports gave the RTX 4090 165.6 -> 331.6 TFLOPS).
+CROSS_DAY_EVENT_MIN_SHARED_FIGURES = 2
+_DISTINCTIVE_FIGURE = re.compile(r"(?<![\d.])\d+\.\d+(?!\.?\d)")
+
+
+def _distinctive_figures(record: dict) -> set[str]:
+    """Decimal figures with at least four digits in a record's title/event/summary."""
+    text = " ".join(str(record.get(key) or "") for key in ("title", "event", "summary"))
+    return {figure for figure in _DISTINCTIVE_FIGURE.findall(text)
+            if sum(char.isdigit() for char in figure) >= 4}
+
+
+def _shares_distinctive_figures(story: dict, item: dict) -> bool:
+    """Same precise figures plus a shared headline word identify one event."""
+    from news_publish import _event_tokens
+
+    if len(_distinctive_figures(story) & _distinctive_figures(item)) < CROSS_DAY_EVENT_MIN_SHARED_FIGURES:
+        return False
+    return bool(_event_tokens(story.get("title")) & _event_tokens(item.get("title")))
+
 
 def refetch_article_date(url: str, title: str) -> str | None:
     """Re-fetch an article to independently extract its publication date.
@@ -908,7 +932,9 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     Beyond news_publish._same_event, the two must share
     CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP of the smaller title/event vocabulary,
     or every one of ``item``'s (at least CROSS_DAY_EVENT_MIN_TERMS) event terms
-    must appear in the story's title/event/summary, and they must be dated at
+    must appear in the story's title/event/summary. Independently of those
+    wording tests, sharing CROSS_DAY_EVENT_MIN_SHARED_FIGURES precise decimal
+    figures plus a headline word also counts. In every case they must be dated at
     most CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS apart. An undated
     candidate counts as published at the start of the freshness window
     (yesterday); an undated story as published on its edition date.
@@ -918,17 +944,18 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     story_key = coverage_key(story.get("url", ""))
     if story_key and story_key == coverage_key(item.get("url", "")):
         return True
-    if not _same_event(story, item, frequency):
-        return False
-    story_tokens = _story_event_tokens(story)
-    item_tokens = _story_event_tokens(item)
-    shared = story_tokens & item_tokens
-    if (len(shared) / min(len(story_tokens), len(item_tokens)) < CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP
-            and not attention_match.terms_all_present(
-                item.get("event_terms"),
-                " ".join(str(story.get(key) or "") for key in ("title", "event", "summary")),
-                CROSS_DAY_EVENT_MIN_TERMS)):
-        return False
+    if not _shares_distinctive_figures(story, item):
+        if not _same_event(story, item, frequency):
+            return False
+        story_tokens = _story_event_tokens(story)
+        item_tokens = _story_event_tokens(item)
+        shared = story_tokens & item_tokens
+        if (len(shared) / min(len(story_tokens), len(item_tokens)) < CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP
+                and not attention_match.terms_all_present(
+                    item.get("event_terms"),
+                    " ".join(str(story.get(key) or "") for key in ("title", "event", "summary")),
+                    CROSS_DAY_EVENT_MIN_TERMS)):
+            return False
     story_date = (parse_date(str(story.get("date_confirmed") or "").strip())
                   or parse_date(str(story.get("date_published") or "").strip())
                   or parse_date(str(story.get("edition_date") or "")))
@@ -980,7 +1007,8 @@ def phase_3_rank(
             "covered_urls": sorted(recent_coverage),
             "covered_stories": runtime.canonical_fingerprint([
                 {key: story.get(key, "") for key in (
-                    "url", "title", "event", "date_published", "date_confirmed", "edition_date")}
+                    "url", "title", "event", "summary", "date_published", "date_confirmed",
+                    "edition_date")}
                 for story in recent_stories
             ]),
             "issue_date": issue_date.isoformat(),
@@ -992,6 +1020,7 @@ def phase_3_rank(
             "cross_day_event_min_token_overlap": CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP,
             "cross_day_event_min_terms": CROSS_DAY_EVENT_MIN_TERMS,
             "cross_day_event_max_date_gap_days": CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS,
+            "cross_day_event_min_shared_figures": CROSS_DAY_EVENT_MIN_SHARED_FIGURES,
         },
     )
     state, cached = runtime.begin_or_load_phase(
