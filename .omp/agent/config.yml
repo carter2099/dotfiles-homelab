@@ -3,7 +3,7 @@ theme:
   dark: dark-one
 setupVersion: 2
 modelRoles:
-  default: anthropic/claude-opus-5-5:high
+  default: anthropic/claude-opus-5-5:xhigh
   smol: anthropic/claude-sonnet-5-5:high
   tiny: anthropic/claude-haiku-5-5:medium
   slow: anthropic/claude-opus-5-5:max
