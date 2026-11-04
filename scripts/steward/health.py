@@ -1,6 +1,7 @@
 """Validation, remediation, and heartbeat health checks."""
 from __future__ import annotations
 
+import deploy_lock
 import jev
 
 from .config import (
@@ -308,6 +309,35 @@ P3_FIX_MAX_ACTIONS = 3
 P3_FIX_TIMEOUT = 180
 P3_JEV_DEADLINE_S = 120
 P3_JEV_PURPOSE = "steward-p3-fix"
+# Fix actions hold the shared deploy lock (scripts/deploy_lock.py) while they
+# run: a unit/container restart its surface lock, a docker/cloudflared restart
+# the host lock.  A lock still held after this wait skips the action.
+P3_FIX_LOCK_WAIT = 120
+# Container/unit -> deploy-lock key where security-watch uses a named key.
+P3_SERVICE_LOCK_KEYS = {
+    "open-webui": "open-webui",
+    "blog-web-1": "app-blog",
+    "llm-proxy.service": "llm-proxy",
+    "searxng": "searxng",
+    "carter-news": "news",
+    "freshrss": "freshrss",
+}
+
+
+def _p3_lock_key(name):
+    """Deploy-lock key for a unit/container: the shared name, else a sanitized one."""
+    if name in P3_SERVICE_LOCK_KEYS:
+        return P3_SERVICE_LOCK_KEYS[name]
+    base = re.sub(r"\.service$", "", str(name).lower())
+    slug = re.sub(r"[^a-z0-9-]+", "-", base).strip("-")[:64].rstrip("-")
+    return slug or "unit"
+
+
+def _p3_fix_lock(action, holder):
+    """The deploy lock one menu action holds while it runs."""
+    if action.get("lock") == "host":
+        return deploy_lock.host_lock(timeout=P3_FIX_LOCK_WAIT, holder=holder)
+    return deploy_lock.surface_lock(action["lock"], timeout=P3_FIX_LOCK_WAIT, holder=holder)
 
 
 def _p3_fix_menu(endpoint):
@@ -323,24 +353,29 @@ def _p3_fix_menu(endpoint):
         if unit:
             menu["restart_unit"] = {
                 "description": f"Restart the user systemd unit {unit} that serves this endpoint.",
-                "argv": ["systemctl", "--user", "restart", unit], "user_env": True}
+                "argv": ["systemctl", "--user", "restart", unit], "user_env": True,
+                "lock": _p3_lock_key(unit)}
         unit = service.get("system_unit")
         if unit:
             menu["restart_unit"] = {
                 "description": f"Restart the system unit {unit} that serves this endpoint.",
-                "argv": ["sudo", "-n", "systemctl", "restart", unit]}
+                "argv": ["sudo", "-n", "systemctl", "restart", unit],
+                "lock": _p3_lock_key(unit)}
         container = service.get("container")
         if container:
             menu["restart_container"] = {
                 "description": f"Restart the Docker container {container} that serves this endpoint.",
-                "argv": ["docker", "restart", "--time", "30", container]}
+                "argv": ["docker", "restart", "--time", "30", container],
+                "lock": _p3_lock_key(container)}
             menu["restart_docker"] = {
                 "description": "Restart the Docker daemon (restarts every container on the host).",
-                "argv": ["sudo", "-n", "systemctl", "restart", "docker.service"]}
+                "argv": ["sudo", "-n", "systemctl", "restart", "docker.service"],
+                "lock": "host"}
         if endpoint in P3_TUNNEL_ENDPOINTS:
             menu["restart_cloudflared"] = {
                 "description": "Restart the cloudflared tunnel connector (all public hostnames).",
-                "argv": ["sudo", "-n", "systemctl", "restart", "cloudflared.service"]}
+                "argv": ["sudo", "-n", "systemctl", "restart", "cloudflared.service"],
+                "lock": "host"}
     menu["none"] = {"description": "Take no action; leave it for Carter.", "argv": None}
     return menu
 
@@ -452,7 +487,19 @@ def _p3_apply_fix_menu(regressed_names, applied_steps, packet, client, prior=())
         else:
             argv = list(action["argv"])
             kwargs = {"env": user_env()} if action.get("user_env") else {}
-            out, err, code = run_capture_ok(argv, timeout=P3_FIX_TIMEOUT, **kwargs)
+            try:
+                with _p3_fix_lock(action, f"steward:p3_fix:{endpoint}"):
+                    out, err, code = run_capture_ok(argv, timeout=P3_FIX_TIMEOUT, **kwargs)
+            except deploy_lock.LockTimeout as exc:
+                row.update(skipped=True, argv=argv,
+                           reason=f"skipped: deploy lock {exc.key} held by {exc.holder}")
+                print(f"[P3] fix menu: {endpoint} -> {choice} skipped ({exc})")
+                continue
+            except OSError as exc:
+                row.update(skipped=True, argv=argv,
+                           reason=f"skipped: deploy lock unavailable: {exc}"[:300])
+                print(f"[P3] fix menu: {endpoint} -> {choice} skipped (deploy lock: {exc})")
+                continue
             ran.add(tuple(argv))
             row.update(executed=True, argv=argv, exit_code=code,
                        output_tail=f"{out}\n{err}".strip()[-500:])
@@ -1091,6 +1138,7 @@ def phase_4_heartbeat(run_dir):
         "llm-proxy.service",
         "dependabot-webhook.service",
         "homelab-backup-restore-drill.service", "homelab-backup-restore-drill.timer",
+        "security-watch.service", "security-watch.timer",
     }
     all_user_units = run_capture(
         ["systemctl", "--user", "list-units", "--all", "--no-legend", "--plain"],

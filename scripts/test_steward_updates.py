@@ -18,6 +18,25 @@ from steward import dotfiles
 
 from steward import audit, config, fixes, report, routing, updates
 
+_ISOLATED_STATE = None
+_ENV_PATCH = None
+
+
+def setUpModule():
+    """P1 steps take real deploy flocks; keep them (and report.json) in a temp dir."""
+    global _ISOLATED_STATE, _ENV_PATCH
+    _ISOLATED_STATE = tempfile.TemporaryDirectory()
+    _ENV_PATCH = patch.dict(os.environ, {
+        "DEPLOY_LOCK_DIR": str(Path(_ISOLATED_STATE.name) / "locks"),
+        "SECURITY_WATCH_STATE_DIR": str(Path(_ISOLATED_STATE.name) / "security-watch"),
+    })
+    _ENV_PATCH.start()
+
+
+def tearDownModule():
+    _ENV_PATCH.stop()
+    _ISOLATED_STATE.cleanup()
+
 
 class DelayedUpdateTests(unittest.TestCase):
     NOW = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)

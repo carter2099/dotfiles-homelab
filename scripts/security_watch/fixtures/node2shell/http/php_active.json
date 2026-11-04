@@ -1,0 +1,36 @@
+{
+ "8": {
+  "8.2": {
+   "announcement": true,
+   "tags": [
+    "security"
+   ],
+   "date": "21 Oct 2026",
+   "version": "8.2.35"
+  },
+  "8.3": {
+   "announcement": true,
+   "tags": [
+    "security"
+   ],
+   "date": "21 Oct 2026",
+   "version": "8.3.36"
+  },
+  "8.4": {
+   "announcement": true,
+   "tags": [
+    "security"
+   ],
+   "date": "21 Oct 2026",
+   "version": "8.4.27"
+  },
+  "8.5": {
+   "announcement": true,
+   "tags": [
+    "security"
+   ],
+   "date": "21 Oct 2026",
+   "version": "8.5.12"
+  }
+ }
+}

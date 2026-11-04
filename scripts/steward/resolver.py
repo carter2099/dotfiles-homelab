@@ -116,7 +116,8 @@ _INFRA_PATH = re.compile(
     re.IGNORECASE,
 )
 _STEWARD_SOURCE = re.compile(
-    r"^scripts/(steward(/|_runner\.py$)|workflow_state\.py$|test_steward|jev\.py$)"
+    r"^scripts/(steward(/|_runner\.py$)|workflow_state\.py$|test_steward|jev\.py$"
+    r"|deploy_lock\.py$|security_watch/)"
     r"|^system-config/dotfiles-publish"
 )
 

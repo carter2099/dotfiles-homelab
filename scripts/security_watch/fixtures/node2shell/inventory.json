@@ -1,0 +1,88 @@
+[
+  {
+    "component_id": "freshrss",
+    "collected_at": "2026-11-03T11:55:00+00:00",
+    "status": "ok",
+    "fingerprint": "replay-freshrss-1",
+    "reason": "",
+    "packages": [
+      {
+        "ecosystem": "Debian:13",
+        "name": "brotli",
+        "version": "1.1.0-2",
+        "binary": "libbrotli1 1.1.0-2+b7",
+        "location": "/var/lib/dpkg/status"
+      },
+      {
+        "ecosystem": "runtime",
+        "name": "php",
+        "version": "8.4.27",
+        "binary": "php",
+        "location": "php -r PHP_VERSION"
+      }
+    ],
+    "meta": {
+      "os": "debian 13",
+      "ecosystem": "Debian:13",
+      "image": "freshrss/freshrss:latest"
+    }
+  },
+  {
+    "component_id": "news",
+    "collected_at": "2026-11-03T11:55:00+00:00",
+    "status": "ok",
+    "fingerprint": "replay-news-1",
+    "reason": "",
+    "packages": [
+      {
+        "ecosystem": "Alpine:v3.24",
+        "name": "brotli",
+        "version": "1.2.0-r1",
+        "binary": "brotli-libs",
+        "location": "/lib/apk/db/installed"
+      }
+    ],
+    "meta": {
+      "os": "alpine 3.24.2",
+      "ecosystem": "Alpine:v3.24",
+      "image": "nginx:alpine"
+    }
+  },
+  {
+    "component_id": "host",
+    "collected_at": "2026-11-03T11:55:00+00:00",
+    "status": "ok",
+    "fingerprint": "replay-host-1",
+    "reason": "",
+    "packages": [
+      {
+        "ecosystem": "Ubuntu:24.04:LTS",
+        "name": "brotli",
+        "version": "1.1.0-2ubuntu0.1",
+        "binary": "libbrotli1",
+        "location": "/var/lib/dpkg/status"
+      }
+    ],
+    "meta": {
+      "os": "ubuntu 24.04",
+      "ecosystem": "Ubuntu:24.04:LTS"
+    }
+  },
+  {
+    "component_id": "bun",
+    "collected_at": "2026-11-03T11:55:00+00:00",
+    "status": "ok",
+    "fingerprint": "replay-bun-1",
+    "reason": "",
+    "packages": [
+      {
+        "ecosystem": "runtime",
+        "name": "bun",
+        "version": "1.3.14",
+        "binary": "bun",
+        "location": "~/.bun/bin/bun"
+      }
+    ],
+    "meta": {}
+  }
+]

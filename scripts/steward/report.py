@@ -1752,11 +1752,281 @@ def _audit_incomplete_events(audit):
             for sec in _audit_incomplete_sections(audit)]
 
 
+# ── security-watch ───────────────────────────────────────────────────
+# security-watch (15-minute user timer) writes report.json every tick; the
+# nightly email maps it into the same triage and adds a "Security watch" card.
+SECURITY_WATCH_STALE = timedelta(hours=2)
+SECURITY_WATCH_URGENT_GRACE = timedelta(hours=24)
+SECURITY_WATCH_SOURCE_FAILING = timedelta(hours=24)
+SECURITY_WATCH_WATCH_MAX = 10
+SECURITY_WATCH_JOURNAL = "journalctl --user -u security-watch.service --since -1d"
+SECURITY_WATCH_BREAKER_RESET = "python3 ~/scripts/security_watch_runner.py breaker-reset"
+_SW_FAILED_ACTIONS = {"failed": "failed", "rolled_back": "was rolled back",
+                      "unverified": "could not be verified"}
+_SW_DEPLOY_PLAYBOOKS = frozenset({"release-rebuild"})
+_SW_URGENCY_RANK = {"urgent": 0, "normal": 1}
+_SW_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def _security_watch_report_path():
+    from security_watch import config as security_watch_config
+    return security_watch_config.report_path()
+
+
+def _load_security_watch_report(path=None):
+    """security-watch report.json (schema 1); missing, unreadable or invalid -> {}."""
+    try:
+        path = Path(path) if path is not None else _security_watch_report_path()
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) and data.get("schema") == 1 else {}
+
+
+def _sw_rows(data, key):
+    value = (data or {}).get(key)
+    return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
+
+
+def _sw_int(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sw_fixed(finding):
+    fixed = finding.get("fixed")
+    return ", ".join(str(v) for v in fixed[:3]) if isinstance(fixed, list) else ""
+
+
+def _sw_reach(finding):
+    reach = finding.get("reach") if isinstance(finding.get("reach"), dict) else {}
+    verdict = str(reach.get("verdict") or "unknown")
+    p = reach.get("p")
+    if isinstance(p, (int, float)) and not isinstance(p, bool):
+        return f"{verdict} {p:.2f}"
+    return verdict
+
+
+def _sw_finding_label(finding):
+    cves = finding.get("cves") if isinstance(finding.get("cves"), list) else []
+    ident = str(cves[0]) if cves else str(finding.get("key") or "")
+    what = f"{finding.get('package') or '?'} {finding.get('version') or ''}".strip()
+    return f"{finding.get('component') or '?'}: {what}" + (f" — {ident}" if ident else "")
+
+
+def _sw_open_findings(data):
+    """Affected urgent/normal findings, most pressing first."""
+    rows = [f for f in _sw_rows(data, "findings")
+            if f.get("status") == "affected" and str(f.get("urgency")) in _SW_URGENCY_RANK]
+    return sorted(rows, key=lambda f: (
+        _SW_URGENCY_RANK[f["urgency"]], not f.get("kev"),
+        _SW_SEVERITY_RANK.get(str(f.get("severity") or ""), 4),
+        str(f.get("first_seen") or "")))
+
+
+def _sw_failing_sources(data, now):
+    """Sources failing for more than a day (or never succeeded and failing)."""
+    failing = []
+    for source in _sw_rows(data, "sources"):
+        if not (_sw_int(source.get("consecutive_failures")) or source.get("last_error")):
+            continue
+        last_ok = _parse_utc(source.get("last_success")) if source.get("last_success") else None
+        if last_ok is not None and now - last_ok <= SECURITY_WATCH_SOURCE_FAILING:
+            continue
+        failing.append(source)
+    return failing
+
+
+def _security_watch_events(data, now=None):
+    """security-watch report.json as triage items.
+
+    Needs You (extreme only): the breaker is open; a fix failed, rolled back or
+    went unverified in the last 24 h; an urgent finding with a fix available
+    still affected a day after it was first seen.  Watching: other open
+    findings (top 10), alerting refusals, shadow proposals, sources failing for
+    over a day, a stale report.  What changed: verified fixes with their undo.
+    """
+    if not isinstance(data, dict) or not data:
+        return []
+    now = now or datetime.now(timezone.utc)
+    items = []
+    generated = _parse_utc(data.get("generated_at")) if data.get("generated_at") else None
+    if generated is None or now - generated > SECURITY_WATCH_STALE:
+        last = data.get("generated_at") or "unknown"
+        items.append(_item("watch", f"security-watch report is stale (last {last})",
+                           command=SECURITY_WATCH_JOURNAL))
+
+    breaker = data.get("breaker") if isinstance(data.get("breaker"), dict) else {}
+    if breaker.get("open"):
+        since = f" (since {_utc_text(breaker.get('since'))})" if breaker.get("since") else ""
+        items.append(_item(
+            "needs", "Security watch stopped fixing: its circuit breaker is open",
+            why=_clip(f"{breaker.get('reason') or 'no reason recorded'}{since}", 300),
+            todo="Find the cause in the security-watch journal, fix it, then reset the breaker:",
+            problem="security-watch breaker open", command=SECURITY_WATCH_BREAKER_RESET))
+
+    for action in _sw_rows(data, "actions_24h"):
+        status = str(action.get("status") or "")
+        component = action.get("component") or "?"
+        playbook = action.get("playbook") or "playbook"
+        if status in _SW_FAILED_ACTIONS:
+            items.append(_item(
+                "needs", f"Security fix for {component} ({playbook}) {_SW_FAILED_ACTIONS[status]}",
+                why=_clip(action.get("detail") or f"status {status}", 300),
+                todo=(f"Check {component} is healthy and on a known version"
+                      + (f"; undo: {_clip(action.get('undo'), 200)}" if action.get("undo") else "")
+                      + ". Journal:"),
+                problem="security fix failed", command=SECURITY_WATCH_JOURNAL))
+        elif status == "verified":
+            group = "Deploys" if playbook in _SW_DEPLOY_PLAYBOOKS else "Updates"
+            target = _clip(action.get("target"), 160)
+            items.append(_item(
+                "change", f"Security fix: {component} — {target or playbook}",
+                group=group, undo=action.get("undo") or ()))
+
+    watch_findings = []
+    for finding in _sw_open_findings(data):
+        first_seen = (_parse_utc(finding.get("first_seen"))
+                      if finding.get("first_seen") else None)
+        if (finding.get("urgency") == "urgent" and finding.get("fix_available")
+                and first_seen is not None and now - first_seen > SECURITY_WATCH_URGENT_GRACE):
+            reasons = finding.get("reasons") if isinstance(finding.get("reasons"), list) else []
+            why = "; ".join(str(r) for r in reasons[:4])
+            why = (f"{finding.get('severity') or 'unrated'} severity"
+                   + (f", {why}" if why else "")
+                   + f"; first seen {_utc_text(finding.get('first_seen'))}; reach {_sw_reach(finding)}")
+            items.append(_item(
+                "needs", f"Unpatched urgent vulnerability — {_sw_finding_label(finding)}",
+                why=_clip(why, 300),
+                todo=(f"Install the fixed version ({_sw_fixed(finding) or 'see advisory'}) "
+                      f"through {finding.get('component') or 'the component'}'s owner, or see "
+                      "why security-watch has not (Security watch section)"),
+                problem="urgent vulnerability unpatched"))
+        else:
+            watch_findings.append(finding)
+    for finding in watch_findings[:SECURITY_WATCH_WATCH_MAX]:
+        fixed = _sw_fixed(finding)
+        items.append(_item("watch", (
+            f"Security: {_sw_finding_label(finding)} ({finding.get('severity') or 'unrated'}, "
+            f"{finding.get('urgency')}, reach {_sw_reach(finding)}; "
+            f"{'fix ' + fixed if fixed else 'no fix yet'})")))
+    if len(watch_findings) > SECURITY_WATCH_WATCH_MAX:
+        items.append(_item("watch", "Security: "
+                           f"{len(watch_findings) - SECURITY_WATCH_WATCH_MAX} more open findings "
+                           "(see the Security watch section)"))
+
+    for refusal in _sw_rows(data, "refused"):
+        if refusal.get("alert"):
+            items.append(_item("watch", (
+                f"Security watch cannot fix {refusal.get('component') or '?'} "
+                f"({refusal.get('playbook') or 'no playbook'}): {_clip(refusal.get('reason'), 200)}")))
+    shadow = " (shadow mode, not applied)" if data.get("mode") == "shadow" else ""
+    for proposal in _sw_rows(data, "proposed"):
+        items.append(_item("watch", (
+            f"Security watch proposes {proposal.get('playbook') or 'a fix'} for "
+            f"{proposal.get('component') or '?'}: {_clip(proposal.get('target'), 160)}{shadow}")))
+    for source in _sw_failing_sources(data, now):
+        since = (_utc_text(source.get("last_success")) if source.get("last_success")
+                 else "it was added")
+        error = _clip(source.get("last_error"), 160) or "no error recorded"
+        items.append(_item("watch", (
+            f"Security feed {source.get('name') or '?'} failing since {since}: {error}")))
+    for stopgap in _sw_rows(data, "stopgaps"):
+        if stopgap.get("status") == "removable":
+            remove = _clip(stopgap.get("remove"), 300)
+            items.append(_item(
+                "watch", f"Stopgap {stopgap.get('id') or '?'} can be removed: {remove}",
+                todo=remove, command=remove))
+    return items
+
+
+def _sw_table(findings):
+    cell = f'padding:3px 8px 3px 0; vertical-align:top; color:{COLOR["text"]};'
+    head = f'padding:3px 8px 3px 0; text-align:left; color:{COLOR["muted"]}; font-weight:700;'
+    out = ['<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+           f'style="font-size:12px; color:{COLOR["text"]}; border-collapse:collapse;"><tr>']
+    out.extend(f'<th style="{head}">{_esc(title)}</th>'
+               for title in ("Component", "Package", "Fixed", "Urgency", "Reach"))
+    out.append("</tr>")
+    for finding in findings:
+        urgency = str(finding.get("urgency") or "")
+        color = COLOR["danger"] if urgency == "urgent" else COLOR["text"]
+        package = f"{finding.get('package') or '?'} {finding.get('version') or ''}".strip()
+        out.append(
+            "<tr>"
+            f'<td style="{cell}">{_esc(_clip(finding.get("component"), 40))}</td>'
+            f'<td style="{cell}">{_esc(_clip(package, 60))}</td>'
+            f'<td style="{cell}">{_esc(_clip(_sw_fixed(finding), 50) or "—")}</td>'
+            f'<td style="{cell} color:{color};">{_esc(urgency)}</td>'
+            f'<td style="{cell}">{_esc(_sw_reach(finding))}</td>'
+            "</tr>")
+    out.append("</table>")
+    return "".join(out)
+
+
+def _html_security_watch(data, now=None):
+    """The "Security watch" card body ("" when there is no report)."""
+    if not isinstance(data, dict) or not data:
+        return ""
+    now = now or datetime.now(timezone.utc)
+    mode = str(data.get("mode") or "unknown")
+    breaker = data.get("breaker") if isinstance(data.get("breaker"), dict) else {}
+    if breaker.get("open"):
+        breaker_html = (_chip("open", COLOR["danger"]) + " "
+                        + _esc(_clip(breaker.get("reason") or "", 200)))
+    else:
+        breaker_html = _chip("closed", COLOR["ok"])
+    shadow = data.get("shadow") if isinstance(data.get("shadow"), dict) else {}
+    criteria = shadow.get("criteria") if isinstance(shadow.get("criteria"), list) else []
+    shadow_html = (_chip("eligible", COLOR["ok"]) if shadow.get("eligible")
+                   else _chip("not yet", COLOR["faint"]))
+    if shadow.get("days") is not None:
+        try:
+            shadow_html += f" {float(shadow['days']):.1f} days in shadow"
+        except (TypeError, ValueError):
+            pass
+    if criteria:
+        shadow_html += "<br>" + "<br>".join(_esc(_clip(c, 160)) for c in criteria[:8])
+    tick = data.get("last_tick") if isinstance(data.get("last_tick"), dict) else {}
+    generated = _utc_text(data.get("generated_at")) or "unknown"
+    if tick.get("outcome"):
+        generated += f" ({tick.get('outcome')})"
+    failing = _sw_failing_sources(data, now)
+    unknown = _sw_rows(data, "unknown")
+    rows = [
+        ("Mode", _chip(mode, COLOR["warn"] if mode == "active" else COLOR["info"])),
+        ("Breaker", breaker_html),
+        ("Shadow → active", shadow_html),
+        ("Last report", _esc(generated)),
+        ("Failing sources", _esc(", ".join(str(s.get("name") or "?") for s in failing))
+         if failing else _esc("none")),
+        ("Unknown (blind spots)", _esc(_plural(len(unknown), "component"))),
+    ]
+    findings = _sw_open_findings(data)
+    body = _kv_rows(rows)
+    if findings:
+        body += _label(f"Top findings ({len(findings)} open)") + _sw_table(
+            findings[:SECURITY_WATCH_WATCH_MAX])
+    else:
+        body += _row(_esc("No open urgent or normal findings."), COLOR["muted"], "8px 0 0")
+    active = [s for s in _sw_rows(data, "stopgaps") if s.get("status") == "active"]
+    if active:
+        body += _label(f"Active stopgaps ({len(active)})") + "".join(
+            _row(f"{_code(stopgap.get('id') or '?')} {_esc(_clip(stopgap.get('component'), 40) or '?')}"
+                 f" — since {_esc(_utc_text(stopgap.get('since')) or 'unknown')}", margin="0 0 4px")
+            for stopgap in active)
+    return body
+
+
+
 # ── triage ───────────────────────────────────────────────────────────
 
 def _triage(applied, audit, fixes, *, steward_code=None, validation=None, heartbeat=None,
             troubleshoot=None, remediation=None, untracked_dotfiles=None, prev_dotfiles=None,
-            public=None, p0b=None, rig_last_ok=None, omp_login=None):
+            public=None, p0b=None, rig_last_ok=None, omp_login=None, security_watch=None,
+            now=None):
     """Every report item, triaged once.
 
     Needs You is only for extreme items: a service still failing (P3 could not
@@ -1764,7 +2034,8 @@ def _triage(applied, audit, fixes, *, steward_code=None, validation=None, heartb
     rollback, Docker daemon failure, unrepairable OMP DB or a rig unhealthy
     after reboot; a dead omp model login; a steward-code pickup left unverified
     or a partly applied follow-up fix; a high-severity or security audit finding
-    left for Carter;
+    left for Carter; an open security-watch breaker, a failed security fix or an
+    urgent fixable vulnerability left unpatched for a day;
     or the whole maintenance phase failing. Everything else still open is
     Watching. Changes are deduplicated and numbered for the undo appendix.
     """
@@ -1778,6 +2049,7 @@ def _triage(applied, audit, fixes, *, steward_code=None, validation=None, heartb
         + _host_drift_events(remediation, untracked_dotfiles, prev_dotfiles)
         + _session_memory_events(p0b)
         + _audit_incomplete_events(audit)
+        + _security_watch_events(security_watch, now)
     )
     seen = set()
     needs, watching, changes = [], [], []
@@ -2332,6 +2604,7 @@ def _report_inputs(run_dir, setup_data):
         recheck = _omp_login_probe()
         if recheck["status"] in ("ok", "dead"):
             omp_login = recheck
+    security_watch = _load_security_watch_report()
     triaged = _triage(
         applied, audit, fixes,
         steward_code=setup_data.get("steward_code"),
@@ -2345,11 +2618,12 @@ def _report_inputs(run_dir, setup_data):
         public=public,
         p0b=_read_artifact(run_dir, "00b-session-memory.json", {}),
         rig_last_ok=_rig_last_maintained(run_dir, date_str) if rig_skipped else None,
+        security_watch=security_watch,
     )
     return {
         "applied": applied, "validation": validation, "troubleshoot": troubleshoot,
         "heartbeat": heartbeat, "queue": queue, "audit": audit, "fixes": fixes,
-        "triaged": triaged,
+        "security_watch": security_watch, "triaged": triaged,
     }
 
 
@@ -2369,6 +2643,11 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
 
     queue_html = _html_queue(data["queue"])
     usage_html = _html_usage(usage)
+    security_watch = data.get("security_watch") or {}
+    security_html = _html_security_watch(security_watch)
+    breaker = security_watch.get("breaker")
+    security_color = (COLOR["danger"] if isinstance(breaker, dict) and breaker.get("open")
+                      else COLOR["audit"])
     sections = "".join([
         _html_needs_you(triaged["needs"]),
         _html_troubleshoot(data["troubleshoot"]),
@@ -2381,6 +2660,7 @@ def phase_8_render_send(run_dir, setup_data, dry_run=False):
             memory_mib=_read_memory_mib(run_dir),
         )),
         _section("Audit", COLOR["audit"], _html_audit(data["audit"], data["fixes"])),
+        _section("Security watch", security_color, security_html) if security_html else "",
         _section("Work queue", COLOR["warn"], queue_html) if queue_html else "",
         _section("OpenCode Go usage", COLOR["slate"], usage_html) if usage_html else "",
     ])

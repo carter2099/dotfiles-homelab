@@ -1,0 +1,95 @@
+# security-watch policy.  Protected: the steward's P7b/P7c never edit this file.
+# Decisions (Carter, 2026-11-03): rebuilds of infrastructure repos may run unattended;
+# security fixes may skip the update soak when two independent issuer sources name the
+# same fixed version; one shared deploy lock is taken by the steward and the watcher;
+# urgent alerts go by email only. Access-gate stopgaps and watcher-owned derived images
+# are NOT decided yet, so neither exists as a playbook.
+
+# "shadow": detect, verify, analyze and propose; never mutate anything.
+# "active": also run the playbooks in components.toml.  Promote only after the
+# nightly report shows the shadow exit criteria met.
+mode = "shadow"
+recipient = "carter2099@pm.me"
+
+max_actions_per_day = 3
+component_cooldown_hours = 12
+# A fix release younger than this needs two independent issuer sources that name the
+# exact fixed version before a playbook may install it (this also overrides the
+# steward's 7-day SearXNG/llama.cpp maturity wait for security fixes).
+release_min_age_hours = 72
+
+urgent_window_hours = 72
+urgent_max_per_day = 6
+
+tick_budget_seconds = 600
+inventory_refresh_hours = 24
+osv_rescan_minutes = 60
+
+reach_max_agent_calls_per_tick = 2
+# Read-only agent reachability calls are only spent on KEV, Zero Wire and high/critical
+# findings on exposed components; this caps them per UTC day.
+reach_max_agent_calls_per_day = 24
+reach_reachable_p = 0.8
+reach_not_reachable_p = 0.2
+jev_deadline_seconds = 120
+
+shadow_min_days = 14
+shadow_min_source_ok_rate = 0.95
+
+# Steward P1 steps block up to their own budgets; the watcher waits at most this long
+# for a busy deploy lock and otherwise retries on the next tick.
+lock_timeout_seconds = 30
+
+# Upstream projects whose GitHub repository security advisories are polled.  Runtime
+# components in components.toml name one of these in `advisory_repo`.
+upstream_repos = [
+  "oven-sh/bun",
+  "open-webui/open-webui",
+  "FreshRSS/FreshRSS",
+  "searxng/searxng",
+  "cloudflare/cloudflared",
+  "moby/moby",
+  "php/php-src",
+]
+
+# Per-source poll intervals in seconds.
+[source_intervals]
+go_vulndb = 900
+zero_wire = 3600
+cisa_kev = 3600
+github_advisories = 3600
+ubuntu_usn = 3600
+debian_dsa = 3600
+php_announce = 3600
+onecrl = 3600
+ransomware_live = 3600
+go_releases = 21600
+php_releases = 21600
+node_releases = 21600
+
+# Vendors whose breach would touch the homelab (ransomware.live matching).  `match`
+# entries are case-insensitive substrings of the victim name or domain.
+[[vendor]]
+name = "Cloudflare"
+match = ["cloudflare"]
+[[vendor]]
+name = "GitHub"
+match = ["github"]
+[[vendor]]
+name = "Proton"
+match = ["proton.me", "protonmail", "proton ag"]
+[[vendor]]
+name = "Anthropic"
+match = ["anthropic"]
+[[vendor]]
+name = "OpenAI"
+match = ["openai"]
+[[vendor]]
+name = "TypeSafe"
+match = ["typesafe.ai"]
+[[vendor]]
+name = "Docker"
+match = ["docker.com", "docker inc"]
+[[vendor]]
+name = "Canonical"
+match = ["canonical", "ubuntu.com"]

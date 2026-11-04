@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<channel rdf:about="https://www.debian.org/security/dsa.rdf">
+<title>Debian Security</title>
+<link>https://www.debian.org/security/dsa.rdf</link>
+<dc:date>2026-11-03T19:24:14Z</dc:date>
+<description>Debian Security Advisories</description>
+<items>
+<rdf:Seq>
+</rdf:Seq>
+</items>
+</channel>
+</rdf:RDF>

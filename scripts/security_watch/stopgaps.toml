@@ -1,0 +1,14 @@
+# Active security stopgaps (mirrors ~/notes/docs/homelab/security-mitigations.md).
+# A finding on `component` naming one of `cves` is downgraded from urgent while the
+# stopgap is listed.  Once a complete scan resolves every covered finding (the fixed
+# artifact is running), the report marks the stopgap removable and shows `remove`.
+# Remove the entry here when the stopgap itself is removed.
+
+[[stopgap]]
+id = "cve-2026-98432-nft"
+component = "host"
+cves = ["CVE-2026-98432"]
+description = "nftables table inet cve_2026_98432 drops IPv4 TCP carrying IP options"
+since = "2026-11-01"
+remove = "sudo bash ~/system-config/kernel-mitigations/install.sh remove nft"
+doc = "~/notes/docs/homelab/security-mitigations.md"

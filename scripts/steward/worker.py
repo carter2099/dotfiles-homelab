@@ -126,6 +126,15 @@ STEWARD_CODE_PROTECTED = frozenset({
     "scripts/test_steward_code_prs.py",
     "scripts/test_steward_dotfiles.py",
     "scripts/test_steward_public_dotfiles.py",
+    # Deploy lock shared with security-watch, and the watcher's remediation
+    # policy, registry and mutating code (decision 3A).
+    "scripts/deploy_lock.py",
+    "scripts/security_watch/policy.toml",
+    "scripts/security_watch/components.toml",
+    "scripts/security_watch/act.py",
+    "scripts/security_watch/playbooks_ops.py",
+    "scripts/security_watch/playbooks_repo.py",
+    "scripts/security_watch_runner.py",
 })
 _STEWARD_CODE_PROTECTED_RE = re.compile(r"^scripts/verify-[^/]*\.sh$")
 # verify-<name>.sh full runs for a steward-code patch: ``steward`` always, the

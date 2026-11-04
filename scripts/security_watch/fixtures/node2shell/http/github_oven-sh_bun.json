@@ -1,0 +1,90 @@
+[
+ {
+  "ghsa_id": "GHSA-cf8x-9m69-3gg3",
+  "cve_id": null,
+  "html_url": "https://github.com/oven-sh/bun/security/advisories/GHSA-cf8x-9m69-3gg3",
+  "summary": "HTTP/3 QPACK amplification allows remote memory exhaustion and CPU stall",
+  "severity": "high",
+  "state": "published",
+  "identifiers": [
+   {
+    "value": "GHSA-cf8x-9m69-3gg3",
+    "type": "GHSA"
+   }
+  ],
+  "created_at": null,
+  "updated_at": "2026-10-24T00:13:31Z",
+  "published_at": "2026-10-24T00:13:31Z",
+  "vulnerabilities": [
+   {
+    "package": {
+     "ecosystem": "npm",
+     "name": "bun"
+    },
+    "vulnerable_version_range": ">= 1.3.14, < 1.4.4",
+    "patched_versions": "1.4.4",
+    "vulnerable_functions": []
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-663w-cv8g-jj2p",
+  "cve_id": "CVE-2026-111497",
+  "html_url": "https://github.com/oven-sh/bun/security/advisories/GHSA-663w-cv8g-jj2p",
+  "summary": "Bundled brotli decoder has an out-of-bounds write (CVE-2026-111497)",
+  "severity": "high",
+  "state": "published",
+  "identifiers": [
+   {
+    "value": "GHSA-663w-cv8g-jj2p",
+    "type": "GHSA"
+   },
+   {
+    "value": "CVE-2026-111497",
+    "type": "CVE"
+   }
+  ],
+  "created_at": null,
+  "updated_at": "2026-10-23T09:31:05Z",
+  "published_at": "2026-10-23T09:31:05Z",
+  "vulnerabilities": [
+   {
+    "package": {
+     "ecosystem": "npm",
+     "name": "bun"
+    },
+    "vulnerable_version_range": ">= 1.0.21, < 1.4.4",
+    "patched_versions": "1.4.4",
+    "vulnerable_functions": []
+   }
+  ]
+ },
+ {
+  "ghsa_id": "GHSA-26q8-h657-pf84",
+  "cve_id": null,
+  "html_url": "https://github.com/oven-sh/bun/security/advisories/GHSA-26q8-h657-pf84",
+  "summary": "Bundled root certificates trust compromised eMudhra (emSign) intermediate CAs",
+  "severity": "high",
+  "state": "published",
+  "identifiers": [
+   {
+    "value": "GHSA-26q8-h657-pf84",
+    "type": "GHSA"
+   }
+  ],
+  "created_at": null,
+  "updated_at": "2026-10-23T02:02:06Z",
+  "published_at": "2026-10-23T02:02:06Z",
+  "vulnerabilities": [
+   {
+    "package": {
+     "ecosystem": "npm",
+     "name": "bun"
+    },
+    "vulnerable_version_range": "< 1.4.4",
+    "patched_versions": "1.4.4",
+    "vulnerable_functions": []
+   }
+  ]
+ }
+]

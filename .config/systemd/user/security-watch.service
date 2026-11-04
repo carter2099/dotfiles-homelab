@@ -1,0 +1,17 @@
+[Unit]
+Description=Security watch: vulnerability feeds, deployed-inventory scan, urgent email, guarded remediation
+Wants=network-online.target
+After=network-online.target
+OnFailure=notify-failure@%n.service
+
+[Service]
+Type=oneshot
+Environment="PATH=%h/.local/go/bin:%h/.local/bin:%h/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/usr/bin/python3 %h/scripts/security_watch_runner.py tick
+# policy.tick_budget_seconds (600) bounds the phases; this is the hard stop.
+TimeoutStartSec=15min
+MemoryHigh=1G
+MemoryMax=2G
+TasksMax=256
+UMask=0077
+# No NoNewPrivileges: the apt-security playbook runs `sudo -n`.

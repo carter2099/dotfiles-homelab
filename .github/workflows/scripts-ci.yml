@@ -63,3 +63,6 @@ jobs:
 
       - name: verify-hyperliquid-guard.sh full
         run: bash scripts/verify-hyperliquid-guard.sh full
+
+      - name: verify-security-watch.sh full
+        run: bash scripts/verify-security-watch.sh full

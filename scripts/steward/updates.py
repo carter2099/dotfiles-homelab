@@ -5,6 +5,8 @@ import contextlib
 import shutil
 import sqlite3
 
+import deploy_lock
+
 from . import toolchains
 from .config import (
     AUTO_PKGS,
@@ -106,6 +108,34 @@ from .runtime import (
 # default, but it must still leave a finite, reportable attempt.
 P1_APT_TIMEOUT = 900
 _P1_FAILURE_STATUSES = frozenset({"failed", "error", "timeout", "started"})
+
+# Deploy lock (shared with security-watch, scripts/deploy_lock.py): each
+# mutating P1 step holds its surface or the host lock for its whole
+# transaction and waits at most this long for another holder; a lock still
+# held afterwards skips the step (reported with the holder) until next night.
+P1_LOCK_WAIT = 1800            # container/app deploys, omp/herdr, llama.cpp, toolchains
+P1_HOST_LOCK_WAIT = P1_APT_TIMEOUT   # apt upgrade and auto packages
+P1_SHORT_LOCK_WAIT = 600       # cloudflared restart, docker cleanup
+
+
+def _p1_locked(step, lock, operation, *, skipped=None, **fields):
+    """Run ``operation`` while holding ``lock`` (a ``deploy_lock`` context manager).
+
+    Only the acquisition's ``LockTimeout`` becomes a ``skipped`` packet (or
+    ``skipped(reason)`` when given); anything ``operation`` raises propagates
+    to the caller's normal step handling.
+    """
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(lock)
+        except deploy_lock.LockTimeout as exc:
+            reason = f"deploy lock {exc.key} held by {exc.holder}"
+            print(f"    {step} skipped: {reason}")
+            if skipped is not None:
+                return skipped(reason)
+            return {"step": step, "status": "skipped", "reason": reason, **fields}
+        return operation()
+
 
 # Registries throttle bursts with `toomanyrequests` (GHCR: a shared per-namespace
 # limit, retry-after in microseconds) right after a popular release.  One such
@@ -1535,10 +1565,11 @@ def _release_time(value):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _release_is_mature(value, now=None):
+def _release_is_mature(value, now=None, min_age_days=None):
     """True once an upstream release has existed for the safety window."""
     now = now or datetime.now(timezone.utc)
-    return now - _release_time(value) >= timedelta(days=UPDATE_MIN_AGE_DAYS)
+    days = UPDATE_MIN_AGE_DAYS if min_age_days is None else min_age_days
+    return now - _release_time(value) >= timedelta(days=days)
 
 
 def _searxng_tag_date(tag):
@@ -1546,7 +1577,7 @@ def _searxng_tag_date(tag):
     return tuple(int(part) for part in match.groups()) if match else None
 
 
-def _select_mature_searxng_tag(tags, current_tag, now=None):
+def _select_mature_searxng_tag(tags, current_tag, now=None, min_age_days=None):
     """Newest immutable SearXNG tag old enough to deploy, never a downgrade."""
     current_item = next((item for item in tags if item.get("name") == current_tag), None)
     current_time = _release_time(current_item["last_updated"]) if current_item else None
@@ -1563,7 +1594,7 @@ def _select_mature_searxng_tag(tags, current_tag, now=None):
             published_time = _release_time(published)
         except ValueError:
             continue
-        if not _release_is_mature(published, now=now):
+        if not _release_is_mature(published, now=now, min_age_days=min_age_days):
             continue
         if current_time and published_time <= current_time:
             continue
@@ -1613,8 +1644,11 @@ def _wait_searxng_healthy(timeout_s=45):
     return False
 
 
-def _p1_searxng_update(tags=None, now=None):
-    """Advance the immutable image pin after seven days; roll back on failure."""
+def _p1_searxng_update(tags=None, now=None, *, min_age_days: int | None = None):
+    """Advance the immutable image pin after a soak (``min_age_days``, default
+    ``UPDATE_MIN_AGE_DAYS``); roll back on failure."""
+    if min_age_days is None:
+        min_age_days = UPDATE_MIN_AGE_DAYS
     print("  [1h] searxng mature-image update")
     compose = HOME / "searxng" / "docker-compose.yml"
     if not compose.exists():
@@ -1647,11 +1681,11 @@ def _p1_searxng_update(tags=None, now=None):
                     "current_tag": current_tag,
                     "reason": f"Docker Hub unreachable: {exc}"}
 
-    target = _select_mature_searxng_tag(tags, current_tag, now=now)
+    target = _select_mature_searxng_tag(tags, current_tag, now=now, min_age_days=min_age_days)
     if not target:
         return {"step": "searxng", "status": "skipped",
                 "current_tag": current_tag,
-                "reason": f"no newer release is {UPDATE_MIN_AGE_DAYS} days old"}
+                "reason": f"no newer release is {min_age_days} days old"}
 
     target_tag = target["name"]
     target_ref = f"docker.io/searxng/searxng@{target['digest']}"
@@ -3400,11 +3434,61 @@ def _p1_omp_db_repair(dry_run=False, *, db_dir=None, state_dir=None, now=None):
 
 
 def _p1_toolchain_steps(steps, persist, *, dry_run=False):
-    """Same-line Node/Ruby/Go/Neovim updates (``toolchains``), one row per toolchain."""
+    """Same-line Node/Ruby/Go/Neovim updates (``toolchains``), one row per toolchain.
+
+    A real run holds ``toolchain-<name>`` for the step and waits for it at
+    most the remaining shared budget; a dry run only reads, so takes no lock.
+    """
     deadline = time.monotonic() + toolchains.BUDGET_S
     for name in toolchains.STEP_NAMES:
-        _p1_run_step(steps, name, lambda name=name: toolchains.p1_toolchain(
-            name, dry_run=dry_run, deadline=deadline), persist)
+        def operation(name=name):
+            return toolchains.p1_toolchain(name, dry_run=dry_run, deadline=deadline)
+
+        if dry_run:
+            _p1_run_step(steps, name, operation, persist)
+            continue
+
+        def locked(name=name, operation=operation):
+            wait = min(P1_LOCK_WAIT, max(0.0, deadline - time.monotonic()))
+            lock = deploy_lock.service_lock(
+                name.replace("_", "-"), timeout=wait, holder=f"steward:{name}")
+            return _p1_locked(name, lock, operation)
+
+        _p1_run_step(steps, name, locked, persist)
+
+
+def _p1_surface_step(step, key, operation, *, timeout=P1_LOCK_WAIT, **fields):
+    """``operation`` under ``surface_lock(key)`` (host shared, then key exclusive)."""
+    lock = deploy_lock.surface_lock(key, timeout=timeout, holder=f"steward:{step}")
+    return _p1_locked(step, lock, operation, **fields)
+
+
+def _p1_host_step(step, operation, *, timeout, skipped=None):
+    """``operation`` under the exclusive host lock (apt, docker, cloudflared)."""
+    lock = deploy_lock.host_lock(timeout=timeout, holder=f"steward:{step}")
+    return _p1_locked(step, lock, operation, skipped=skipped)
+
+
+def _p1_app_lock_key(service):
+    """``app-<service>`` with the service name reduced to the lock-key alphabet."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", str(service).lower()).strip("-")
+    return f"app-{slug}"[:64]
+
+
+def _p1_auto_pkgs_locked(progress):
+    """``_p1_auto_pkgs`` under the host lock; never raises (rows per package)."""
+    try:
+        return _p1_host_step(
+            "auto_pkgs",
+            lambda: _p1_auto_pkgs(progress=progress),
+            timeout=P1_HOST_LOCK_WAIT,
+            skipped=lambda reason: [
+                {"step": f"auto_{pkg}", "status": "skipped", "reason": reason}
+                for pkg in AUTO_PKGS
+            ],
+        )
+    except Exception as error:
+        return [_p1_exception_packet("auto_pkgs", error)]
 
 
 def phase_1_apply(run_dir, dry_run=False, *, progress=None):
@@ -3446,7 +3530,10 @@ def phase_1_apply(run_dir, dry_run=False, *, progress=None):
     # 1a: apt upgrade.  Keep the existing stop boundary, but leave its timeout
     # packet in the artifact rather than allowing an exception to erase prior
     # remote evidence.
-    apt_result = _p1_run_step(steps, "apt_upgrade", _p1_apt_upgrade, persist)
+    apt_result = _p1_run_step(
+        steps, "apt_upgrade",
+        lambda: _p1_host_step("apt_upgrade", _p1_apt_upgrade, timeout=P1_HOST_LOCK_WAIT),
+        persist)
     if apt_result.get("status") in _P1_FAILURE_STATUSES:
         print(f"  FAILED: apt upgrade — {apt_result.get('error')}")
         return _finish_p1(run_dir, {"steps": steps}, progress)
@@ -3454,8 +3541,8 @@ def phase_1_apply(run_dir, dry_run=False, *, progress=None):
     # 1b: auto-apply docker + cloudflared.  The callback checkpoints each
     # package, including a package currently marked started if the process is
     # interrupted between invocation and completion.
-    auto_results = _p1_auto_pkgs(
-        progress=lambda partial: progress({"steps": steps + partial})
+    auto_results = _p1_auto_pkgs_locked(
+        lambda partial: progress({"steps": steps + partial})
     )
     steps.extend(auto_results)
     persist()
@@ -3517,30 +3604,48 @@ def phase_1_apply(run_dir, dry_run=False, *, progress=None):
         _p1_run_step(
             steps,
             "cloudflared_restart",
-            restart_cloudflared,
+            lambda: _p1_host_step("cloudflared_restart", restart_cloudflared,
+                                  timeout=P1_SHORT_LOCK_WAIT),
             persist,
         )
 
     # Remaining independent update checks continue and are each checkpointed.
-    _p1_run_step(steps, "freshrss", _p1_freshrss_update, persist)
-    _p1_run_step(steps, "openwebui_update", _p1_openwebui, persist)
-    _p1_run_step(steps, "herdr_update", _p1_herdr_update, persist)
-    _p1_run_step(steps, "searxng", _p1_searxng_update, persist)
-    _p1_run_step(steps, "llama_cpp", _p1_llama_cpp_update, persist)
-    _p1_run_step(steps, "omp_update", _p1_omp_update, persist)
+    # Each holds its deploy lock from reading the pin/revision to the end of
+    # its health check or rollback.
+    _p1_run_step(steps, "freshrss", lambda: _p1_surface_step(
+        "freshrss", "freshrss", lambda: _p1_freshrss_update()), persist)
+    _p1_run_step(steps, "openwebui_update", lambda: _p1_surface_step(
+        "openwebui_update", "open-webui", lambda: _p1_openwebui()), persist)
+    _p1_run_step(steps, "herdr_update", lambda: _p1_surface_step(
+        "herdr_update", "herdr", lambda: _p1_herdr_update()), persist)
+    _p1_run_step(steps, "searxng", lambda: _p1_surface_step(
+        "searxng", "searxng", lambda: _p1_searxng_update()), persist)
+    _p1_run_step(steps, "llama_cpp", lambda: _p1_locked(
+        "llama_cpp",
+        deploy_lock.service_lock("llama-cpp", timeout=P1_LOCK_WAIT,
+                                 holder="steward:llama_cpp"),
+        lambda: _p1_llama_cpp_update()), persist)
+    _p1_run_step(steps, "omp_update", lambda: _p1_surface_step(
+        "omp_update", "omp", lambda: _p1_omp_update()), persist)
     _p1_run_step(steps, "dependabot_merge", _p1_dependabot_merge, persist)
     # App deploys come after every package/container step so P2 validation
     # (which runs after P1) observes the deployed revisions.
     for service, spec in DEPLOY_REGISTRY.items():
+        wait = spec.get("timeout", P1_LOCK_WAIT) if isinstance(spec, dict) else P1_LOCK_WAIT
         _p1_run_step(steps, "app_deploy",
-                     lambda service=service, spec=spec: _p1_app_deploy(service, spec),
+                     lambda service=service, spec=spec, wait=wait: _p1_surface_step(
+                         "app_deploy", _p1_app_lock_key(service),
+                         lambda: _p1_app_deploy(service, spec),
+                         timeout=wait, service=service),
                      persist, service=service)
     # Same-line toolchain updates after the deploys, so a long Ruby build never
     # delays them; each step is bounded by the shared toolchain budget.
     _p1_toolchain_steps(steps, persist)
     # Docker hygiene last: it sees every superseded image of this run, and app
     # deploys have already used (and so kept warm) the build cache they need.
-    _p1_run_step(steps, "docker_cleanup", lambda: _p1_docker_cleanup(steps), persist)
+    _p1_run_step(steps, "docker_cleanup", lambda: _p1_host_step(
+        "docker_cleanup", lambda: _p1_docker_cleanup(steps),
+        timeout=P1_SHORT_LOCK_WAIT), persist)
 
     data = _finish_p1(run_dir, {"steps": steps}, progress)
     n_ok = sum(1 for s in steps if s.get("status") == "ok")

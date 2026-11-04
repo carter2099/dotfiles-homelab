@@ -1,0 +1,390 @@
+# security-watch component registry: every deployed surface, how to inventory it,
+# who owns its fix, and how exposed it is.  Protected: the steward's P7b/P7c never
+# edit this file.  `~/` paths expand against $HOME at run time.
+#
+# Fields
+#   kind       host | container | host-binary | venv | runtime | rig
+#   collector  host-dpkg | container | go-binary | venv | runtime | go-toolchain | rig
+#   exposure   public | access (Cloudflare Access) | lan | loopback | none
+#   owner      playbook id: alert | apt-security | steward-freshrss | steward-openwebui |
+#              steward-searxng | steward-omp | steward-herdr | steward-toolchain |
+#              release-rebuild | repo-pr | compose-digest
+#   lock       deploy_lock service key held while the fix is applied
+#   repo       ~/dev/<repo> checkout for repo-backed components
+#   deploy     how repo-pr deploys after merge: "steward-app:<service>" (steward P1
+#              app_deploy) or "release:<script>" (run in ~/dev/<repo>)
+#   edits      deterministic repo edits repo-pr may make: base-refresh | go-builder |
+#              go-toolchain | go-module | pip-pin
+#   pin_owner  ecosystems another automation owns (alert only, never edited here)
+
+[[component]]
+id = "host"
+kind = "host"
+collector = "host-dpkg"
+exposure = "lan"
+owner = "apt-security"
+lock = "host"
+description = "ThinkPad host (Ubuntu 24.04) packages and the running kernel"
+untrusted_input = "sshd from the LAN (192.168.4.0/22); cloudflared tunnel to loopback origins; Docker engine"
+
+[[component]]
+id = "freshrss"
+kind = "container"
+collector = "container"
+container = "freshrss"
+exposure = "public"
+owner = "steward-freshrss"
+lock = "freshrss"
+public_host = "freshrss.carter2099.com"
+health = ["http://127.0.0.1:30149/i/"]
+description = "FreshRSS RSS reader (upstream image: Debian, Apache, PHP)"
+untrusted_input = "Fetches arbitrary third-party feeds every 15 minutes with PHP curl advertising every supported encoding; public login page, GReader/Fever API, WebSub callbacks and OPML upload"
+reach_container_paths = ["/var/www/FreshRSS/app", "/var/www/FreshRSS/lib", "/var/www/FreshRSS/p"]
+[component.runtimes]
+php = ["php", "-r", "echo PHP_VERSION;"]
+# Deterministic facts given to the reachability agent (argv run inside the container).
+[component.reach_facts]
+php_curl_version = ["php", "-r", "var_export(curl_version());"]
+
+[[component]]
+id = "open-webui"
+kind = "container"
+collector = "container"
+container = "open-webui"
+exposure = "access"
+owner = "steward-openwebui"
+lock = "open-webui"
+health = ["http://127.0.0.1:48100/api/version"]
+python = ["python3"]
+description = "Open WebUI chat frontend (upstream image, Python)"
+untrusted_input = "Behind Cloudflare Access and its own login; model tools fetch arbitrary web pages; user file uploads; SearXNG results"
+reach_container_paths = ["/app/backend/open_webui"]
+
+[[component]]
+id = "searxng"
+kind = "container"
+collector = "container"
+container = "searxng"
+exposure = "loopback"
+owner = "steward-searxng"
+lock = "searxng"
+health = ["http://127.0.0.1:8080/search?q=healthcheck&format=json"]
+python = ["/usr/local/searxng/.venv/bin/python"]
+description = "SearXNG metasearch backend (upstream image, Void Linux, Python venv)"
+untrusted_input = "Parses responses from public search engines; loopback-only listener used by Open WebUI and omp"
+
+[[component]]
+id = "blog"
+kind = "container"
+collector = "container"
+container = "blog-web-1"
+exposure = "public"
+owner = "repo-pr"
+lock = "app-blog"
+repo = "blog"
+deploy = "steward-app:blog"
+dockerfile = "Dockerfile"
+edits = ["base-refresh", "go-builder"]
+health = ["http://127.0.0.1:33099/up"]
+health_host = "blog.carter2099.com"
+container_go_binaries_cmd = ["sh", "-c", "ls /usr/local/bundle/ruby/*/gems/thruster-*/exe/*/thrust"]
+gemfile_lock = "/rails/Gemfile.lock"
+description = "Rails 8 blog (own image on ruby slim-bookworm, Thruster rebuilt with Go)"
+untrusted_input = "Public web traffic to Rails/Puma behind Thruster; session cookies; libvips on the owner's own uploads"
+reach_host_paths = ["~/blog/blog/app", "~/blog/blog/config", "~/blog/blog/Gemfile.lock", "~/blog/blog/Dockerfile"]
+[component.pin_owner]
+RubyGems = "dependabot-webhook owns blog bundler updates"
+
+[[component]]
+id = "beatz"
+kind = "container"
+collector = "container"
+container = "carter-beatz"
+distroless = true
+container_go_binaries = ["/beatz"]
+exposure = "public"
+owner = "repo-pr"
+lock = "app-beatz"
+repo = "beatz"
+deploy = "release:release.sh"
+dockerfile = "Dockerfile"
+edits = ["go-builder"]
+health = ["http://127.0.0.1:30142/healthz"]
+description = "Beats music player (Go static binary on distroless)"
+untrusted_input = "Public GET/HEAD and Range requests for audio; POST /api/plays JSON"
+reach_host_paths = ["~/dev/beatz"]
+
+[[component]]
+id = "homelab-dashboard"
+kind = "container"
+collector = "container"
+container = "carter-monitor"
+exposure = "public"
+owner = "repo-pr"
+lock = "app-homelab-dashboard"
+repo = "homelab-dashboard"
+deploy = "release:release.sh"
+dockerfile = "Dockerfile"
+edits = ["base-refresh", "go-builder"]
+health = ["http://127.0.0.1:30148/healthz"]
+description = "Public monitor dashboard web container (nginx alpine)"
+untrusted_input = "Public GET/HEAD of static JSON snapshots, rate limited per client IP"
+reach_host_paths = ["~/dev/homelab-dashboard/deploy"]
+
+[[component]]
+id = "homelab-dashboard-collector"
+kind = "host-binary"
+collector = "go-binary"
+binaries = ["~/.local/lib/homelab-dashboard/current/homelab-dashboard-collector"]
+exposure = "none"
+owner = "repo-pr"
+lock = "app-homelab-dashboard"
+repo = "homelab-dashboard"
+deploy = "release:release.sh"
+dockerfile = "Dockerfile"
+edits = ["go-builder"]
+description = "Dashboard collector (Go, built in the go-build stage)"
+untrusted_input = "Reads local Docker/systemd state and rig metrics; no listener"
+
+[[component]]
+id = "news"
+kind = "container"
+collector = "container"
+container = "carter-news"
+exposure = "public"
+owner = "compose-digest"
+lock = "news"
+compose = "~/news/docker-compose.yml"
+up = ["bash", "~/news/up.sh"]
+health = ["http://127.0.0.1:30144/healthz"]
+description = "Daily News static site (upstream nginx alpine image pinned by tag@digest)"
+untrusted_input = "Public GET of static files only"
+
+[[component]]
+id = "herdr-web-client"
+kind = "host-binary"
+collector = "go-binary"
+binaries = ["~/.local/bin/herdr-web-client"]
+exposure = "access"
+owner = "release-rebuild"
+lock = "app-herdr-web-client"
+repo = "herdr-web-client"
+release = ["bash", "deploy/release.sh"]
+transactional = true
+deploy = "steward-app:herdr-web-client"
+edits = ["go-toolchain", "go-module"]
+units = ["herdr-web-client.service"]
+health = ["http://127.0.0.1:30145/"]
+health_host = "remote.carter2099.com"
+description = "Herdr Web browser terminal bridge (Go with embedded Bun bundle)"
+untrusted_input = "Cloudflare Access-authenticated browser sessions; PTY over WebSocket (a shell as carter)"
+
+[[component]]
+id = "llm-proxy"
+kind = "host-binary"
+collector = "go-binary"
+binaries = ["~/.local/bin/llm-proxy", "~/.local/bin/rig-dashboard"]
+exposure = "access"
+owner = "release-rebuild"
+lock = "llm-proxy"
+repo = "llm-proxy"
+release = ["bash", "release.sh"]
+transactional = true
+deploy = "release:release.sh"
+edits = ["go-module"]
+units = ["llm-proxy.service", "rig-dashboard.service"]
+health = ["http://127.0.0.1:8081/health", "http://127.0.0.1:30143/api/status"]
+description = "LLM proxy (8081) and rig dashboard (30143)"
+untrusted_input = "8081 reachable only from the Open WebUI bridge (UFW); rig dashboard behind Cloudflare Access"
+
+[[component]]
+id = "comfy-web"
+kind = "host-binary"
+collector = "go-binary"
+binaries = ["~/.local/bin/comfy-web"]
+exposure = "access"
+owner = "release-rebuild"
+lock = "comfy-web"
+repo = "llm-proxy"
+release = ["bash", "release-comfy.sh"]
+transactional = true
+deploy = "release:release-comfy.sh"
+edits = ["go-module"]
+units = ["comfy-web.service"]
+health = ["http://127.0.0.1:30147/healthz"]
+description = "ComfyUI App Mode web origin"
+untrusted_input = "Behind Cloudflare Access with origin JWT validation"
+
+[[component]]
+id = "opencode-go-proxy"
+kind = "host-binary"
+collector = "go-binary"
+binaries = ["~/.local/bin/opencode-go-proxy"]
+exposure = "lan"
+owner = "release-rebuild"
+lock = "opencode-go-proxy"
+repo = "opencode-go-proxy"
+release = ["bash", "release.sh"]
+transactional = false
+deploy = "release:release.sh"
+edits = ["go-module"]
+units = ["opencode-go-proxy.service"]
+health = ["http://127.0.0.1:8082/health"]
+description = "OpenCode Go proxy (dormant upstream keys)"
+untrusted_input = "No client authentication; UFW allows 8082 from the gaming rig and the Open WebUI bridge"
+
+[[component]]
+id = "dependabot-webhook"
+kind = "host-binary"
+collector = "go-binary"
+binaries = ["~/.local/bin/dependabot-webhook"]
+exposure = "public"
+owner = "release-rebuild"
+lock = "dependabot-webhook"
+repo = "dependabot-webhook"
+release = ["bash", "release.sh"]
+transactional = false
+steward_stops = true
+deploy = "release:release.sh"
+edits = ["go-module"]
+units = ["dependabot-webhook.service"]
+health = ["http://127.0.0.1:9099/health"]
+description = "Dependabot webhook receiver (hooks.carter2099.com)"
+untrusted_input = "Public webhook endpoint; payloads are HMAC-verified"
+
+[[component]]
+id = "homelab-backup"
+kind = "host-binary"
+collector = "go-binary"
+binaries = ["~/homelab-backup/homelab-backup"]
+exposure = "none"
+owner = "release-rebuild"
+lock = "homelab-backup"
+repo = "homelab-backup"
+release = ["bash", "release.sh"]
+transactional = true
+deploy = "release:release.sh"
+edits = ["go-module"]
+description = "Nightly R2 backup (Go); release.sh runs verify.sh full and rolls back"
+untrusted_input = "Outbound to Cloudflare R2 only; no listener"
+
+[[component]]
+id = "prompt-guard"
+kind = "venv"
+collector = "venv"
+python = "~/.local/lib/prompt-guard/current/venv/bin/python3"
+exposure = "loopback"
+owner = "repo-pr"
+lock = "prompt-guard"
+repo = "prompt-guard"
+deploy = "release:release.sh"
+edits = ["pip-pin"]
+health = ["http://127.0.0.1:8090/health"]
+description = "Prompt-Guard classifier service (Python venv)"
+untrusted_input = "Classifies untrusted Dependabot PR text; loopback listener"
+
+[[component]]
+id = "node"
+kind = "runtime"
+collector = "runtime"
+runtime = "node"
+cmd = ["~/.local/share/fnm/aliases/default/bin/node", "--version"]
+exposure = "none"
+owner = "steward-toolchain"
+toolchain = "node"
+lock = "toolchain-node"
+description = "fnm default Node.js"
+
+[[component]]
+id = "go-user"
+kind = "runtime"
+collector = "go-toolchain"
+cmd = ["~/.local/go/bin/go", "version"]
+exposure = "none"
+owner = "steward-toolchain"
+toolchain = "go_user"
+lock = "toolchain-go-user"
+description = "~/.local/go toolchain used to build host Go binaries"
+
+[[component]]
+id = "go-root"
+kind = "runtime"
+collector = "go-toolchain"
+cmd = ["/usr/local/go/bin/go", "version"]
+exposure = "none"
+owner = "steward-toolchain"
+toolchain = "go_root"
+lock = "toolchain-go-root"
+description = "/usr/local/go toolchain (held on the 1.26 line)"
+
+[[component]]
+id = "bun"
+kind = "runtime"
+collector = "runtime"
+runtime = "bun"
+cmd = ["~/.bun/bin/bun", "--version"]
+advisory_repo = "oven-sh/bun"
+exposure = "none"
+owner = "alert"
+lock = "bun"
+note = "herdr-web-client's build requires Bun 1.3.14 exactly; raise that pin in the repo before upgrading the CLI"
+description = "Bun CLI used for builds (bun install)"
+
+[[component]]
+id = "omp"
+kind = "runtime"
+collector = "runtime"
+runtime = "omp"
+cmd = ["~/.bun/bin/omp", "--version"]
+exposure = "none"
+owner = "steward-omp"
+lock = "omp"
+description = "omp agent CLI (standalone binary with embedded Bun)"
+
+[[component]]
+id = "herdr"
+kind = "runtime"
+collector = "runtime"
+runtime = "herdr"
+cmd = ["~/.local/bin/herdr", "--version"]
+exposure = "none"
+owner = "steward-herdr"
+lock = "herdr"
+description = "Herdr terminal multiplexer client (server keeps its version until restart)"
+
+[[component]]
+id = "cloudflared"
+kind = "runtime"
+collector = "runtime"
+runtime = "cloudflared"
+cmd = ["/usr/bin/cloudflared", "--version"]
+advisory_repo = "cloudflare/cloudflared"
+apt_packages = ["cloudflared"]
+exposure = "public"
+owner = "apt-security"
+lock = "host"
+description = "Cloudflare Tunnel connector (Cloudflare apt repository)"
+untrusted_input = "Carries every public hostname's traffic to loopback origins"
+
+[[component]]
+id = "docker"
+kind = "runtime"
+collector = "runtime"
+runtime = "docker"
+cmd = ["docker", "version", "--format", "{{.Server.Version}}"]
+advisory_repo = "moby/moby"
+apt_packages = ["docker-ce", "docker-ce-cli", "containerd.io"]
+exposure = "none"
+owner = "apt-security"
+lock = "host"
+description = "Docker Engine (Docker apt repository)"
+
+[[component]]
+id = "rig"
+kind = "rig"
+collector = "rig"
+exposure = "lan"
+owner = "alert"
+lock = "rig"
+description = "Gaming rig Linux (only scanned while it runs Linux)"
+untrusted_input = "llama-swap 8080 from the ThinkPad only; sshd from the ThinkPad and Carter's Mac"

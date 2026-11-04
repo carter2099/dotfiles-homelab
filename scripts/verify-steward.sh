@@ -23,10 +23,18 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1
 # No command in this script performs network access.  The marker is useful to
 # child checks and makes accidental online additions obvious in diagnostics.
 export STEWARD_OFFLINE=1
+# Tests take real flocks (scripts/deploy_lock.py); keep them off the live
+# ~/.local/state/deploy-locks shared with the steward and security-watch, and
+# keep the email tests off the live security-watch report.json.
+DEPLOY_LOCK_DIR="$(mktemp -d)"
+export DEPLOY_LOCK_DIR
+export SECURITY_WATCH_STATE_DIR="$DEPLOY_LOCK_DIR/security-watch-state"
+trap 'rm -rf -- "$DEPLOY_LOCK_DIR"' EXIT
 
 run_fast() {
     python3 -m py_compile \
         "$ROOT/scripts/workflow_state.py" \
+        "$ROOT/scripts/deploy_lock.py" \
         "$ROOT/scripts/steward_runner.py" \
         "$ROOT/scripts/steward"/*.py
     PYTHONPATH="$ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}" \

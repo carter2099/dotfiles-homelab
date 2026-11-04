@@ -1,0 +1,15 @@
+{
+ "Debian:13/brotli@1.1.0-2": [
+  {
+   "id": "DEBIAN-CVE-2026-111497",
+   "modified": "2026-10-31T09:47:25.535412482Z"
+  }
+ ],
+ "Alpine:v3.24/brotli@1.2.0-r1": [
+  {
+   "id": "ALPINE-CVE-2026-111497",
+   "modified": "2026-11-03T06:32:52.462817533Z"
+  }
+ ],
+ "Ubuntu:24.04:LTS/brotli@1.1.0-2ubuntu0.1": []
+}

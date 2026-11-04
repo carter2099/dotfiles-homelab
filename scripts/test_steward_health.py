@@ -3,12 +3,31 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from steward import health
+
+_ISOLATED_STATE = None
+_ENV_PATCH = None
+
+
+def setUpModule():
+    """P3 fix actions take real deploy flocks; keep them in a temp dir."""
+    global _ISOLATED_STATE, _ENV_PATCH
+    _ISOLATED_STATE = tempfile.TemporaryDirectory()
+    _ENV_PATCH = patch.dict(os.environ, {
+        "DEPLOY_LOCK_DIR": str(Path(_ISOLATED_STATE.name) / "locks")})
+    _ENV_PATCH.start()
+
+
+def tearDownModule():
+    _ENV_PATCH.stop()
+    _ISOLATED_STATE.cleanup()
+
 
 ADDED = (
     "Added user rules (see 'ufw status' for running firewall):\n"
