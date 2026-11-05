@@ -102,6 +102,17 @@ class NotifyTests(_StoreCase):
         items = notify.urgent_items([], self._signals()[:1], None, self.store, self.policy, self.specs, NOW)
         self.assertEqual(items, [])
 
+    def test_leads_published_before_the_urgent_window_are_not_emailed(self):
+        # A source's first poll returns weeks-old items; they are history, not news.
+        self.store.put_inventory(Inventory("freshrss", NOW, "ok", "fp",
+                                           packages=[Package(model.RUNTIME_ECOSYSTEM, "php", "8.4.27")]))
+        old = (NOW - timedelta(days=14)).isoformat()
+        fresh = (NOW - timedelta(hours=2)).isoformat()
+        signals = [dataclasses.replace(s, published=old) for s in self._signals()[:3]]
+        signals.append(dataclasses.replace(self._signals()[0], key="php-2", published=fresh))
+        items = notify.urgent_items([], signals, None, self.store, self.policy, self.specs, NOW)
+        self.assertEqual([i["dedupe"] for i in items], ["signal:php_announce:php-2"])
+
     def test_send_urgent_dedupes_and_escapes(self):
         sent = []
         items = notify.urgent_items([_finding()], self._signals()[2:3], None, self.store, self.policy,

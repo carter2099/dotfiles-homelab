@@ -924,6 +924,57 @@ def test_recent_publication_blocks_repeat_named_by_event_terms() -> None:
               and rejected["matched_story"]["url"] == PHP_FLAWS_STORY["url"], rejected)
 
 
+def test_recent_publication_blocks_event_terms_repeat_beyond_date_gap() -> None:
+    """An event-terms repeat is rejected even when dated past the wording gap.
+
+    Regression for 2026-10-28/11-02 Gaming: the Warhorse Studios cyberattack
+    (article 10-27) ran again from an 11-01 article whose only new material was
+    an unverified Reddit delay claim; the two-day date gap cleared it.
+    """
+    original = {
+        "title": "Warhorse Studios confirms a cyberattack",
+        "event": "Kingdom Come: Deliverance developer Warhorse Studios confirmed a cyberattack",
+        "summary": "Warhorse Studios said attackers breached its systems and that it is "
+                   "investigating with authorities.",
+        "url": "https://www.gamesradar.com/games/rpg/warhorse-studios-confirms-cyberattack/",
+        "editorial_significance": "medium", "date_published": "2026-10-27",
+    }
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        published = root / "news" / "publications" / "2026-10-28"
+        published.mkdir(parents=True)
+        (published / f"{catalog.TOPICS['gaming']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [original],
+        }))
+        run_dir = root / catalog.TOPICS["gaming"]["category"] / "2026-11-02"
+        run_dir.mkdir(parents=True)
+        repeat = {
+            "title": "Warhorse Studios cyberattack may delay the next Kingdom Come game",
+            "event": "After the Warhorse Studios cyberattack, an unverified Reddit insider "
+                     "claims the next Kingdom Come game is delayed",
+            "summary": "Warhorse Studios confirmed a cyberattack. An unverified insider claim "
+                       "on Reddit says the next game is delayed.",
+            "event_terms": ["Warhorse Studios", "cyberattack"],
+            "url": "https://www.gamingbible.com/news/warhorse-studios-cyberattack-delay-rumor",
+            "editorial_significance": "medium", "date_published": "2026-11-01",
+        }
+        unrelated = {
+            "title": "Nintendo announces a new Metroid game",
+            "event": "Nintendo announced a new Metroid game for Switch 2",
+            "event_terms": ["Nintendo", "Metroid"],
+            "url": "https://example.com/2026/11/01/new-metroid",
+            "editorial_significance": "medium", "date_published": "2026-11-01",
+        }
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(
+                catalog.TOPICS["gaming"], [copy.deepcopy(repeat), copy.deepcopy(unrelated)], run_dir)
+        check([item["url"] for item in queue] == [unrelated["url"]], f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["url"] == repeat["url"]
+              and rejected["matched_story"]["url"] == original["url"], rejected)
+
+
 def test_recent_publication_blocks_repeat_sharing_precise_figures() -> None:
     """A re-report with different wording is caught by its shared precise figures.
 
@@ -3613,6 +3664,7 @@ def main() -> None:
         test_cross_day_wording_dedup_keeps_new_events_in_continuing_topics,
         test_recent_coverage_blocks_redated_url_of_same_article,
         test_recent_publication_blocks_repeat_named_by_event_terms,
+        test_recent_publication_blocks_event_terms_repeat_beyond_date_gap,
         test_recent_publication_blocks_repeat_sharing_precise_figures,
         test_fetch_alternate_repeating_published_story_is_not_assigned,
         test_phase_two_ledger_drops_redated_url_of_covered_article,

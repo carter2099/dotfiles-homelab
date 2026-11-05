@@ -43,7 +43,9 @@ CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS = 2
 # one of its (at least this many) distinctive event terms appears in the
 # story's title, event or summary (10-22/23 AI & Tech: the AI-found PHP
 # vulnerabilities ran twice; the headlines differed but the earlier summary
-# named the same fix, researchers and model).
+# named the same fix, researchers and model). That match names the published
+# incident itself, so the date gap does not clear it (10-28/11-02 Gaming: the
+# Warhorse cyberattack re-ran five days later on an unverified delay rumor).
 CROSS_DAY_EVENT_MIN_TERMS = 2
 # A re-report worded too differently for either test above still repeats a
 # published story when both cite at least this many of the same precise
@@ -934,8 +936,10 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     or every one of ``item``'s (at least CROSS_DAY_EVENT_MIN_TERMS) event terms
     must appear in the story's title/event/summary. Independently of those
     wording tests, sharing CROSS_DAY_EVENT_MIN_SHARED_FIGURES precise decimal
-    figures plus a headline word also counts. In every case they must be dated at
-    most CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS apart. An undated
+    figures plus a headline word also counts. The event-terms match holds at any
+    date gap within the caller's dedup window; the token-overlap and figures
+    matches also require the two to be dated at most
+    CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS apart. An undated
     candidate counts as published at the start of the freshness window
     (yesterday); an undated story as published on its edition date.
     """
@@ -947,14 +951,15 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     if not _shares_distinctive_figures(story, item):
         if not _same_event(story, item, frequency):
             return False
+        if attention_match.terms_all_present(
+                item.get("event_terms"),
+                " ".join(str(story.get(key) or "") for key in ("title", "event", "summary")),
+                CROSS_DAY_EVENT_MIN_TERMS):
+            return True
         story_tokens = _story_event_tokens(story)
         item_tokens = _story_event_tokens(item)
         shared = story_tokens & item_tokens
-        if (len(shared) / min(len(story_tokens), len(item_tokens)) < CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP
-                and not attention_match.terms_all_present(
-                    item.get("event_terms"),
-                    " ".join(str(story.get(key) or "") for key in ("title", "event", "summary")),
-                    CROSS_DAY_EVENT_MIN_TERMS)):
+        if len(shared) / min(len(story_tokens), len(item_tokens)) < CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP:
             return False
     story_date = (parse_date(str(story.get("date_confirmed") or "").strip())
                   or parse_date(str(story.get("date_published") or "").strip())

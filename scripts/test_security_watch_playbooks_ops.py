@@ -449,6 +449,20 @@ class AptSecurityTests(TempHomeCase):
         self.assertEqual(plan.state["packages"], ["libssl3t64"])
         self.assertEqual(plan.undo, "sudo apt-get install --allow-downgrades libssl3t64=3.0.13-0ubuntu3.4")
 
+    def test_arch_qualified_package_reads_unqualified_policy_header(self):
+        # dpkg reports "libsoup-3.0-0:amd64"; `apt-cache policy` prints the header as
+        # "libsoup-3.0-0:", which once made every multi-arch package look candidate-less.
+        run = FakeRun()
+        run.on(["dpkg-query", "-W"], (0, "ii \tlibsoup3\tlibsoup-3.0-0:amd64\t3.4.4-5ubuntu0.8\n"))
+        run.on(["apt-cache", "policy"], (0, "libsoup-3.0-0:\n  Installed: 3.4.4-5ubuntu0.8\n"
+                                            "  Candidate: 3.4.4-5ubuntu0.9\n"))
+        run.on(["dpkg", "--compare-versions"], self.compare)
+        f = finding("host", "Ubuntu:24.04:LTS", "libsoup3", "3.4.4-5ubuntu0.8", ["3.4.4-5ubuntu0.9"])
+        sp = spec(id="host", kind="host", collector="host-dpkg", owner="apt-security", lock="host")
+        plan = self.pb(playbooks_ops.AptSecurity).plan([f], sp, make_ctx(run=run))
+        self.assertIsInstance(plan, Plan)
+        self.assertEqual(plan.state["packages"], ["libsoup-3.0-0:amd64"])
+
 
 class RegistryTests(unittest.TestCase):
     def test_registry_has_every_ops_playbook_single_tick(self):

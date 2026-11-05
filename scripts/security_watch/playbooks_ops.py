@@ -705,13 +705,20 @@ def _upstream(version: str) -> str:
 
 
 def _apt_policy(ctx, packages: list[str]) -> dict[str, tuple[str, str]]:
+    """``{package: (installed, candidate)}`` keyed exactly as requested.
+
+    ``apt-cache policy libfoo:amd64`` prints its header as ``libfoo:``, so headers are
+    matched on the name without the architecture qualifier.
+    """
     proc = _run(ctx, ["apt-cache", "policy", *packages], timeout=60)
+    requested = {p.split(":", 1)[0]: p for p in packages}
     result: dict[str, tuple[str, str]] = {}
     current = ""
     installed = ""
     for line in (proc.stdout or "").splitlines():
         if line and not line[0].isspace() and line.rstrip().endswith(":"):
-            current, installed = line.rstrip()[:-1], ""
+            header = line.rstrip()[:-1]
+            current, installed = requested.get(header.split(":", 1)[0], header), ""
         elif current and line.strip().startswith("Installed:"):
             installed = line.split(":", 1)[1].strip()
         elif current and line.strip().startswith("Candidate:"):

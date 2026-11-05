@@ -124,7 +124,11 @@ def urgent_items(findings: list[model.Finding], new_signals: list[model.Signal],
             items.append(_finding_item(f, specs))
 
     php_running: bool | None = None
+    stale_before = now - timedelta(hours=policy.urgent_window_hours)
     for sig in new_signals:
+        published = model.parse_iso(sig.published)
+        if published is not None and published < stale_before:
+            continue  # a lead first seen late (e.g. on a source's first poll) is not news
         hint = sig.urgency_hint
         if hint == "pre-announcement":
             if php_running is None:
