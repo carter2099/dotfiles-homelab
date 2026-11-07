@@ -1027,6 +1027,72 @@ def test_recent_publication_blocks_repeat_sharing_precise_figures() -> None:
               and rejected["matched_story"]["url"] == original["url"], rejected)
 
 
+def test_recent_publication_blocks_repeat_with_common_headline_words() -> None:
+    """A re-report whose shared headline words are all common is caught by its event terms.
+
+    Regression for 2026-11-02/03 Gaming: the Xbox Game Pass November 2026
+    additions ran twice; the headlines shared only xbox/game/pass/november/2026,
+    all common in the gaming corpus, so the rare-headline-word gate cleared it.
+    """
+    original = {
+        "title": "Xbox Game Pass Adds 5 New Games For November 2026, Starting Today",
+        "event": "Xbox Game Pass confirms five November 2026 additions including Football Manager 27",
+        "summary": "Gravhounds, Football Manager 27, Warhammer Survivors and Thronefall join "
+                   "Xbox Game Pass in November 2026.",
+        "url": "https://screenrant.com/xbox-game-pass-november-2026-new-games/",
+        "editorial_significance": "medium", "date_published": "2026-11-02",
+    }
+    corpus_titles = (
+        "Xbox Game Pass November 2026 price change leaks",
+        "Xbox Game Pass November 2026 wave two rumored",
+        "Xbox Game Pass loses three games in November 2026",
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        older = root / "news" / "publications" / "2026-10-20"
+        older.mkdir(parents=True)
+        (older / f"{catalog.TOPICS['gaming']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [
+                {"title": title, "event": title, "url": f"https://example.com/2026/10/20/gp-{index}",
+                 "editorial_significance": "low", "date_published": "2026-10-20"}
+                for index, title in enumerate(corpus_titles)
+            ],
+        }))
+        published = root / "news" / "publications" / "2026-11-02"
+        published.mkdir(parents=True)
+        (published / f"{catalog.TOPICS['gaming']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [original],
+        }))
+        run_dir = root / catalog.TOPICS["gaming"]["category"] / "2026-11-03"
+        run_dir.mkdir(parents=True)
+        repeat = {
+            "title": "Xbox Game Pass confirms November 2026 additions",
+            "event": "Xbox Game Pass confirms November 2026 lineup including Gravhounds and "
+                     "Football Manager 27",
+            "summary": "Gravhounds, Football Manager 27, Warhammer Survivors and Thronefall are "
+                       "coming to Game Pass.",
+            "event_terms": ["Xbox Game Pass", "Gravhounds", "Football Manager 27"],
+            "url": "https://www.nme.com/news/gaming-news/xbox-game-pass-november-2026",
+            "editorial_significance": "medium", "date_published": "2026-11-03",
+        }
+        unrelated = {
+            "title": "Hollow Knight Silksong joins Xbox Game Pass in November 2026",
+            "event": "Hollow Knight Silksong arrives on Xbox Game Pass in November 2026",
+            "event_terms": ["Xbox Game Pass", "Hollow Knight Silksong"],
+            "url": "https://example.com/2026/11/03/silksong-game-pass",
+            "editorial_significance": "medium", "date_published": "2026-11-03",
+        }
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(
+                catalog.TOPICS["gaming"], [copy.deepcopy(repeat), copy.deepcopy(unrelated)], run_dir)
+        check([item["url"] for item in queue] == [unrelated["url"]], f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["url"] == repeat["url"]
+              and rejected["matched_story"]["url"] == original["url"], rejected)
+
+
+
 def test_fetch_alternate_repeating_published_story_is_not_assigned() -> None:
     """Another outlet's headline for a new candidate cannot re-run a published story.
 
@@ -3665,6 +3731,7 @@ def main() -> None:
         test_recent_coverage_blocks_redated_url_of_same_article,
         test_recent_publication_blocks_repeat_named_by_event_terms,
         test_recent_publication_blocks_event_terms_repeat_beyond_date_gap,
+        test_recent_publication_blocks_repeat_with_common_headline_words,
         test_recent_publication_blocks_repeat_sharing_precise_figures,
         test_fetch_alternate_repeating_published_story_is_not_assigned,
         test_phase_two_ledger_drops_redated_url_of_covered_article,

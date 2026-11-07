@@ -928,6 +928,40 @@ def _recent_published_events(digests_root: Path, today: date) -> tuple[list[dict
                     recent.append({**story, "edition_date": day})
     return recent, corpus
 
+def _distinctive_event_terms_match(story: dict, item: dict, frequency: Any) -> bool:
+    """news_publish._same_event without its rare-headline-word gate: the two share
+    its minimum title/event wording, every event term of ``item`` appears in
+    ``story``, and one term names a rare entity that ``item``'s headline does not.
+
+    Regression for 2026-11-02/03 Gaming: the Xbox Game Pass November additions
+    (Gravhounds, Football Manager 27) re-ran from another outlet whose headline
+    shared only words common across the gaming corpus (xbox, pass, november).
+    """
+    from news_publish import (EVENT_MIN_SHARED_TOKENS, EVENT_MIN_TOKEN_OVERLAP,
+                              _event_tokens, _story_event_tokens)
+
+    story_tokens = _story_event_tokens(story)
+    item_tokens = _story_event_tokens(item)
+    if not story_tokens or not item_tokens:
+        return False
+    shared = story_tokens & item_tokens
+    if (len(shared) < EVENT_MIN_SHARED_TOKENS
+            or len(shared) / min(len(story_tokens), len(item_tokens)) < EVENT_MIN_TOKEN_OVERLAP):
+        return False
+    terms = item.get("event_terms")
+    text = " ".join(str(story.get(key) or "") for key in ("title", "event", "summary"))
+    if not attention_match.terms_all_present(terms, text, CROSS_DAY_EVENT_MIN_TERMS):
+        return False
+    counts, documents = frequency
+    rare_limit = max(2, documents // 100)
+    headline = _event_tokens(item.get("title"))
+    return any(
+        token not in headline and counts[token] <= rare_limit
+        for term in terms if isinstance(term, str)
+        for token in _event_tokens(" ".join(sorted(attention_match.entity_tokens(term))))
+    )
+
+
 def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: date) -> bool:
     """True when ``item`` re-reports the event of ``story``, published on an earlier day.
 
@@ -942,6 +976,9 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS apart. An undated
     candidate counts as published at the start of the freshness window
     (yesterday); an undated story as published on its edition date.
+    When news_publish._same_event fails only on its rare-headline-word gate, a
+    candidate whose event terms all appear in the story and name a rare entity
+    outside its own headline still counts, within the same date gap.
     """
     from news_publish import _same_event, _story_event_tokens
 
@@ -950,17 +987,19 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
         return True
     if not _shares_distinctive_figures(story, item):
         if not _same_event(story, item, frequency):
-            return False
-        if attention_match.terms_all_present(
+            if not _distinctive_event_terms_match(story, item, frequency):
+                return False
+        elif attention_match.terms_all_present(
                 item.get("event_terms"),
                 " ".join(str(story.get(key) or "") for key in ("title", "event", "summary")),
                 CROSS_DAY_EVENT_MIN_TERMS):
             return True
-        story_tokens = _story_event_tokens(story)
-        item_tokens = _story_event_tokens(item)
-        shared = story_tokens & item_tokens
-        if len(shared) / min(len(story_tokens), len(item_tokens)) < CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP:
-            return False
+        else:
+            story_tokens = _story_event_tokens(story)
+            item_tokens = _story_event_tokens(item)
+            shared = story_tokens & item_tokens
+            if len(shared) / min(len(story_tokens), len(item_tokens)) < CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP:
+                return False
     story_date = (parse_date(str(story.get("date_confirmed") or "").strip())
                   or parse_date(str(story.get("date_published") or "").strip())
                   or parse_date(str(story.get("edition_date") or "")))

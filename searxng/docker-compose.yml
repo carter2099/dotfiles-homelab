@@ -3,7 +3,7 @@ name: searxng
 services:
   core:
     container_name: searxng
-    image: docker.io/searxng/searxng@sha256:c4e8448495ef3b0175eb6c97a19c1ac7cc0a5c907d581ab3877f3cb430e81b86
+    image: docker.io/searxng/searxng@sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847
     restart: unless-stopped
     mem_limit: 512m
     pids_limit: 128
