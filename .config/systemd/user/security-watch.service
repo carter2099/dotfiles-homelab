@@ -8,8 +8,12 @@ OnFailure=notify-failure@%n.service
 Type=oneshot
 Environment="PATH=%h/.local/go/bin:%h/.local/bin:%h/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/usr/bin/python3 %h/scripts/security_watch_runner.py tick
-# policy.tick_budget_seconds (600) bounds the phases; this is the hard stop.
-TimeoutStartSec=15min
+# policy.tick_budget_seconds (600) bounds the phases and act starts at most one new
+# execution per tick, but an apply runs to completion: the longest playbook path is a
+# release/deploy script (up to 30 min) plus health checks and verification.  This hard stop
+# sits well above that so systemd never kills an apply mid-change (no rollback would run).
+# Oneshot: a long apply delays the next timer tick instead of overlapping it.
+TimeoutStartSec=2h
 MemoryHigh=1G
 MemoryMax=2G
 TasksMax=256

@@ -11,10 +11,14 @@ version):
   go-module      ``go get <module>@v<fixed>`` + ``go mod tidy``
   pip-pin        requirements.txt ``name==<fixed>`` bump
 
-apply() opens the PR from a throw-away worktree of origin/main; advance() walks
-``ci -> merging -> deploy`` across ticks.  Carter stops an action by labelling the
-PR ``hold`` (or closing it).  The deploy runs under ``ctx.lock(spec.lock)`` through
-the component's existing owner: steward P1 app_deploy or the repo's release script.
+apply() opens the PR from a throw-away worktree of origin/main (repos without CI run
+their own checks there first; refused while another security-watch PR is open);
+advance() walks ``ci -> merging -> deploy`` across ticks.  Carter stops an action by
+labelling the PR ``hold`` or closing it; any other pre-merge failure closes the PR and
+deletes its branch.  When origin/main already carries the fix the plan is deploy-only
+and starts at ``deploy``.  The deploy runs under ``ctx.lock(spec.lock)`` through the
+component's existing owner: steward P1 app_deploy, or the repo's release script once
+CI on main's HEAD is green (stage ``deploying`` is journaled right before it starts).
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from typing import Any, Callable
 
 from deploy_lock import LockTimeout
 
-from security_watch import config, model, net
+from security_watch import config, inventory, model, net
 from security_watch.config import ComponentSpec
 from security_watch.model import Finding, Outcome, Plan, Refusal
 
@@ -46,6 +50,22 @@ HEALTH_ATTEMPTS = 6
 HEALTH_RETRY_SECONDS = 5
 HUB_TAG_URL = "https://hub.docker.com/v2/repositories/library/golang/tags/{tag}"
 PR_VIEW_FIELDS = "state,mergeable,mergeStateStatus,headRefOid,labels,statusCheckRollup,mergeCommit"
+GO_PROXY_INFO_URL = "https://proxy.golang.org/{module}/@v/v{version}.info"
+GO_TOOLCHAIN_INFO_URL = "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go{version}.linux-amd64.info"
+TITLE_MAX = 100                        # GitHub rejects titles over 256; keep them readable
+PR_BODY_MAX = 60000                    # GitHub's PR body limit is 65536 characters
+CHECK_TIMEOUT = 1200                   # pre-push checks of a repo without CI, per command
+
+# Output proving a release script got past its preconditions: printed when its production
+# transaction starts, or by the rollback its EXIT trap always runs once it has.  A non-zero
+# exit without the marker (and with the artifact fingerprint unchanged) died before changing
+# anything.  Scripts not listed -- e.g. prompt-guard deploy.sh, whose rollback is silent --
+# always count as production touched.
+_TRANSACTION_MARKERS = {
+    ("homelab-dashboard", "release.sh"): r"^==> promoting ",
+    ("beatz", "release.sh"): r"Beats (?:deployment rolled back|rollback failed)",
+    ("llm-proxy", "release.sh"): r"Deployment rolled back and restored health|LLM Proxy rollback failed",
+}
 
 OS_ECOSYSTEM_PREFIXES = ("Debian:", "Ubuntu:", "Alpine:")
 _CI_OK_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
@@ -435,6 +455,81 @@ def _group_slug(group: str) -> str:
     return slug[:60] or "finding"
 
 
+def proxy_release_time(url: str, fetch) -> str:
+    """ISO publish time from a proxy.golang.org ``.info`` document (its ``Time``).
+
+    RuntimeError when the date is unknown: the plan is refused (transient, retried)
+    instead of skipping the age rule.
+    """
+    try:
+        data = net.get_json(url, fetch=fetch)
+    except net.FetchError as exc:
+        raise RuntimeError(f"release date lookup {url} failed: {exc.reason}") from None
+    raw = data.get("Time") if isinstance(data, dict) else None
+    try:
+        when = model.parse_iso(raw) if isinstance(raw, str) else None
+    except ValueError:
+        when = None
+    if when is None:
+        raise RuntimeError(f"{url} names no release Time")
+    return model.iso(when)
+
+
+def pr_title(edit: str, count: int, lead: str) -> str:
+    """Fixed-length summary; the full finding list goes into the commit and PR bodies."""
+    title = (f"security: {edit} for {lead}" if count <= 1
+             else f"security: {edit} ({count} findings incl. {lead})")
+    return title if len(title) <= TITLE_MAX else title[:TITLE_MAX - 3] + "..."
+
+
+def _commit_findings(plan: Plan, st: dict) -> str:
+    ids = list(st.get("cves") or []) or list(plan.finding_keys)
+    text = f"Fixes ({len(plan.finding_keys)} findings): " + ", ".join(ids)
+    not_addressed = list(st.get("not_addressed") or [])
+    if not_addressed:
+        text += "\n\nNot addressed:\n" + "\n".join(f"- {note}" for note in not_addressed)
+    return text
+
+
+def _deploy_step(spec: ComponentSpec, repo: Path) -> str:
+    kind, _, arg = str(spec.get("deploy", "")).partition(":")
+    if kind == "steward-app":
+        return f"under lock {spec.lock}: steward P1 app_deploy {arg} (CI-green origin/main)"
+    return (f"under lock {spec.lock}: git pull --ff-only origin main in {_tilde(repo)}, wait for CI green "
+            f"on that commit (repos with CI), journal 'deploying', bash {arg}, health check")
+
+
+def commit_ci_verdict(runs_payload: dict, status_payload: dict) -> tuple[bool | None, str]:
+    """steward ``updates._ci_green(allow_pending=True)`` on the two REST payloads of one commit
+    (``/check-runs`` and ``/status``): True green, None not finished (nothing reported yet,
+    still running, or cancelled by a newer push), False red."""
+    runs = [r for r in runs_payload.get("check_runs") or [] if isinstance(r, dict)]
+    statuses = [s for s in status_payload.get("statuses") or [] if isinstance(s, dict)]
+    try:
+        total = int(runs_payload.get("total_count", len(runs)))
+    except (TypeError, ValueError):
+        total = len(runs)
+    if total > len(runs):
+        return False, f"{total} check runs exceed one page; cannot verify all"
+    incomplete = ([f"{r.get('name')}: {r.get('status')}/{r.get('conclusion')}"
+                   for r in runs if r.get("status") != "completed"]
+                  + [f"{s.get('context')}: {s.get('state')}" for s in statuses if s.get("state") == "pending"])
+    problems = ([f"{r.get('name')}: {r.get('status')}/{r.get('conclusion')}"
+                 for r in runs if r.get("status") == "completed" and r.get("conclusion") not in _CI_OK_CONCLUSIONS]
+                + [f"{s.get('context')}: {s.get('state')}" for s in statuses
+                   if s.get("state") not in ("success", "pending")])
+    cancelled = [p for p in problems if p.endswith("/cancelled")]
+    if problems and len(cancelled) != len(problems):
+        return False, "; ".join(problems[:6])
+    if cancelled:
+        return None, "; ".join((cancelled + incomplete)[:6])
+    if not runs and not statuses:
+        return None, "no CI checks reported"
+    if incomplete:
+        return None, "; ".join(incomplete[:6])
+    return True, f"{len(runs)} check run(s), {len(statuses)} status(es) green"
+
+
 # --- playbook ----------------------------------------------------------------
 
 class RepoPrPlaybook:
@@ -443,11 +538,14 @@ class RepoPrPlaybook:
 
     def __init__(self, *, app_deploy: Callable[..., dict] | None = None,
                  deploy_registry: dict | None = None, auto_merge_repos: set[str] | None = None,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 script_run: Callable[..., Any] | None = None):
         self._app_deploy = app_deploy
         self._deploy_registry = deploy_registry
         self._auto_merge_repos = auto_merge_repos
         self._sleep = sleep
+        # Release/deploy scripts and pre-push checks: own process group, killed whole on timeout.
+        self._script_run = script_run if script_run is not None else inventory.run_group
 
     # steward integration (imported lazily: the steward package is heavy)
     def _steward_app_deploy(self) -> Callable[..., dict]:
@@ -521,46 +619,87 @@ class RepoPrPlaybook:
             return result.stdout if result.returncode == 0 else None
 
         try:
-            built = getattr(self, "_plan_" + edit.replace("-", "_"))(group, spec, ctx, read)
+            part = getattr(self, "_plan_" + edit.replace("-", "_"))(group, spec, ctx, read)
+            if isinstance(part, Refusal):
+                return part
+            main_sha, has_ci = self._origin_main(repo, ctx) if part.get("deploy_only") else ("", True)
         except RuntimeError as exc:
             return refuse(str(exc)[:500], alert=False)
-        if isinstance(built, Refusal):
-            return built
-        target, path, params, fixed_version, edit_step = built
+        covered = list(part.get("findings") or group)
         gh = _github(spec)
-        cves = sorted({c for f in group for c in f.cves})
-        first_group = group[0].group
+        lead = covered[0]
+        state = {"edit": edit, "repo": spec.repo, "github": gh,
+                 "cves": sorted({c for f in covered for c in f.cves}), "group": lead.group,
+                 "lead": lead.cves[0] if lead.cves else lead.group,
+                 "packages": sorted({f.package.name for f in covered}),
+                 "not_addressed": list(part.get("skipped") or [])}
+        keys = [f.key for f in covered]
         deploy = spec.get("deploy", "")
-        kind, _, arg = deploy.partition(":")
-        if kind == "steward-app":
-            deploy_step = f"under lock {spec.lock}: steward P1 app_deploy {arg} (CI-green origin/main)"
-        else:
-            deploy_step = (f"under lock {spec.lock}: git pull --ff-only origin main in {_tilde(repo)}, "
-                           f"bash {arg}, health check")
+        deploy_step = _deploy_step(spec, repo)
+        if part.get("deploy_only"):
+            state.update(deploy_only=True, main_sha=main_sha, has_ci=has_ci)
+            return Plan(
+                playbook=pid,
+                component_id=spec.id,
+                finding_keys=keys,
+                target=f"{spec.id}: redeploy origin/main {main_sha[:7]} ({part['stale']})",
+                lock_keys=[spec.lock],
+                steps=[f"no PR: origin/main of {spec.repo} already contains the fix ({part['stale']}); "
+                       "the deployed artifact is stale",
+                       deploy_step,
+                       f"rescan {spec.id}; the findings must clear"],
+                undo=(f"redeploy the previously deployed release of {spec.id} ({deploy}); "
+                      "origin/main is unchanged"),
+                # The fix is already merged (by Carter or Dependabot), so there is no new
+                # release for the age rule to hold back.
+                release_published=None,
+                fixed_version=part["fixed_version"],
+                state=state,
+            )
+        state.update(path=part["path"], params=part["params"])
         return Plan(
             playbook=pid,
             component_id=spec.id,
-            finding_keys=[f.key for f in group],
-            target=target,
+            finding_keys=keys,
+            target=part["target"],
             lock_keys=[spec.lock],
             steps=[
                 f"git fetch; detached worktree of origin/main from {_tilde(repo)}",
-                edit_step,
-                f"commit on secwatch/{spec.id}-{_group_slug(first_group)}-<YYYYmmddHHMM>, push, "
-                f"open PR on {gh} labelled {PR_LABEL}",
-                f"wait for CI green + mergeable (label '{HOLD_LABEL}' stops it); merge with the repo's allowed method",
+                part["step"],
+                "repo without CI workflows: run its verify.sh (else go build/vet/test) in the worktree "
+                "before pushing; failure stops here",
+                f"commit on secwatch/{spec.id}-{_group_slug(lead.group)}-<YYYYmmddHHMM>, push, "
+                f"open PR on {gh} labelled {PR_LABEL} (refused while another {PR_LABEL} PR is open)",
+                f"wait for CI green + mergeable (label '{HOLD_LABEL}' stops it); merge with the repo's "
+                "allowed method, deleting the branch; any pre-merge failure closes the PR",
                 deploy_step,
                 f"rescan {spec.id}; the findings must clear",
             ],
             undo=(f"before merge: gh pr close <n> --repo {gh} --delete-branch; after merge: "
                   f"git -C {_tilde(repo)} revert --no-edit <merge sha> && git -C {_tilde(repo)} push origin main, "
                   f"then redeploy ({deploy})"),
-            release_published=None,
-            fixed_version=fixed_version,
-            state={"edit": edit, "path": path, "params": params, "repo": spec.repo, "github": gh,
-                   "cves": cves, "group": first_group,
-                   "packages": sorted({f.package.name for f in group})},
+            release_published=part.get("published"),
+            fixed_version=part["fixed_version"],
+            state=state,
         )
+
+    @staticmethod
+    def _origin_main(repo: Path, ctx) -> tuple[str, bool]:
+        """(origin/main sha, whether origin/main has CI workflows); RuntimeError when unreadable."""
+        result = ctx.run(["git", "-C", str(repo), "rev-parse", "--verify", "origin/main^{commit}"], timeout=30)
+        sha = (result.stdout or "").strip()
+        if result.returncode != 0 or not sha:
+            raise RuntimeError(f"cannot resolve origin/main in {_tilde(repo)}: {_tail(result, 200)}")
+        tree = ctx.run(["git", "-C", str(repo), "ls-tree", "--name-only", "origin/main", ".github/workflows/"],
+                       timeout=30)
+        names = (tree.stdout or "").split() if tree.returncode == 0 else []
+        return sha, any(n.endswith((".yml", ".yaml")) for n in names)
+
+    # Each _plan_<edit> returns a Refusal or a dict: target, path, params, step, fixed_version,
+    # published (release ISO time for the age rule), findings (the covered subset; default the
+    # whole group), skipped (findings left out, listed in the PR body as not addressed) -- or
+    # {"deploy_only": True, "stale": why, "fixed_version", "findings"?} when origin/main
+    # already carries the fix and only the deployed artifact is stale.
 
     def _plan_base_refresh(self, group, spec, ctx, read):
         path = spec.get("dockerfile") or "Dockerfile"
@@ -576,7 +715,10 @@ class RepoPrPlaybook:
         target = (f"{spec.id}: {path} ARG SECURITY_REFRESH "
                   f"({'/'.join(distros)} security updates for {', '.join(names)})")
         step = f"set ARG SECURITY_REFRESH={stamp} in {path} before the package-upgrade RUN"
-        return target, path, {"stamp": stamp}, group[0].fixed_versions[0], step
+        # No release date: the fix is whatever the distro archive ships at build time (Debian/
+        # Alpine security updates), not one newly published artifact -- exempt from the age rule.
+        return {"target": target, "path": path, "params": {"stamp": stamp}, "step": step,
+                "fixed_version": group[0].fixed_versions[0]}
 
     def _plan_go_builder(self, group, spec, ctx, read):
         path = spec.get("dockerfile") or "Dockerfile"
@@ -597,9 +739,8 @@ class RepoPrPlaybook:
                                f"(fixed: {', '.join(finding.fixed_versions)})")
             need = _max_version(need, fixed)
         if not _vlt(current, need):
-            return Refusal(self.id, spec.id,
-                           f"{spec.repo}/{path} already builds with golang {current} (fix {need}); "
-                           "the deployed artifact is stale and needs a redeploy")
+            return {"deploy_only": True, "fixed_version": need,
+                    "stale": f"{path} already builds with golang {current}, fix {need}"}
         tag = f"{need}-{variant}" if variant else need
         try:
             meta = net.get_json(HUB_TAG_URL.format(tag=tag), fetch=ctx.fetch)
@@ -614,10 +755,11 @@ class RepoPrPlaybook:
             return Refusal(self.id, spec.id, f"Docker Hub returned no digest for golang:{tag}", alert=False)
         if bump_golang_from(text, need, digest if pinned else None) is None:
             return Refusal(self.id, spec.id, f"cannot rewrite the golang FROM lines of {spec.repo}/{path}")
-        params = {"version": need, "digest": digest if pinned else None}
-        target = f"{spec.id}: {path} golang {current} -> {need}"
-        step = f"FROM golang:{tag}{'@' + digest if pinned else ''} in {path} (stage names kept)"
-        return target, path, params, need, step
+        published = proxy_release_time(GO_TOOLCHAIN_INFO_URL.format(version=need), ctx.fetch)
+        return {"target": f"{spec.id}: {path} golang {current} -> {need}", "path": path,
+                "params": {"version": need, "digest": digest if pinned else None},
+                "step": f"FROM golang:{tag}{'@' + digest if pinned else ''} in {path} (stage names kept)",
+                "fixed_version": need, "published": published}
 
     def _plan_go_toolchain(self, group, spec, ctx, read):
         text = read("go.mod")
@@ -636,11 +778,12 @@ class RepoPrPlaybook:
                                f"(fixed: {', '.join(finding.fixed_versions)})")
             need = _max_version(need, fixed)
         if bump_go_toolchain(text, need) is None:
-            return Refusal(self.id, spec.id,
-                           f"{spec.repo}/go.mod already uses toolchain go{current} (fix {need}); "
-                           "the deployed binary is stale and needs a rebuild")
-        target = f"{spec.id}: go.mod toolchain go{current} -> go{need}"
-        return target, "go.mod", {"version": need}, need, f"set toolchain go{need} in go.mod"
+            return {"deploy_only": True, "fixed_version": need,
+                    "stale": f"go.mod already uses toolchain go{current}, fix {need}"}
+        published = proxy_release_time(GO_TOOLCHAIN_INFO_URL.format(version=need), ctx.fetch)
+        return {"target": f"{spec.id}: go.mod toolchain go{current} -> go{need}", "path": "go.mod",
+                "params": {"version": need}, "step": f"set toolchain go{need} in go.mod",
+                "fixed_version": need, "published": published}
 
     def _plan_go_module(self, group, spec, ctx, read):
         text = read("go.mod")
@@ -648,36 +791,53 @@ class RepoPrPlaybook:
             return Refusal(self.id, spec.id, f"cannot read origin/main:go.mod in {spec.repo}")
         modules: dict[str, str] = {}
         required: dict[str, str] = {}
+        bumped: list[Finding] = []
+        stale: list[tuple[Finding, str, str]] = []
+        skipped: list[str] = []
         for finding in group:
             name = finding.package.name
             have = _go_mod_required(text, name)
             if have is None:
-                return Refusal(self.id, spec.id, f"{name} is not required in {spec.repo}/go.mod")
+                skipped.append(f"{name} is not required in {spec.repo}/go.mod")
+                continue
             above = [_strip_prefix(v) for v in finding.fixed_versions
                      if _semver_lt(finding.package.version, v)]
             fixed = min(above, key=_semver_key) if above else None
             if fixed is None:
-                return Refusal(self.id, spec.id,
-                               f"{name}: no fixed version above {finding.package.version} "
+                skipped.append(f"{name}: no fixed version above {finding.package.version} "
                                f"(fixed: {', '.join(finding.fixed_versions)})")
+                continue
             if is_go_pseudo_version(fixed):
                 pseudo = fixed
                 fixed = resolve_go_tag(name, pseudo, ctx.fetch)
                 if fixed is None:
-                    return Refusal(self.id, spec.id,
-                                   f"fix for {name} exists only at an untagged commit (v{pseudo}); "
+                    skipped.append(f"fix for {name} exists only at an untagged commit (v{pseudo}); "
                                    "waiting for a tagged release")
+                    continue
             if not _semver_lt(have, fixed):
-                return Refusal(self.id, spec.id,
-                               f"{spec.repo}/go.mod already requires {name} v{have} (fix {fixed}); "
-                               "the deployed binary is stale and needs a rebuild")
+                stale.append((finding, f"{name} v{have}", fixed))
+                continue
             current = modules.get(name)
             modules[name] = fixed if current is None or _semver_lt(current, fixed) else current
             required[name] = have
+            bumped.append(finding)
+        if not bumped and not stale:
+            return Refusal(self.id, spec.id, skipped[0])
+        covered = {id(f) for f in bumped} | {id(f) for f, _, _ in stale}
+        findings = [f for f in group if id(f) in covered]
+        if not bumped:
+            return {"deploy_only": True, "findings": findings, "skipped": skipped,
+                    "fixed_version": stale[0][2],
+                    "stale": "go.mod already requires " + ", ".join(d for _, d, _ in stale)}
         pairs = sorted(modules.items())
-        target = f"{spec.id}: go.mod " + ", ".join(f"{m} v{required[m]} -> v{v}" for m, v in pairs)
-        step = "go get " + " ".join(f"{m}@v{v}" for m, v in pairs) + " && go mod tidy"
-        return target, "go.mod", {"modules": [list(p) for p in pairs]}, pairs[0][1], step
+        published = max((proxy_release_time(
+            GO_PROXY_INFO_URL.format(module=escape_module_path(m), version=v), ctx.fetch) for m, v in pairs),
+            key=model.parse_iso)
+        return {"target": f"{spec.id}: go.mod " + ", ".join(f"{m} v{required[m]} -> v{v}" for m, v in pairs),
+                "path": "go.mod", "params": {"modules": [list(p) for p in pairs]},
+                "step": "go get " + " ".join(f"{m}@v{v}" for m, v in pairs) + " && go mod tidy",
+                "fixed_version": modules[bumped[0].package.name], "published": published,
+                "findings": findings, "skipped": skipped}
 
     def _plan_pip_pin(self, group, spec, ctx, read):
         text = read("requirements.txt")
@@ -685,26 +845,41 @@ class RepoPrPlaybook:
             return Refusal(self.id, spec.id, f"cannot read origin/main:requirements.txt in {spec.repo}")
         pins: dict[str, str] = {}
         current: dict[str, str] = {}
+        bumped: list[Finding] = []
+        stale: list[tuple[Finding, str, str]] = []
+        skipped: list[str] = []
         for finding in group:
             name = finding.package.name
             have = _pip_pin(text, name)
             if have is None:
-                return Refusal(self.id, spec.id, f"{name} is not pinned with == in {spec.repo}/requirements.txt")
+                skipped.append(f"{name} is not pinned with == in {spec.repo}/requirements.txt")
+                continue
             fixed = _smallest_fixed_above(finding.fixed_versions, finding.package.version)
             if fixed is None:
-                return Refusal(self.id, spec.id,
-                               f"{name}: no fixed version above {finding.package.version} "
+                skipped.append(f"{name}: no fixed version above {finding.package.version} "
                                f"(fixed: {', '.join(finding.fixed_versions)})")
+                continue
             if not _vlt(have, fixed):
-                return Refusal(self.id, spec.id,
-                               f"{spec.repo}/requirements.txt already pins {name}=={have} (fix {fixed}); "
-                               "the deployed venv is stale and needs a release")
+                stale.append((finding, f"{name}=={have}", fixed))
+                continue
             pins[name] = _max_version(pins.get(name), fixed)
             current[name] = have
+            bumped.append(finding)
+        if not bumped and not stale:
+            return Refusal(self.id, spec.id, skipped[0])
+        covered = {id(f) for f in bumped} | {id(f) for f, _, _ in stale}
+        findings = [f for f in group if id(f) in covered]
+        if not bumped:
+            return {"deploy_only": True, "findings": findings, "skipped": skipped,
+                    "fixed_version": stale[0][2],
+                    "stale": "requirements.txt already pins " + ", ".join(d for _, d, _ in stale)}
         pairs = sorted(pins.items())
-        target = f"{spec.id}: requirements.txt " + ", ".join(f"{n} {current[n]} -> {v}" for n, v in pairs)
-        step = "pin " + ", ".join(f"{n}=={v}" for n, v in pairs) + " in requirements.txt"
-        return target, "requirements.txt", {"pins": [list(p) for p in pairs]}, pairs[0][1], step
+        # No release date: PyPI fixes are exempt from the age rule (pip-pin is gated by CI
+        # or the repo's own checks plus the release script's verify).
+        return {"target": f"{spec.id}: requirements.txt " + ", ".join(f"{n} {current[n]} -> {v}" for n, v in pairs),
+                "path": "requirements.txt", "params": {"pins": [list(p) for p in pairs]},
+                "step": "pin " + ", ".join(f"{n}=={v}" for n, v in pairs) + " in requirements.txt",
+                "fixed_version": pins[bumped[0].package.name], "findings": findings, "skipped": skipped}
 
     # --- apply -----------------------------------------------------------
 
@@ -720,6 +895,15 @@ class RepoPrPlaybook:
             _log(f"{spec.id}: {detail}")
             return Outcome("failed", detail[:500], verify=False, state=dict(untouched))
 
+        if st.get("deploy_only"):
+            return self._start_deploy_only(st, spec, gh, ctx)
+        existing, err = self._open_watch_pr(gh, ctx)
+        if err:
+            return Outcome("refused", err[:500], verify=False, state=dict(untouched))
+        if existing:
+            return Outcome("refused", f"open security-watch PR #{existing.get('number')} {existing.get('url')} "
+                                      f"already exists on {gh}; merge or close it first",
+                           verify=False, state={**untouched, "alert": True})
         result = ctx.run(["git", "-C", str(repo), "fetch", "origin"], timeout=120)
         if result.returncode != 0:
             return fail(f"git fetch origin failed in {_tilde(repo)}: {_tail(result)}")
@@ -735,17 +919,22 @@ class RepoPrPlaybook:
             status = ctx.run(["git", "-C", str(tmp), "status", "--porcelain"], timeout=60)
             if status.returncode != 0 or not (status.stdout or "").strip():
                 return fail(f"{edit} edit produced no change on origin/main")
-            cves = list(st.get("cves") or [])
-            title = f"security: {edit} for {', '.join(cves) or st.get('group') or plan.target}"
+            workflows = tmp / ".github" / "workflows"
+            has_ci = workflows.is_dir() and any(workflows.glob("*.y*ml"))
+            if not has_ci:
+                error = self._pre_push_checks(tmp, ctx)
+                if error:
+                    return fail(f"{spec.repo} has no CI and its checks fail on the edited tree "
+                                f"(nothing pushed): {error}")
+            title = pr_title(edit, len(plan.finding_keys), st.get("lead") or st.get("group") or plan.target)
             branch = f"secwatch/{spec.id}-{_group_slug(st.get('group') or 'finding')}-{ctx.now.strftime('%Y%m%d%H%M')}"
             for argv in (["git", "-C", str(tmp), "add", "--", *files],
-                         ["git", "-C", str(tmp), "commit", "-m", title, "-m", plan.target]):
+                         ["git", "-C", str(tmp), "commit", "-m", title, "-m", plan.target,
+                          "-m", _commit_findings(plan, st)]):
                 result = ctx.run(argv, timeout=120)
                 if result.returncode != 0:
                     return fail(f"{argv[3]} failed: {_tail(result)}")
             head = (ctx.run(["git", "-C", str(tmp), "rev-parse", "HEAD"], timeout=30).stdout or "").strip()
-            workflows = tmp / ".github" / "workflows"
-            has_ci = workflows.is_dir() and any(workflows.glob("*.y*ml"))
             result = ctx.run(["git", "-C", str(tmp), "push", "origin", f"HEAD:refs/heads/{branch}"], timeout=180)
             if result.returncode != 0:
                 return fail(f"git push origin {branch} failed: {_tail(result)}")
@@ -774,6 +963,47 @@ class RepoPrPlaybook:
                    "url": url, "edit": edit, "head": head, "has_ci": has_ci, "title": title,
                    "created_at": model.iso(ctx.now), "production_touched": False},
         )
+
+    def _start_deploy_only(self, st: dict, spec: ComponentSpec, gh: str, ctx) -> Outcome:
+        """origin/main already fixes the findings: no PR, the action starts at the deploy stage."""
+        sha = str(st.get("main_sha") or "")
+        state = {"stage": "deploy", "deploy_only": True, "repo": spec.repo, "github": gh,
+                 "edit": st.get("edit"), "merge_sha": sha, "has_ci": bool(st.get("has_ci", True)),
+                 "created_at": model.iso(ctx.now), "merged_at": model.iso(ctx.now),
+                 "production_touched": False}
+        _log(f"{spec.id}: origin/main {sha[:7]} already contains the fix; deploy-only action")
+        return Outcome("pending", f"origin/main {sha[:7]} already contains the fix; deploying it next tick",
+                       undo=self._undo(state, spec), verify=False, state=state)
+
+    @staticmethod
+    def _open_watch_pr(gh: str, ctx) -> tuple[dict | None, str]:
+        """(an open security-watch PR on ``gh`` or None, error when the list failed)."""
+        result = ctx.run(["gh", "pr", "list", "--repo", gh, "--state", "open", "--limit", "100",
+                          "--json", "number,url,headRefName,labels"], timeout=60)
+        data = _json(result) if result.returncode == 0 else None
+        if not isinstance(data, list):
+            return None, f"cannot list open PRs on {gh}: {_tail(result, 200)}"
+        for pr in data:
+            if not isinstance(pr, dict):
+                continue
+            labels = {str(l.get("name", "")).lower() for l in pr.get("labels") or [] if isinstance(l, dict)}
+            if PR_LABEL in labels or str(pr.get("headRefName") or "").startswith("secwatch/"):
+                return pr, ""
+        return None, ""
+
+    def _pre_push_checks(self, tmp: Path, ctx) -> str:
+        """The repo's own checks on the edited worktree (repos without CI); '' when they pass."""
+        if (tmp / "verify.sh").is_file():
+            commands = [["bash", "verify.sh"]]
+        elif (tmp / "go.mod").is_file():
+            commands = [["go", "build", "./..."], ["go", "vet", "./..."], ["go", "test", "./..."]]
+        else:
+            return ""
+        for argv in commands:
+            result = self._script_run(argv, timeout=CHECK_TIMEOUT, cwd=str(tmp), env=_go_env())
+            if result.returncode != 0:
+                return f"{' '.join(argv)} exited {result.returncode}: {_tail(result, 200)}"
+        return ""
 
     def _apply_edit(self, st: dict, tmp: Path, ctx) -> tuple[list[str], str]:
         """Apply the planned edit inside the worktree: (changed files, error)."""
@@ -814,7 +1044,7 @@ class RepoPrPlaybook:
 
     def _pr_body(self, plan: Plan, ctx, spec: ComponentSpec) -> str:
         lines = [f"Opened by security-watch for `{spec.id}`.", "", f"**Target:** {plan.target}", "",
-                 "**Findings (issuer records):**"]
+                 f"**Findings (issuer records, {len(plan.finding_keys)}):**"]
         for key in plan.finding_keys:
             finding = (ctx.findings or {}).get(key)
             if finding is None:
@@ -823,10 +1053,15 @@ class RepoPrPlaybook:
             ids = ", ".join(finding.cves or finding.advisory_ids)
             lines.append(f"- {ids}: {finding.package.ident()} fixed in {', '.join(finding.fixed_versions)}"
                          f" ({finding.severity or 'unrated'}, {finding.urgency})")
+        not_addressed = list(plan.state.get("not_addressed") or [])
+        if not_addressed:
+            lines += ["", "**Not addressed by this PR (no deterministic fix yet):**",
+                      *[f"- {note}" for note in not_addressed]]
         lines += ["", "**Steps:**", *[f"{i}. {s}" for i, s in enumerate(plan.steps, 1)], "",
                   f"security-watch merges this PR once CI is green, then deploys it. Add the `{HOLD_LABEL}` "
                   "label to stop it; closing the PR cancels the action."]
-        return "\n".join(lines)
+        body = "\n".join(lines)
+        return body if len(body) <= PR_BODY_MAX else body[:PR_BODY_MAX - 40] + "\n\n(list truncated)"
 
     # --- advance ---------------------------------------------------------
 
@@ -843,12 +1078,22 @@ class RepoPrPlaybook:
         if stage == "merging":
             return self._advance_merging(state, spec, ctx)
         if stage == "deploy":
-            return self._advance_deploy(state, spec, ctx)
+            return self._advance_deploy(action, state, spec, ctx)
+        if stage == "deploying":
+            # Journaled right before a release/deploy script whose outcome never landed: the
+            # tick died (unit timeout, OOM) or another process is still running it.  Never
+            # re-run it blindly; act fails the row with the breaker once it is stale.
+            return Outcome("refused", f"deploy started {state.get('deploying_at') or '?'} journaled no outcome "
+                                      "(interrupted or still running); not re-running it",
+                           undo=self._undo(state, spec), verify=False, state=state)
         return Outcome("failed", f"unknown repo-pr stage {stage!r}", verify=False, state=state)
 
     def _undo(self, state: dict, spec: ComponentSpec) -> str:
         repo = _tilde(_repo_dir(spec))
-        if state.get("merge_sha") or state.get("stage") == "deploy":
+        if state.get("deploy_only"):
+            return (f"redeploy the previously deployed release of {spec.id} ({spec.get('deploy', '')}); "
+                    "origin/main was not changed")
+        if state.get("merge_sha") or state.get("stage") in ("deploy", "deploying"):
             sha = state.get("merge_sha") or "<merge sha>"
             return (f"git -C {repo} revert --no-edit {sha} && git -C {repo} push origin main, "
                     f"then redeploy ({spec.get('deploy', '')})")
@@ -857,9 +1102,34 @@ class RepoPrPlaybook:
     def _wait(self, state: dict, since_key: str, detail: str, spec: ComponentSpec, ctx) -> Outcome:
         since = model.parse_iso(state.get(since_key)) or model.parse_iso(state.get("created_at"))
         if since is not None and ctx.now - since >= WAIT_LIMIT:
-            return Outcome("failed", f"{detail}; gave up after {int(WAIT_LIMIT.total_seconds() // 3600)} h",
-                           undo=self._undo(state, spec), verify=False, state=state)
+            detail = f"{detail}; gave up after {int(WAIT_LIMIT.total_seconds() // 3600)} h"
+            if state.get("stage") in ("ci", "merging"):
+                detail += self._close_pr(state, ctx, detail)
+                return Outcome("failed", detail[:500], undo="", verify=False, state=state)
+            return Outcome("failed", detail[:500], undo=self._undo(state, spec), verify=False, state=state)
         return Outcome("pending", detail, undo=self._undo(state, spec), verify=False, state=state)
+
+    @staticmethod
+    def _close_pr(state: dict, ctx, reason: str, *, delete_branch: bool = True) -> str:
+        """Close a PR the action gives up on (pre-merge); returns a detail suffix."""
+        argv = ["gh", "pr", "close", str(state.get("pr")), "--repo", str(state.get("github")),
+                "--comment", f"security-watch stopped: {reason}"[:1000]]
+        if delete_branch:
+            argv.append("--delete-branch")
+        result = ctx.run(argv, timeout=60)
+        if result.returncode != 0:
+            return f"; closing PR #{state.get('pr')} failed: {_tail(result, 150)}"
+        return f"; closed PR #{state.get('pr')}" + (" and deleted its branch" if delete_branch else "")
+
+    @staticmethod
+    def _delete_branch(state: dict, ctx) -> str:
+        """Delete the secwatch branch of a PR someone else closed; returns a detail suffix."""
+        branch = str(state.get("branch") or "")
+        if not branch.startswith("secwatch/"):
+            return ""
+        result = ctx.run(["gh", "api", "-X", "DELETE", f"repos/{state.get('github')}/git/refs/heads/{branch}"],
+                         timeout=60)
+        return f"; deleted branch {branch}" if result.returncode == 0 else ""
 
     def _pr_view(self, state: dict, ctx) -> tuple[dict | None, str]:
         result = ctx.run(["gh", "pr", "view", str(state.get("pr")), "--repo", str(state.get("github")),
@@ -874,6 +1144,14 @@ class RepoPrPlaybook:
         return any(isinstance(l, dict) and str(l.get("name", "")).lower() == HOLD_LABEL
                    for l in data.get("labels") or [])
 
+    def _held_outcome(self, state: dict, spec: ComponentSpec) -> Outcome:
+        return Outcome("refused", f"held by Carter: {state.get('url') or 'PR #' + str(state.get('pr'))}",
+                       undo=self._undo(state, spec), verify=False, state={**state, "alert": True})
+
+    def _closed(self, state: dict, ctx) -> Outcome:
+        detail = f"PR #{state['pr']} was closed without merge (action cancelled)" + self._delete_branch(state, ctx)
+        return Outcome("failed", detail, undo="", verify=False, state=state)
+
     def _merged(self, state: dict, data: dict, ctx) -> None:
         commit = data.get("mergeCommit") or {}
         state.update(stage="deploy", merge_sha=commit.get("oid") if isinstance(commit, dict) else "",
@@ -883,38 +1161,41 @@ class RepoPrPlaybook:
         data, err = self._pr_view(state, ctx)
         if data is None:
             return self._wait(state, "created_at", err, spec, ctx)
-        if self._held(data):
-            return Outcome("refused", f"PR #{state['pr']} held by Carter (label '{HOLD_LABEL}')",
-                           undo=self._undo(state, spec), verify=False, state=state)
         pr_state = data.get("state")
         if pr_state == "MERGED":
             self._merged(state, data, ctx)
             return Outcome("pending", f"PR #{state['pr']} was merged; deploy next tick",
                            undo=self._undo(state, spec), verify=False, state=state)
         if pr_state == "CLOSED":
-            return Outcome("failed", f"PR #{state['pr']} was closed without merge",
-                           undo="", verify=False, state=state)
+            return self._closed(state, ctx)
+        if self._held(data):
+            return self._held_outcome(state, spec)
         head = state.get("head")
         if head and data.get("headRefOid") and data["headRefOid"] != head:
-            return Outcome("failed", f"PR #{state['pr']} head changed since security-watch opened it "
-                                     f"({head[:7]} -> {data['headRefOid'][:7]}); not merging",
-                           undo=self._undo(state, spec), verify=False, state=state)
+            detail = (f"PR #{state['pr']} head changed since security-watch opened it "
+                      f"({head[:7]} -> {data['headRefOid'][:7]}); not merging")
+            # Someone pushed to the branch: close the PR but keep their commits on it.
+            detail += self._close_pr(state, ctx, detail, delete_branch=False)
+            return Outcome("failed", detail, undo="", verify=False, state=state)
         verdict, detail = _checks(data.get("statusCheckRollup"), bool(state.get("has_ci", True)))
         if verdict == "failed":
-            return Outcome("failed", f"PR #{state['pr']} checks failed: {detail}",
-                           undo=self._undo(state, spec), verify=False, state=state)
+            detail = f"PR #{state['pr']} checks failed: {detail}"
+            detail += self._close_pr(state, ctx, detail)
+            return Outcome("failed", detail[:500], undo="", verify=False, state=state)
         if verdict == "pending":
             return self._wait(state, "created_at", f"PR #{state['pr']} checks pending: {detail}", spec, ctx)
         mergeable = data.get("mergeable")
         if mergeable == "CONFLICTING":
-            return Outcome("failed", f"PR #{state['pr']} conflicts with main",
-                           undo=self._undo(state, spec), verify=False, state=state)
+            detail = f"PR #{state['pr']} conflicts with main"
+            detail += self._close_pr(state, ctx, detail)
+            return Outcome("failed", detail, undo="", verify=False, state=state)
         if mergeable != "MERGEABLE":
             return self._wait(state, "created_at", f"PR #{state['pr']} mergeable={mergeable}", spec, ctx)
         method, err = self._merge_method(state, ctx)
         if method is None:
             return self._wait(state, "created_at", err, spec, ctx)
-        argv = ["gh", "pr", "merge", str(state["pr"]), "--repo", state["github"], f"--{method}"]
+        argv = ["gh", "pr", "merge", str(state["pr"]), "--repo", state["github"], f"--{method}",
+                "--delete-branch"]
         if head:
             argv += ["--match-head-commit", head]
         if spec.repo in self._auto_merge():
@@ -949,40 +1230,50 @@ class RepoPrPlaybook:
             return Outcome("pending", f"PR #{state['pr']} merged; deploy next tick",
                            undo=self._undo(state, spec), verify=False, state=state)
         if pr_state == "CLOSED":
-            return Outcome("failed", f"PR #{state['pr']} was closed without merge",
-                           undo="", verify=False, state=state)
+            return self._closed(state, ctx)
         if self._held(data):
-            return Outcome("refused", f"PR #{state['pr']} held by Carter (label '{HOLD_LABEL}')",
-                           undo=self._undo(state, spec), verify=False, state=state)
+            return self._held_outcome(state, spec)
         return self._wait(state, "merge_requested_at", f"PR #{state['pr']} not merged yet", spec, ctx)
 
-    def _advance_deploy(self, state: dict, spec: ComponentSpec, ctx) -> Outcome:
+    def _advance_deploy(self, action: dict, state: dict, spec: ComponentSpec, ctx) -> Outcome:
         holder = f"security-watch:repo-pr:{spec.id}"
         try:
             with ctx.lock(spec.lock, timeout=ctx.policy.lock_timeout_seconds, holder=holder):
-                return self._deploy(state, spec, ctx)
+                return self._deploy(action, state, spec, ctx)
         except LockTimeout as exc:
             return self._wait(state, "merged_at", f"deploy lock {spec.lock} busy: {exc}", spec, ctx)
 
-    def _deploy(self, state: dict, spec: ComponentSpec, ctx) -> Outcome:
+    def _deploy(self, action: dict, state: dict, spec: ComponentSpec, ctx) -> Outcome:
         kind, _, arg = str(spec.get("deploy", "")).partition(":")
         if kind == "steward-app" and arg:
-            return self._deploy_app(arg, state, spec, ctx)
+            return self._deploy_app(action, arg, state, spec, ctx)
         if kind == "release" and arg:
-            return self._deploy_release(arg, state, spec, ctx)
+            return self._deploy_release(action, arg, state, spec, ctx)
         return Outcome("failed", f"unsupported deploy {spec.get('deploy')!r} for {spec.id}",
                        undo=self._undo(state, spec), verify=False, state=state)
 
-    def _deploy_app(self, service: str, state: dict, spec: ComponentSpec, ctx) -> Outcome:
+    @staticmethod
+    def _journal_deploying(action: dict, state: dict, detail: str, ctx) -> None:
+        """Contract 8: production counts as touched from here until an outcome is journaled."""
+        ctx.store.update_action(action["id"], status="pending", detail=detail[:500], now=ctx.now,
+                                state={**state, "stage": "deploying", "deploying_at": model.iso(ctx.now),
+                                       "production_touched": True})
+
+    def _deploy_app(self, action: dict, service: str, state: dict, spec: ComponentSpec, ctx) -> Outcome:
         registry_spec = self._registry().get(service)
         if registry_spec is None:
             return Outcome("failed", f"{service} is not in steward DEPLOY_REGISTRY",
                            undo=self._undo(state, spec), verify=False, state=state)
+        self._journal_deploying(action, state, f"deploying {service} via steward app_deploy", ctx)
         row = self._steward_app_deploy()(service, registry_spec, dry_run=False, sleep=self._sleep) or {}
         status = row.get("status")
         reason = str(row.get("reason") or row.get("error") or "")
         if status == "skipped":
             if reason == "current":
+                if state.get("deploy_only"):
+                    return Outcome("failed", f"{service} production is already at origin/main yet the findings "
+                                             "are open; a redeploy cannot clear them (rebuild it manually)",
+                                   undo="", verify=False, state=state)
                 return Outcome("done", f"{service} production already at origin/main (contains PR #{state.get('pr')})",
                                undo=self._undo(state, spec), verify=True, state=state)
             return self._wait(state, "merged_at", f"steward app_deploy {service} skipped: {reason}", spec, ctx)
@@ -1001,7 +1292,19 @@ class RepoPrPlaybook:
         return Outcome("failed", f"steward app_deploy {service} {status or 'returned no status'}: {reason}"[:500],
                        undo=undo, verify=False, state=state)
 
-    def _deploy_release(self, script: str, state: dict, spec: ComponentSpec, ctx) -> Outcome:
+    def _commit_ci(self, github: str, sha: str, ctx) -> tuple[bool | None, str]:
+        """steward ``_ci_green(allow_pending=True)`` for one commit: True green, None not
+        finished / not readable yet, False red."""
+        payloads = []
+        for kind in ("check-runs", "status"):
+            result = ctx.run(["gh", "api", f"repos/{github}/commits/{sha}/{kind}?per_page=100"], timeout=60)
+            data = _json(result) if result.returncode == 0 else None
+            if not isinstance(data, dict):
+                return None, f"{kind} lookup failed: {_tail(result, 150)}"
+            payloads.append(data)
+        return commit_ci_verdict(*payloads)
+
+    def _deploy_release(self, action: dict, script: str, state: dict, spec: ComponentSpec, ctx) -> Outcome:
         repo = _repo_dir(spec)
         git = ["git", "-C", str(repo)]
         branch = ctx.run([*git, "symbolic-ref", "--short", "HEAD"], timeout=30)
@@ -1016,11 +1319,44 @@ class RepoPrPlaybook:
         sha = state.get("merge_sha")
         if sha and ctx.run([*git, "merge-base", "--is-ancestor", sha, "HEAD"], timeout=30).returncode != 0:
             return self._wait(state, "merged_at", f"{_tilde(repo)} main does not contain {sha[:7]} yet", spec, ctx)
-        state["production_touched"] = True
-        _log(f"{spec.id}: running bash {script} in {_tilde(repo)}")
-        result = ctx.run(["bash", script], timeout=RELEASE_TIMEOUT, cwd=str(repo), env=_go_env())
-        healthy, detail = self._health(spec, ctx)
+        rev = ctx.run([*git, "rev-parse", "HEAD"], timeout=30)
+        head = (rev.stdout or "").strip()
+        if rev.returncode != 0 or not head:
+            return self._wait(state, "merged_at", f"cannot read HEAD in {_tilde(repo)}: {_tail(rev, 200)}",
+                              spec, ctx)
+        if state.get("has_ci", True):
+            # A rebase/squash merge is a new commit: release scripts gate on its own CI run
+            # (homelab-dashboard's ci_gate dies while it runs), so wait for main's CI first.
+            green, ci = self._commit_ci(state.get("github") or _github(spec), head, ctx)
+            if green is None:
+                return self._wait(state, "merged_at", f"waiting for CI on {head[:7]} before bash {script}: {ci}",
+                                  spec, ctx)
+            if not green:
+                return self._wait(state, "merged_at", f"CI on {head[:7]} is red; not running bash {script}: {ci}",
+                                  spec, ctx)
+        # The component's own scheduled job (homelab-backup's 03:00 UTC run) must not overlap a
+        # release: same window as release-rebuild.  Stays pending (no 24 h give-up), untouched.
+        from security_watch.playbooks_ops import _quiet_reason
+        quiet = _quiet_reason(ctx, spec)
+        if quiet:
+            return Outcome("pending", f"not running bash {script}: {quiet}",
+                           undo=self._undo(state, spec), verify=False, state=state)
+        marker = _TRANSACTION_MARKERS.get((spec.repo, script))
+        before = inventory.fingerprint(spec, run=ctx.run) if marker else ""
+        state["deployed_head"] = head
+        self._journal_deploying(action, state, f"deploying {head[:7]}: bash {script} in {_tilde(repo)}", ctx)
+        _log(f"{spec.id}: running bash {script} in {_tilde(repo)} at {head[:7]}")
+        result = self._script_run(["bash", script], timeout=RELEASE_TIMEOUT, cwd=str(repo), env=_go_env())
         undo = self._undo(state, spec)
+        if (result.returncode not in (0, 124) and marker and before
+                and not re.search(marker, f"{result.stdout or ''}\n{result.stderr or ''}", re.M)
+                and inventory.fingerprint(spec, run=ctx.run) == before):
+            state["production_touched"] = False
+            return Outcome("failed", f"bash {script} exited {result.returncode} in its preconditions, before "
+                                     f"changing production: {_tail(result, 200)}",
+                           undo=undo, verify=False, state=state)
+        state["production_touched"] = True
+        healthy, detail = self._health(spec, ctx)
         if result.returncode == 0 and healthy:
             return Outcome("done", f"bash {script} ok; {detail}", undo=undo, verify=True, state=state)
         if result.returncode == 0:

@@ -1,7 +1,15 @@
 name: freshrss
 services:
   freshrss:
-    image: freshrss/freshrss:1.30.4@sha256:af44385229541bee24aa9148d0ff8f3b40e095373c63a2c0f74e09a27d3c59df
+    # Local derived build (Dockerfile): the pinned upstream image below, which
+    # steward P1 bumps, plus a Debian security-update layer. SECURITY_REFRESH
+    # is set by up.sh; a new value rebuilds that layer.
+    build:
+      context: .
+      args:
+        FRESHRSS_BASE: freshrss/freshrss:1.30.4@sha256:af44385229541bee24aa9148d0ff8f3b40e095373c63a2c0f74e09a27d3c59df
+        SECURITY_REFRESH: ${SECURITY_REFRESH:-0}
+    image: freshrss-local:current
     container_name: freshrss
     restart: unless-stopped
     environment:

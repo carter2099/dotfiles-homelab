@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -50,6 +52,8 @@ _APK_LINE = re.compile(r"^(?P<name>\S+)-(?P<version>\d[^-\s]*-r\d+)\s+\S+\s+(?:\
 _GEM_SPEC = re.compile(r"^    (?P<name>[^\s(]+) \((?P<version>[^)]+)\)$")
 _GEM_PLATFORM = re.compile(r"-[A-Za-z].*$")
 _BINNMU = re.compile(r"\+b\d+$")
+_GIT_SHA = re.compile(r"\b[0-9a-f]{40}\b")
+REVISION_CMD_TIMEOUT = 30
 
 
 def _log(message: str) -> None:
@@ -71,6 +75,45 @@ def default_run(argv: list[str], *, timeout: float = 120, input: str | None = No
         return subprocess.CompletedProcess(list(argv), 124, out, f"timeout after {timeout}s")
     except (OSError, ValueError) as exc:
         return subprocess.CompletedProcess(list(argv), 127, "", f"{type(exc).__name__}: {exc}")
+
+
+def _killpg(pid: int, sig: int) -> None:
+    try:
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def run_group(argv: list[str], *, timeout: float = 120, input: str | None = None,
+              env: dict | None = None, cwd: str | None = None,
+              kill_after: float = 60) -> subprocess.CompletedProcess:
+    """``default_run`` for long release/deploy/apt commands: the child leads its own
+    session (process group) and on timeout the WHOLE group gets SIGTERM (scripts' EXIT
+    traps roll back), then SIGKILL after ``kill_after`` s.  Never raises (timeout -> 124,
+    exec failure -> 127)."""
+    argv = list(argv)
+    try:
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
+            env=env, cwd=cwd, start_new_session=True)
+    except (OSError, ValueError) as exc:
+        return subprocess.CompletedProcess(argv, 127, "", f"{type(exc).__name__}: {exc}")
+    try:
+        out, err = proc.communicate(input, timeout=timeout)
+        return subprocess.CompletedProcess(argv, proc.returncode, out or "", err or "")
+    except subprocess.TimeoutExpired:
+        pass
+    _killpg(proc.pid, signal.SIGTERM)
+    try:
+        out, err = proc.communicate(timeout=kill_after)
+    except subprocess.TimeoutExpired:
+        _killpg(proc.pid, signal.SIGKILL)
+        out, err = proc.communicate()
+    # Members that ignored TERM but closed their pipes must not outlive the run either.
+    _killpg(proc.pid, signal.SIGKILL)
+    note = f"timeout after {timeout}s (process group killed)"
+    return subprocess.CompletedProcess(argv, 124, out or "", f"{err or ''}\n{note}".strip())
 
 
 def _err(proc: subprocess.CompletedProcess) -> str:
@@ -297,7 +340,8 @@ def parse_go_version_m(text: str, location: str = "") -> tuple[list[Package], di
     go_version = go_stdlib_version(raw_go)
     if not go_version:
         raise ValueError(f"unrecognised Go version {raw_go[:40]!r}")
-    info: dict[str, Any] = {"go_version": go_version, "vcs_revision": "", "module": ""}
+    info: dict[str, Any] = {"go_version": go_version, "vcs_revision": "", "vcs_modified": False,
+                            "module": ""}
     deps: list[tuple[str, str]] = []
     for line in lines[1:]:
         cols = line.strip().split("\t")
@@ -314,6 +358,8 @@ def parse_go_version_m(text: str, location: str = "") -> tuple[list[Package], di
                 deps.append((cols[1], cols[2]))
         elif kind == "build" and len(cols) >= 2 and cols[1].startswith("vcs.revision="):
             info["vcs_revision"] = cols[1].split("=", 1)[1]
+        elif kind == "build" and len(cols) >= 2 and cols[1].startswith("vcs.modified="):
+            info["vcs_modified"] = cols[1].split("=", 1)[1].strip().lower() == "true"
     packages = [Package("Go", "stdlib", go_version, location=location)]
     seen: set[tuple[str, str]] = set()
     for module, version in deps:
@@ -485,7 +531,8 @@ def _go_binary_entry(local: Path, display_path: str, run: Run, location: str,
     except ValueError as exc:
         return [], None, f"go version -m {display_path}: {exc}"
     entry = {"path": display_path, "sha256": _sha256_file(local), "go_version": info["go_version"],
-             "vcs_revision": info["vcs_revision"], "module": info["module"]}
+             "vcs_revision": info["vcs_revision"], "vcs_modified": info["vcs_modified"],
+             "module": info["module"]}
     if extracted_from:
         entry["extracted_from"] = extracted_from
     return packages, entry, ""
@@ -594,12 +641,28 @@ def _collect_container(spec: ComponentSpec, run: Run, fetch, now: datetime) -> I
     return b.build()
 
 
+def _revision_from_cmd(spec: ComponentSpec, run: Run) -> tuple[str, str]:
+    """(40-hex revision, error) from the component's ``revision_cmd`` (binaries built with
+    -buildvcs=false report their source commit themselves); ('', '') without one."""
+    argv = _as_list(spec.get("revision_cmd"))
+    if not argv:
+        return "", ""
+    proc = run([str(config.expand(argv[0])), *argv[1:]], timeout=REVISION_CMD_TIMEOUT)
+    if proc.returncode != 0:
+        return "", f"revision_cmd {argv[0]} failed ({_err(proc)})"
+    match = _GIT_SHA.search(proc.stdout or "")
+    if not match:
+        return "", f"revision_cmd {argv[0]} printed no 40-hex commit"
+    return match.group(0), ""
+
+
 def _collect_go_binary(spec: ComponentSpec, run: Run, fetch, now: datetime) -> Inventory:
     b = _Builder(spec, now)
     binaries: list[dict] = []
     paths = _as_list(spec.get("binaries"))
     if not paths:
         return _unknown(spec, now, "no binaries configured")
+    revision: tuple[str, str] | None = None
     for raw in paths:
         path = config.expand(raw)
         if not path.is_file():
@@ -609,6 +672,17 @@ def _collect_go_binary(spec: ComponentSpec, run: Run, fetch, now: datetime) -> I
         if err:
             b.fail(err)
             continue
+        if not entry["vcs_revision"] and spec.get("revision_cmd"):
+            if revision is None:
+                revision = _revision_from_cmd(spec, run)
+            sha, why = revision
+            if sha:
+                entry["vcs_revision"] = sha
+                entry["revision_source"] = "revision_cmd"
+            else:
+                # Metadata only: the packages are still known; release-rebuild refuses
+                # an unknown revision on its own.
+                _log(f"{spec.id}: {why}")
         b.packages.extend(packages)
         binaries.append(entry)
     b.meta["binaries"] = binaries

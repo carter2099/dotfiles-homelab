@@ -979,12 +979,25 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     When news_publish._same_event fails only on its rare-headline-word gate, a
     candidate whose event terms all appear in the story and name a rare entity
     outside its own headline still counts, within the same date gap.
+    A story whose URL is a live blog or other multi-development page
+    (contracts.is_non_article_page) matches a candidate dated after it only by
+    shared URL key: wording shared with a continuing story's live page does not
+    make a later development the same event (11-07 World dropped the 11-06
+    newsroom bomb-threat wave against the 11-05 Guardian flight-threat live blog).
     """
     from news_publish import _same_event, _story_event_tokens
 
     story_key = coverage_key(story.get("url", ""))
     if story_key and story_key == coverage_key(item.get("url", "")):
         return True
+    story_date = (parse_date(str(story.get("date_confirmed") or "").strip())
+                  or parse_date(str(story.get("date_published") or "").strip())
+                  or parse_date(str(story.get("edition_date") or "")))
+    item_date = parse_date(str(item.get("date_published") or "").strip())
+    item_day = item_date.date() if item_date else issue_date - timedelta(days=1)
+    story_day = story_date.date() if story_date else item_day
+    if item_day > story_day and is_non_article_page(story.get("url", "")):
+        return False
     if not _shares_distinctive_figures(story, item):
         if not _same_event(story, item, frequency):
             if not _distinctive_event_terms_match(story, item, frequency):
@@ -1000,12 +1013,6 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
             shared = story_tokens & item_tokens
             if len(shared) / min(len(story_tokens), len(item_tokens)) < CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP:
                 return False
-    story_date = (parse_date(str(story.get("date_confirmed") or "").strip())
-                  or parse_date(str(story.get("date_published") or "").strip())
-                  or parse_date(str(story.get("edition_date") or "")))
-    item_date = parse_date(str(item.get("date_published") or "").strip())
-    item_day = item_date.date() if item_date else issue_date - timedelta(days=1)
-    story_day = story_date.date() if story_date else item_day
     return abs((item_day - story_day).days) <= CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS
 
 @runtime.track_phase_failure("rank")

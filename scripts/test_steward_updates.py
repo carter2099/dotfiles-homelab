@@ -144,9 +144,13 @@ class DelayedUpdateTests(unittest.TestCase):
     ]
 
     def _freshrss_home(self, tmp):
+        # ~/freshrss builds a derived image; the upstream pin is the FRESHRSS_BASE build arg.
         compose = Path(tmp) / "freshrss" / "docker-compose.yml"
         compose.parent.mkdir()
-        original = f"services:\n  freshrss:\n    image: {self.FRESHRSS_OLD}\n"
+        original = ("services:\n  freshrss:\n    build:\n      context: .\n      args:\n"
+                    f"        FRESHRSS_BASE: {self.FRESHRSS_OLD}\n"
+                    "        SECURITY_REFRESH: ${SECURITY_REFRESH:-0}\n"
+                    "    image: freshrss-local:current\n")
         compose.write_text(original)
         return compose, original
 
@@ -159,7 +163,13 @@ class DelayedUpdateTests(unittest.TestCase):
                 _wait_freshrss_healthy=Mock(return_value=True))
             self.assertEqual(result["status"], "bumped")
             self.assertEqual(result["latest_tag"], "1.30.1")
-            self.assertIn("freshrss/freshrss:1.30.1@sha256:" + "2" * 64, compose.read_text())
+            text = compose.read_text()
+            new_ref = "freshrss/freshrss:1.30.1@sha256:" + "2" * 64
+            self.assertIn(f"FRESHRSS_BASE: {new_ref}\n", text)
+            self.assertEqual(text.count("freshrss/freshrss:"), 1)
+            self.assertIn("    image: freshrss-local:current\n", text)
+            self.assertEqual(result["pre_image"], self.FRESHRSS_OLD)
+            self.assertEqual(result["post_image"], new_ref)
             self.assertEqual(run.call_args_list[-1].args[0], [str(compose.parent / "up.sh")])
             self.assertTrue(updates._p1_deploy_step_ok(result))
 

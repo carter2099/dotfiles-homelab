@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -395,8 +396,40 @@ class GoTests(HomeTestCase):
         idents = [(p.name, p.version) for p in packages]
         self.assertEqual(idents, [("stdlib", "1.27.3"), ("github.com/gorilla/websocket", "1.5.3"),
                                   ("golang.org/x/net", "0.47.0")])
-        self.assertEqual(info, {"go_version": "1.27.3", "vcs_revision": "0123abc",
+        self.assertEqual(info, {"go_version": "1.27.3", "vcs_revision": "0123abc", "vcs_modified": False,
                                 "module": "github.com/carter2099/demo"})
+
+    def test_go_version_m_records_vcs_modified(self):
+        text = GO_VERSION_M.format(path="/x/demo") + "\tbuild\tvcs.modified=true\n"
+        _, info = inventory.parse_go_version_m(text, "/x/demo")
+        self.assertTrue(info["vcs_modified"])
+
+    def test_revision_cmd_fills_a_missing_vcs_revision(self):
+        binary = self.home / ".local/bin/demo"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\x7fELF demo")
+        sha = ("0123456789abcdef" * 3)[:40]
+        no_vcs = GO_VERSION_M.replace("\tbuild\tvcs.revision=0123abc\n", "\tbuild\tvcs.modified=true\n")
+        run = FakeRun({(self.go, "version", "-m"): lambda argv: proc(no_vcs.format(path=argv[-1])),
+                       (str(binary), "--version"): proc(f"{sha}\n")})
+        s = spec("demo", "go-binary", binaries=["~/.local/bin/demo"], revision_cmd=["~/.local/bin/demo", "--version"])
+        inv = inventory.collect(s, run=run, now=NOW)
+        self.assertEqual(inv.status, "ok", inv.reason)
+        [entry] = inv.meta["binaries"]
+        self.assertEqual(entry["vcs_revision"], sha)
+        self.assertEqual(entry["revision_source"], "revision_cmd")
+        self.assertTrue(entry["vcs_modified"])
+        self.assertIn([str(binary), "--version"], run.calls)
+
+    def test_revision_cmd_is_not_run_when_the_binary_has_vcs_info(self):
+        binary = self.home / ".local/bin/demo"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\x7fELF demo")
+        run = FakeRun({(self.go, "version", "-m"): go_version_m})
+        s = spec("demo", "go-binary", binaries=["~/.local/bin/demo"], revision_cmd=["~/.local/bin/demo", "--version"])
+        inv = inventory.collect(s, run=run, now=NOW)
+        self.assertEqual(inv.meta["binaries"][0]["vcs_revision"], "0123abc")
+        self.assertNotIn([str(binary), "--version"], run.calls)
 
     def test_go_stdlib_version_strips_prefix_and_experiments(self):
         self.assertEqual(inventory.go_stdlib_version("go1.26.10"), "1.26.10")
@@ -506,6 +539,40 @@ class CollectTests(HomeTestCase):
         specs = [spec("a", "runtime", cmd=["/bin/a"]), spec("b", "runtime", cmd=["/bin/b"])]
         invs = inventory.collect_all(specs, run=FakeRun({}), fetch=fetch_rig("offline"), now=NOW, only={"b"})
         self.assertEqual([i.component_id for i in invs], ["b"])
+
+
+def _alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+
+class RunGroupTests(unittest.TestCase):
+    def test_returns_output_and_exit_code(self):
+        result = inventory.run_group(["sh", "-c", "echo out; echo err >&2; exit 3"], timeout=5)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (3, "out\n", "err\n"))
+
+    def test_timeout_kills_the_whole_process_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            started = time.monotonic()
+            result = inventory.run_group(
+                ["sh", "-c", "sleep 30 & echo $! > child.pid; echo started; wait"],
+                timeout=0.5, kill_after=1, cwd=tmp)
+            elapsed = time.monotonic() - started
+            child = int(Path(tmp, "child.pid").read_text())
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("started", result.stdout)
+        self.assertIn("process group killed", result.stderr)
+        self.assertLess(elapsed, 3)
+        deadline = time.monotonic() + 1
+        while _alive(child) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(_alive(child), "grandchild sleep survived the timeout")
+
+    def test_exec_failure_is_127(self):
+        self.assertEqual(inventory.run_group(["/nonexistent/binary"], timeout=5).returncode, 127)
 
 
 if __name__ == "__main__":

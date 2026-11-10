@@ -838,6 +838,50 @@ def test_cross_day_wording_dedup_keeps_new_events_in_continuing_topics() -> None
         check("headline/event wording" in rejected["rejection_reason"], rejected)
 
 
+def test_cross_day_wording_dedup_keeps_later_event_matched_to_live_blog() -> None:
+    """A live blog's wording cannot reject a later development of its story.
+
+    Regression for 2026-11-07 World: the 11-06 hoax bomb-threat wave against
+    newsrooms in Ireland and Bulgaria was dropped by wording against the 11-05
+    flight bomb-threat story published from a Guardian live blog.
+    """
+    from news_publish import _frequency_of
+
+    live = "https://www.theguardian.com/world/live/2026/nov/05/europe-bomb-threats-flights-live"
+    flights = {
+        "title": "Hoax bomb threats divert flights across Europe after emailed claim",
+        "event": "Hoax bomb threats emailed to European airports divert flights, with a claim "
+                 "of responsibility",
+        "summary": "Hoax bomb threats sent by email diverted flights across Europe on Thursday.",
+        "url": live, "editorial_significance": "high", "date_published": "2026-11-05",
+    }
+    wave = {
+        "title": "New wave of hoax bomb threats emailed across Europe with claim of responsibility",
+        "event": "New wave of hoax bomb threats emailed to newsrooms across Europe, with a claim "
+                 "of responsibility",
+        "url": "https://wire.example/article/europe-newsroom-hoax-bomb-threats",
+        "editorial_significance": "high", "date_published": "2026-11-06",
+    }
+    frequency = _frequency_of([{"fresh": [flights, wave]}])
+    article = {**flights, "url": "https://wire.example/article/europe-flight-hoax-bomb-threats"}
+    check(research._cross_day_same_event(article, wave, frequency, date(2026, 11, 7)),
+          "fixture no longer exercises the cross-day wording match")
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        published = root / "news" / "publications" / "2026-11-06"
+        published.mkdir(parents=True)
+        (published / f"{catalog.TOPICS['world']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [flights],
+        }))
+        run_dir = root / catalog.TOPICS["world"]["category"] / "2026-11-07"
+        run_dir.mkdir(parents=True)
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(catalog.TOPICS["world"], [copy.deepcopy(wave)], run_dir)
+        check([item["url"] for item in queue] == [wave["url"]], f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        check(artifact["recent_coverage_rejected"] == [], artifact["recent_coverage_rejected"])
+
+
 def test_recent_coverage_blocks_redated_url_of_same_article() -> None:
     """A publisher re-dating a covered article's URL cannot re-run the story.
 
@@ -3728,6 +3772,7 @@ def main() -> None:
         test_cross_topic_blocks_earlier_sections_same_event_evidence,
         test_recent_publication_blocks_same_event_without_shared_keys,
         test_cross_day_wording_dedup_keeps_new_events_in_continuing_topics,
+        test_cross_day_wording_dedup_keeps_later_event_matched_to_live_blog,
         test_recent_coverage_blocks_redated_url_of_same_article,
         test_recent_publication_blocks_repeat_named_by_event_terms,
         test_recent_publication_blocks_event_terms_repeat_beyond_date_gap,

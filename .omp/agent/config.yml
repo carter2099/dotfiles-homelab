@@ -1,7 +1,7 @@
 symbolPreset: nerd
 theme:
   dark: dark-one
-setupVersion: 2
+setupVersion: 3
 modelRoles:
   default: anthropic/claude-opus-5-5:xhigh
   smol: anthropic/claude-sonnet-5-5:high
@@ -55,3 +55,5 @@ github:
   enabled: true
 codexResets:
   autoRedeem: "yes"
+update:
+  auto: true

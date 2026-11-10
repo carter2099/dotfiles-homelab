@@ -2,16 +2,26 @@
 # Decisions (Carter, 2026-11-03): rebuilds of infrastructure repos may run unattended;
 # security fixes may skip the update soak when two independent issuer sources name the
 # same fixed version; one shared deploy lock is taken by the steward and the watcher;
-# urgent alerts go by email only. Access-gate stopgaps and watcher-owned derived images
-# are NOT decided yet, so neither exists as a playbook.
+# urgent alerts go by email only. Access-gate stopgaps are NOT decided, so none exists.
+# 2026-11-09 (Carter: "fix all of these asap and then set up the auto agent"): FreshRSS
+# runs a local derived image refreshed by the steward-freshrss playbook, and the watcher
+# runs autonomously after supervised first runs of compose-digest (news), the FreshRSS
+# refresh, and repo-pr (blog, homelab-dashboard) all verified.
 
 # "shadow": detect, verify, analyze and propose; never mutate anything.
-# "active": also run the playbooks in components.toml.  Promote only after the
-# nightly report shows the shadow exit criteria met.
-mode = "shadow"
+# "active": also run the playbooks in components.toml (one new fix per tick, breaker on
+# the first failure).  `security_watch_runner.py fix` runs a supervised fix in either mode.
+mode = "active"
 recipient = "carter2099@pm.me"
 
-max_actions_per_day = 3
+# Limits (Carter, 2026-11-09, after six days of data: 0-20 new fixable findings and 1-4
+# components a day).  The cap counts every autonomous fix, but groups with an urgent
+# finding (KEV, Zero Wire "Needs attention", reachable high/critical) skip it, so a
+# KEV fix never waits a day behind routine ones.  The component cooldown starts only after
+# an unsuccessful attempt (refused, failed, rolled back, unverified).  After a verified fix
+# only that fix's own findings (cleared or leftover) wait the cooldown, so it never delays a
+# different finding and an unfixable leftover is not re-attempted on the next tick.
+max_actions_per_day = 6
 component_cooldown_hours = 12
 # A fix release younger than this needs two independent issuer sources that name the
 # exact fixed version before a playbook may install it (this also overrides the

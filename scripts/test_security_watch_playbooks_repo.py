@@ -145,7 +145,15 @@ def json_response(url, payload, status=200):
     return net.Response(status=status, headers={}, body=json.dumps(payload).encode(), url=url)
 
 
-def make_ctx(run, fetch=None, locks=None):
+class FakeStore:
+    def __init__(self):
+        self.updates = []
+
+    def update_action(self, action_id, **kwargs):
+        self.updates.append((action_id, kwargs))
+
+
+def make_ctx(run, fetch=None, locks=None, store=None):
     held = locks if locks is not None else []
 
     @contextlib.contextmanager
@@ -157,8 +165,8 @@ def make_ctx(run, fetch=None, locks=None):
         raise AssertionError(f"unexpected fetch {url}")
 
     return SimpleNamespace(
-        store=None, policy=SimpleNamespace(lock_timeout_seconds=5), specs=SPECS, now=NOW,
-        run=run, fetch=fetch or no_fetch, lock=lock, host_lock=None,
+        store=store if store is not None else FakeStore(), policy=SimpleNamespace(lock_timeout_seconds=5),
+        specs=SPECS, now=NOW, run=run, fetch=fetch or no_fetch, lock=lock, host_lock=None,
         steward_active=lambda: False, rescan=None, findings={})
 
 
@@ -286,6 +294,8 @@ class PlanTests(TempHomeTestCase):
 
         def fetch(url, **kw):
             fetched.append(url)
+            if url.endswith(".info"):
+                return json_response(url, {"Version": "v0.0.1-go1.26.11.linux-amd64", "Time": RELEASE_TIME})
             return json_response(url, {"name": "1.26.11-alpine", "digest": NEW_DIGEST})
         result = RepoPrPlaybook().plan(
             [finding("beatz", "Go", "stdlib", "1.26.10", ["1.26.11", "1.27.4"], group="GO-2026-4001")],
@@ -294,7 +304,25 @@ class PlanTests(TempHomeTestCase):
         self.assertEqual(result.target, "beatz: Dockerfile golang 1.26.10 -> 1.26.11")
         self.assertEqual(result.state["params"], {"version": "1.26.11", "digest": None})
         self.assertEqual(result.fixed_version, "1.26.11")
-        self.assertEqual(fetched, ["https://hub.docker.com/v2/repositories/library/golang/tags/1.26.11-alpine"])
+        self.assertEqual(result.release_published, "2026-10-20T10:00:00+00:00")
+        self.assertEqual(fetched, [
+            "https://hub.docker.com/v2/repositories/library/golang/tags/1.26.11-alpine",
+            "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go1.26.11.linux-amd64.info"])
+
+    def test_go_builder_without_a_release_date_is_a_transient_refusal(self):
+        def responder(argv, kw):
+            return (0, BEATZ_DOCKERFILE) if "show" in argv else None
+
+        def fetch(url, **kw):
+            if url.endswith(".info"):
+                raise net.FetchError(url, 503, "unavailable")
+            return json_response(url, {"name": "1.26.11-alpine", "digest": NEW_DIGEST})
+        result = RepoPrPlaybook().plan(
+            [finding("beatz", "Go", "stdlib", "1.26.10", ["1.26.11"], group="GO-2026-4001")],
+            SPECS["beatz"], make_ctx(FakeRun(responder), fetch))
+        self.assertIsInstance(result, Refusal)
+        self.assertFalse(result.alert)
+        self.assertIn("release date", result.reason)
 
 
 CRYPTO = "golang.org/x/crypto"
@@ -310,9 +338,14 @@ require (
 """
 
 
-def proxy_fetch(listing, fetched):
+RELEASE_TIME = "2026-10-20T10:00:00Z"
+
+
+def proxy_fetch(listing, fetched, info_time=RELEASE_TIME):
     def fetch(url, **kw):
         fetched.append(url)
+        if url.endswith(".info"):
+            return json_response(url, {"Version": url.rsplit("/", 1)[1][:-5], "Time": info_time})
         return net.Response(status=200, headers={}, body=listing.encode(), url=url)
     return fetch
 
@@ -347,7 +380,10 @@ class GoModuleVersionTests(TempHomeTestCase):
         self.assertEqual(result.state["params"], {"modules": [[CRYPTO, "0.59.0"]]})
         self.assertEqual(result.target, f"homelab-backup: go.mod {CRYPTO} v0.57.0 -> v0.59.0")
         self.assertNotIn(PSEUDO, " ".join(result.steps))
-        self.assertEqual(len(fetched), 1)
+        self.assertEqual(fetched, ["https://proxy.golang.org/golang.org/x/crypto/@v/list",
+                                   "https://proxy.golang.org/golang.org/x/crypto/@v/v0.59.0.info"])
+        self.assertEqual(result.release_published, "2026-10-20T10:00:00+00:00")
+        self.assertEqual(result.fixed_version, "0.59.0")
 
     def test_no_newer_tag_is_an_alert_refusal(self):
         result = self.plan_backup([PSEUDO], "v0.57.0\nv0.58.0\nv0.59.0-rc.1\n", [])
@@ -356,10 +392,12 @@ class GoModuleVersionTests(TempHomeTestCase):
         self.assertEqual(result.reason, f"fix for {CRYPTO} exists only at an untagged commit (v{PSEUDO}); "
                                         "waiting for a tagged release")
 
-    def test_tagged_fixed_version_skips_the_proxy(self):
-        result = self.plan_backup(["0.58.0"], None, [])
+    def test_tagged_fixed_version_skips_the_proxy_listing(self):
+        fetched = []
+        result = self.plan_backup(["0.58.0"], "", fetched)
         self.assertIsInstance(result, Plan)
         self.assertEqual(result.state["params"], {"modules": [[CRYPTO, "0.58.0"]]})
+        self.assertEqual(fetched, ["https://proxy.golang.org/golang.org/x/crypto/@v/v0.58.0.info"])
 
     def test_module_path_escapes_upper_case_letters(self):
         self.assertEqual(escape_module_path("github.com/BurntSushi/toml"), "github.com/!burnt!sushi/toml")
@@ -397,6 +435,8 @@ class ApplyTests(TempHomeTestCase):
                 return None
             if "rev-parse" in argv:
                 return 0, "headsha1\n"
+            if argv[:3] == ["gh", "pr", "list"]:
+                return 0, "[]"
             if argv[:3] == ["gh", "pr", "create"]:
                 return 0, "https://github.com/carter2099/blog/pull/42\n"
             return None
@@ -430,6 +470,208 @@ class ApplyTests(TempHomeTestCase):
         self.assertEqual(run.find("push"), [])
         self.assertEqual(run.find("gh", "pr", "create"), [])
 
+    def test_title_of_a_75_finding_group_stays_short_and_bodies_list_everything(self):
+        plan = blog_plan()
+        cves = ["CVE-2026-111497"] + [f"CVE-2026-{200000 + i}" for i in range(74)]
+        plan.finding_keys = [f"blog|{cve}" for cve in cves]
+        plan.state.update(cves=sorted(cves), lead="CVE-2026-111497")
+        run = FakeRun(self.responder(BLOG_DOCKERFILE))
+        outcome = RepoPrPlaybook().apply(plan, make_ctx(run))
+        self.assertEqual(outcome.status, "pending", outcome.detail)
+        create = run.find("gh", "pr", "create")[0][0]
+        title = create[create.index("--title") + 1]
+        self.assertEqual(title, "security: base-refresh (75 findings incl. CVE-2026-111497)")
+        self.assertLessEqual(len(title), 100)
+        self.assertEqual(outcome.state["title"], title)
+        commit = run.find("commit")[0][0]
+        self.assertEqual(commit[commit.index("-m") + 1], title)
+        self.assertTrue(all(cve in commit[-1] for cve in cves))
+        body = create[create.index("--body") + 1]
+        self.assertTrue(all(f"blog|{cve}" in body for cve in cves))
+
+    def test_pr_title_is_capped_at_100_characters(self):
+        self.assertEqual(len(playbooks_repo.pr_title("go-module", 3, "GHSA-" + "x" * 200)), 100)
+        self.assertEqual(playbooks_repo.pr_title("pip-pin", 1, "CVE-2026-1"), "security: pip-pin for CVE-2026-1")
+
+    def test_refuses_with_an_alert_while_a_security_watch_pr_is_open(self):
+        base = self.responder(BLOG_DOCKERFILE)
+
+        def respond(argv, kw):
+            if argv[:3] == ["gh", "pr", "list"]:
+                return 0, json.dumps([{"number": 41, "url": "https://github.com/carter2099/blog/pull/41",
+                                       "headRefName": "secwatch/blog-old", "labels": [{"name": "security-watch"}]}])
+            return base(argv, kw)
+        run = FakeRun(respond)
+        outcome = RepoPrPlaybook().apply(blog_plan(), make_ctx(run))
+        self.assertEqual(outcome.status, "refused")
+        self.assertTrue(outcome.state["alert"])
+        self.assertFalse(outcome.state["production_touched"])
+        self.assertIn("#41", outcome.detail)
+        self.assertEqual(run.find("worktree"), [])
+        self.assertEqual(run.find("gh", "pr", "create"), [])
+
+    def backup_responder(self, *, verify=False):
+        self.worktree = None
+
+        def respond(argv, kw):
+            if "worktree" in argv and "add" in argv:
+                self.worktree = Path(argv[6])
+                self.worktree.mkdir(exist_ok=True)
+                (self.worktree / "go.mod").write_text(BACKUP_GO_MOD)
+                if verify:
+                    (self.worktree / "verify.sh").write_text("#!/bin/sh\n")
+                return None
+            if "status" in argv:
+                return 0, " M go.mod\n"
+            if "rev-parse" in argv:
+                return 0, "headsha1\n"
+            if argv[:3] == ["gh", "pr", "list"]:
+                return 0, "[]"
+            if argv[:3] == ["gh", "pr", "create"]:
+                return 0, "https://github.com/carter2099/homelab-backup/pull/9\n"
+            return None
+        return respond
+
+    def test_ci_less_repo_fails_untouched_when_its_checks_fail_before_push(self):
+        scripts = FakeRun(lambda argv, kw: (1, "undefined: foo") if argv[:2] == ["go", "build"] else None)
+        run = FakeRun(self.backup_responder())
+        outcome = RepoPrPlaybook(script_run=scripts).apply(backup_plan(), make_ctx(run))
+        self.assertEqual(outcome.status, "failed")
+        self.assertFalse(outcome.state["production_touched"])
+        self.assertIn("no CI", outcome.detail)
+        self.assertEqual([argv for argv, _ in scripts.calls], [["go", "build", "./..."]])
+        self.assertEqual(scripts.calls[0][1]["cwd"], str(self.worktree))
+        self.assertEqual(run.find("push"), [])
+        self.assertEqual(run.find("gh", "pr", "create"), [])
+
+    def test_ci_less_repo_runs_its_verify_script_before_pushing(self):
+        order = []
+        scripts = FakeRun(lambda argv, kw: order.append("checks"))
+        base = self.backup_responder(verify=True)
+
+        def respond(argv, kw):
+            if "push" in argv:
+                order.append("push")
+            return base(argv, kw)
+        outcome = RepoPrPlaybook(script_run=scripts).apply(backup_plan(), make_ctx(FakeRun(respond)))
+        self.assertEqual(outcome.status, "pending", outcome.detail)
+        self.assertFalse(outcome.state["has_ci"])
+        self.assertEqual([argv for argv, _ in scripts.calls], [["bash", "verify.sh"]])
+        self.assertEqual(order, ["checks", "push"])
+
+
+def backup_plan():
+    net_mod = "golang.org/x/net"
+    return Plan(playbook="repo-pr", component_id="homelab-backup", finding_keys=["homelab-backup|GO-2026-5001"],
+                target=f"homelab-backup: go.mod {net_mod} v0.60.0 -> v0.62.0", lock_keys=["homelab-backup"],
+                steps=["edit"], undo="",
+                state={"edit": "go-module", "path": "go.mod", "params": {"modules": [[net_mod, "0.62.0"]]},
+                       "repo": "homelab-backup", "github": "carter2099/homelab-backup", "cves": [],
+                       "group": "GO-2026-5001", "lead": "GO-2026-5001", "packages": [net_mod]})
+
+
+MIXED_GO_MOD = f"""module github.com/carter2099/homelab-backup
+
+go 1.27.0
+
+require (
+\t{CRYPTO} v0.57.0
+\tgolang.org/x/net v0.60.0
+)
+"""
+
+
+class SubsetAndDeployOnlyPlanTests(TempHomeTestCase):
+    def test_mixed_go_module_group_plans_the_fixable_subset(self):
+        def responder(argv, kw):
+            return (0, MIXED_GO_MOD) if "show" in argv else None
+        fetched = []
+        group = [finding("homelab-backup", "Go", CRYPTO, "0.57.0", [PSEUDO], group="GO-2026-5000", urgency="urgent"),
+                 finding("homelab-backup", "Go", "golang.org/x/net", "0.60.0", ["0.62.0"], group="GO-2026-5001")]
+        ctx = make_ctx(FakeRun(responder), proxy_fetch("v0.57.0\nv0.58.0\n", fetched))
+        playbook = RepoPrPlaybook()
+        result = playbook.plan(group, SPECS["homelab-backup"], ctx)
+        self.assertIsInstance(result, Plan)
+        self.assertEqual(result.finding_keys, ["homelab-backup|GO-2026-5001"])
+        self.assertEqual(result.state["params"], {"modules": [["golang.org/x/net", "0.62.0"]]})
+        self.assertEqual(result.fixed_version, "0.62.0")
+        self.assertEqual(result.release_published, "2026-10-20T10:00:00+00:00")
+        self.assertIn("https://proxy.golang.org/golang.org/x/net/@v/v0.62.0.info", fetched)
+        [note] = result.state["not_addressed"]
+        self.assertTrue(note.startswith(f"fix for {CRYPTO} exists only at an untagged commit"))
+        body = playbook._pr_body(result, ctx, SPECS["homelab-backup"])
+        self.assertIn("Not addressed by this PR", body)
+        self.assertIn(CRYPTO, body)
+
+    def test_go_module_without_a_proxy_release_date_is_a_transient_refusal(self):
+        def responder(argv, kw):
+            return (0, MIXED_GO_MOD) if "show" in argv else None
+
+        def fetch(url, **kw):
+            raise net.FetchError(url, 502, "bad gateway")
+        result = RepoPrPlaybook().plan(
+            [finding("homelab-backup", "Go", "golang.org/x/net", "0.60.0", ["0.62.0"], group="GO-2026-5001")],
+            SPECS["homelab-backup"], make_ctx(FakeRun(responder), fetch))
+        self.assertIsInstance(result, Refusal)
+        self.assertFalse(result.alert)
+
+    def test_mixed_pip_group_plans_the_pinned_subset(self):
+        def responder(argv, kw):
+            return (0, PROMPT_GUARD_REQUIREMENTS) if "show" in argv else None
+        group = [finding("prompt-guard", "PyPI", "pip", "24.0", ["25.3"], group="CVE-2026-6000", urgency="urgent"),
+                 finding("prompt-guard", "PyPI", "transformers", "5.14.1", ["5.14.2"], group="CVE-2026-6001")]
+        result = RepoPrPlaybook().plan(group, SPECS["prompt-guard"], make_ctx(FakeRun(responder)))
+        self.assertIsInstance(result, Plan)
+        self.assertEqual(result.finding_keys, ["prompt-guard|CVE-2026-6001"])
+        self.assertEqual(result.state["params"], {"pins": [["transformers", "5.14.2"]]})
+        self.assertIsNone(result.release_published)
+        self.assertEqual(result.state["not_addressed"],
+                         ["pip is not pinned with == in prompt-guard/requirements.txt"])
+
+    def test_main_already_fixed_plans_a_deploy_only_action(self):
+        def responder(argv, kw):
+            if "show" in argv:
+                return 0, BACKUP_GO_MOD
+            if "rev-parse" in argv:
+                return 0, "mainsha1\n"
+            if "ls-tree" in argv:
+                return 0, ""
+            return None
+        result = RepoPrPlaybook().plan(
+            [finding("homelab-backup", "Go", CRYPTO, "0.56.0", ["0.57.0"], group="GO-2026-5002")],
+            SPECS["homelab-backup"], make_ctx(FakeRun(responder)))
+        self.assertIsInstance(result, Plan)
+        self.assertTrue(result.state["deploy_only"])
+        self.assertFalse(result.state["has_ci"])
+        self.assertEqual(result.finding_keys, ["homelab-backup|GO-2026-5002"])
+        self.assertTrue(result.target.startswith("homelab-backup: redeploy origin/main mainsha"))
+        self.assertIsNone(result.release_published)
+        run = FakeRun()
+        outcome = RepoPrPlaybook().apply(result, make_ctx(run))
+        self.assertEqual(outcome.status, "pending")
+        self.assertEqual(outcome.state["stage"], "deploy")
+        self.assertEqual(outcome.state["merge_sha"], "mainsha1")
+        self.assertFalse(outcome.state["has_ci"])
+        self.assertFalse(outcome.state["production_touched"])
+        self.assertEqual(run.calls, [])
+
+
+class CommitCiVerdictTests(unittest.TestCase):
+    def verdict(self, runs, statuses=()):
+        return playbooks_repo.commit_ci_verdict({"total_count": len(runs), "check_runs": list(runs)},
+                                                {"statuses": list(statuses)})[0]
+
+    def test_steward_ci_green_semantics(self):
+        self.assertTrue(self.verdict(GREEN_RUNS))
+        self.assertIsNone(self.verdict([]))
+        self.assertIsNone(self.verdict([{"name": "verify", "status": "queued", "conclusion": None}]))
+        self.assertIsNone(self.verdict([{"name": "verify", "status": "completed", "conclusion": "cancelled"}]))
+        self.assertFalse(self.verdict([{"name": "verify", "status": "completed", "conclusion": "failure"}]))
+        self.assertFalse(self.verdict(GREEN_RUNS, [{"context": "lint", "state": "error"}]))
+
+
+GREEN_RUNS = [{"name": "verify", "status": "completed", "conclusion": "success"}]
+
 
 def pr_json(*, state="OPEN", labels=(), rollup=None, mergeable="MERGEABLE", head="headsha1", merge_oid=None):
     return json.dumps({
@@ -460,8 +702,31 @@ class AdvanceTests(TempHomeTestCase):
             return self.deploy_row
         self.deploy_row = {"status": "ok", "reason": "CI-green origin/main", "revert": "git revert it"}
         self.registry = {"blog": {"repo": "~/dev/blog", "github": "carter2099/blog"}}
+        self.script_out = lambda argv, kw: (0, "deployed\n")
+        self.scripts = FakeRun(lambda argv, kw: self.script_out(argv, kw))
         self.playbook = RepoPrPlaybook(app_deploy=app_deploy, deploy_registry=self.registry,
-                                       auto_merge_repos={"blog"}, sleep=lambda seconds: None)
+                                       auto_merge_repos={"blog"}, sleep=lambda seconds: None,
+                                       script_run=self.scripts)
+
+    def release_run(self, check_runs=None, statuses=None, inspect=None, dirty=""):
+        """ctx.run for a release deploy: main checkout, HEAD deployhead1, CI payloads, docker inspect."""
+        runs = GREEN_RUNS if check_runs is None else check_runs
+
+        def respond(argv, kw):
+            if "symbolic-ref" in argv:
+                return 0, "main\n"
+            if argv[:2] == ["git", "-C"] and "status" in argv:
+                return 0, dirty
+            if argv[:2] == ["git", "-C"] and "rev-parse" in argv:
+                return 0, "deployhead1\n"
+            if argv[:2] == ["gh", "api"] and argv[2].endswith("/check-runs?per_page=100"):
+                return 0, json.dumps({"total_count": len(runs), "check_runs": runs})
+            if argv[:2] == ["gh", "api"] and argv[2].endswith("/status?per_page=100"):
+                return 0, json.dumps({"statuses": statuses or []})
+            if argv[:2] == ["docker", "inspect"] and inspect is not None:
+                return 0, inspect
+            return None
+        return FakeRun(respond)
 
     def gh(self, view, repo_view=None):
         def respond(argv, kw):
@@ -473,16 +738,39 @@ class AdvanceTests(TempHomeTestCase):
             return None
         return FakeRun(respond)
 
-    def test_hold_label_refuses(self):
+    def test_hold_label_refuses_with_an_alert(self):
         outcome = self.playbook.advance(action(), make_ctx(self.gh(pr_json(labels=["hold"]))))
         self.assertEqual(outcome.status, "refused")
-        self.assertIn("held by Carter", outcome.detail)
+        self.assertEqual(outcome.detail, "held by Carter: https://github.com/carter2099/x/pull/42")
+        self.assertTrue(outcome.state["alert"])
 
-    def test_failed_check_fails_without_touching_production(self):
+    def test_closed_pr_with_hold_label_is_cancelled_and_its_branch_deleted(self):
+        run = self.gh(pr_json(state="CLOSED", labels=["hold"]))
+        outcome = self.playbook.advance(action(), make_ctx(run))
+        self.assertEqual(outcome.status, "failed")
+        self.assertIn("closed without merge", outcome.detail)
+        self.assertFalse(outcome.state["production_touched"])
+        self.assertTrue(run.find("gh", "api", "-X", "DELETE", "repos/carter2099/blog/git/refs/heads/secwatch/x"))
+        self.assertEqual(run.find("gh", "pr", "close"), [])
+
+    def test_failed_check_closes_the_pr_and_deletes_the_branch(self):
         rollup = [{"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "FAILURE"}]
-        outcome = self.playbook.advance(action(), make_ctx(self.gh(pr_json(rollup=rollup))))
+        run = self.gh(pr_json(rollup=rollup))
+        outcome = self.playbook.advance(action(), make_ctx(run))
         self.assertEqual(outcome.status, "failed")
         self.assertFalse(outcome.state["production_touched"])
+        [(close, _)] = run.find("gh", "pr", "close", "42")
+        self.assertIn("--delete-branch", close)
+        self.assertIn("checks failed", close[close.index("--comment") + 1])
+        self.assertIn("closed PR #42 and deleted its branch", outcome.detail)
+        self.assertEqual(run.find("gh", "pr", "merge"), [])
+
+    def test_changed_head_closes_the_pr_but_keeps_the_branch(self):
+        run = self.gh(pr_json(head="otherhead"))
+        outcome = self.playbook.advance(action(), make_ctx(run))
+        self.assertEqual(outcome.status, "failed")
+        [(close, _)] = run.find("gh", "pr", "close", "42")
+        self.assertNotIn("--delete-branch", close)
 
     def test_pending_checks_wait_then_give_up_after_a_day(self):
         rollup = [{"__typename": "CheckRun", "name": "test", "status": "IN_PROGRESS", "conclusion": ""}]
@@ -490,7 +778,8 @@ class AdvanceTests(TempHomeTestCase):
         self.assertEqual(self.playbook.advance(action(), make_ctx(run)).status, "pending")
         late = action(created_at=model.iso(NOW - timedelta(hours=25)))
         self.assertEqual(self.playbook.advance(late, make_ctx(run)).status, "failed")
-        self.assertEqual(run.find("merge"), [])
+        self.assertEqual(run.find("gh", "pr", "merge"), [])
+        self.assertTrue(run.find("gh", "pr", "close", "42", "--delete-branch"))
 
     def test_green_pr_merges_with_the_allowed_method(self):
         run = self.gh(pr_json(), json.dumps(
@@ -502,6 +791,7 @@ class AdvanceTests(TempHomeTestCase):
         self.assertIn("--squash", merge)
         self.assertIn("--auto", merge)
         self.assertNotIn("--admin", merge)
+        self.assertIn("--delete-branch", merge)
         self.assertEqual(merge[merge.index("--match-head-commit") + 1], "headsha1")
 
     def test_merge_without_auto_outside_the_candidates(self):
@@ -522,22 +812,28 @@ class AdvanceTests(TempHomeTestCase):
 
     def test_deploy_runs_steward_app_deploy_under_the_lock(self):
         locks = []
+        store = FakeStore()
         fetch = lambda url, **kw: net.Response(status=200, headers={}, body=b"ok", url=url)
         outcome = self.playbook.advance(
             action(stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
-            make_ctx(FakeRun(), fetch, locks))
+            make_ctx(FakeRun(), fetch, locks, store))
         self.assertEqual(outcome.status, "done", outcome.detail)
         self.assertTrue(outcome.verify)
         self.assertTrue(outcome.state["production_touched"])
         self.assertEqual(locks, ["app-blog"])
         self.assertEqual(self.deploys, [("blog", self.registry["blog"], False)])
         self.assertEqual(outcome.undo, "git revert it")
+        [(action_id, journal)] = store.updates
+        self.assertEqual(action_id, 7)
+        self.assertEqual(journal["state"]["stage"], "deploying")
+        self.assertTrue(journal["state"]["production_touched"])
 
     def test_deploy_skipped_until_ci_is_green_stays_pending(self):
         self.deploy_row = {"status": "skipped", "reason": "origin/main abc1234 is not CI-green: pending"}
         outcome = self.playbook.advance(
             action(stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)), make_ctx(FakeRun()))
         self.assertEqual(outcome.status, "pending")
+        self.assertEqual(outcome.state["stage"], "deploy")
         self.assertFalse(outcome.state["production_touched"])
 
     def test_rolled_back_app_deploy_is_reported(self):
@@ -547,12 +843,8 @@ class AdvanceTests(TempHomeTestCase):
         self.assertEqual(outcome.status, "rolled_back")
         self.assertTrue(outcome.state["production_touched"])
 
-    def test_release_deploy_pulls_and_runs_the_script(self):
-        def respond(argv, kw):
-            if "symbolic-ref" in argv:
-                return 0, "main\n"
-            return None
-        run = FakeRun(respond)
+    def test_release_deploy_pulls_waits_for_green_ci_and_runs_the_script(self):
+        run = self.release_run()
         fetch = lambda url, **kw: net.Response(status=200, headers={}, body=b"ok", url=url)
         locks = []
         outcome = self.playbook.advance(
@@ -562,24 +854,118 @@ class AdvanceTests(TempHomeTestCase):
         self.assertTrue(outcome.state["production_touched"])
         self.assertEqual(locks, ["app-beatz"])
         self.assertTrue(run.find("pull", "--ff-only", "origin", "main"))
-        bash = run.find("bash", "release.sh")[0]
-        self.assertEqual(bash[1]["cwd"], str(self.home / "dev" / "beatz"))
-        self.assertEqual(bash[1]["timeout"], 1800)
-        self.assertTrue(bash[1]["env"]["PATH"].startswith(str(self.home / ".local/go/bin") + ":"))
+        self.assertTrue(run.find("gh", "api", "repos/carter2099/beatz/commits/deployhead1/check-runs?per_page=100"))
+        self.assertEqual(run.find("bash"), [])
+        [(argv, kw)] = self.scripts.calls
+        self.assertEqual(argv, ["bash", "release.sh"])
+        self.assertEqual(kw["cwd"], str(self.home / "dev" / "beatz"))
+        self.assertEqual(kw["timeout"], 1800)
+        self.assertTrue(kw["env"]["PATH"].startswith(str(self.home / ".local/go/bin") + ":"))
+
+    def test_release_deploy_waits_while_merge_commit_ci_is_pending(self):
+        pending = [{"name": "verify", "status": "in_progress", "conclusion": None}]
+        store = FakeStore()
+        outcome = self.playbook.advance(
+            action("homelab-dashboard", stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
+            make_ctx(self.release_run(pending), store=store))
+        self.assertEqual(outcome.status, "pending")
+        self.assertIn("waiting for CI on deployh before bash release.sh", outcome.detail)
+        self.assertFalse(outcome.state["production_touched"])
+        self.assertEqual(self.scripts.calls, [])
+        self.assertEqual(store.updates, [])
+
+    def test_release_deploy_waits_on_red_main_ci_and_gives_up_untouched_after_a_day(self):
+        red = [{"name": "verify", "status": "completed", "conclusion": "failure"}]
+        outcome = self.playbook.advance(
+            action("homelab-dashboard", stage="deploy", merge_sha="mergesha1",
+                   merged_at=model.iso(NOW - timedelta(hours=25))),
+            make_ctx(self.release_run(red)))
+        self.assertEqual(outcome.status, "failed")
+        self.assertIn("is red", outcome.detail)
+        self.assertFalse(outcome.state["production_touched"])
+        self.assertEqual(self.scripts.calls, [])
+
+    def test_deploying_stage_is_journaled_before_the_script_runs(self):
+        store = FakeStore()
+        seen = []
+
+        def script(argv, kw):
+            seen.append([dict(update[1]) for update in store.updates])
+            return 0, "deployed\n"
+        self.script_out = script
+        fetch = lambda url, **kw: net.Response(status=200, headers={}, body=b"ok", url=url)
+        outcome = self.playbook.advance(
+            action("beatz", stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
+            make_ctx(self.release_run(), fetch, store=store))
+        self.assertEqual(outcome.status, "done", outcome.detail)
+        [[journal]] = seen
+        self.assertEqual(journal["status"], "pending")
+        self.assertEqual(journal["state"]["stage"], "deploying")
+        self.assertTrue(journal["state"]["production_touched"])
+        self.assertIn("bash release.sh", journal["detail"])
+
+    def test_deploying_stage_without_an_outcome_is_not_rerun(self):
+        outcome = self.playbook.advance(
+            action("beatz", stage="deploying", deploying_at=model.iso(NOW), production_touched=True),
+            make_ctx(FakeRun()))
+        self.assertEqual(outcome.status, "refused")
+        self.assertEqual(self.scripts.calls, [])
+
+    def test_prompt_guard_deploy_runs_the_promoting_script(self):
+        self.assertEqual(SPECS["prompt-guard"].get("deploy"), "release:deploy.sh")
+        fetch = lambda url, **kw: net.Response(status=200, headers={}, body=b"ok", url=url)
+        run = self.release_run()
+        outcome = self.playbook.advance(
+            action("prompt-guard", stage="deploy", merge_sha="mergesha1", has_ci=False, edit="pip-pin",
+                   merged_at=model.iso(NOW)),
+            make_ctx(run, fetch))
+        self.assertEqual(outcome.status, "done", outcome.detail)
+        [(argv, kw)] = self.scripts.calls
+        self.assertEqual(argv, ["bash", "deploy.sh"])
+        self.assertEqual(kw["cwd"], str(self.home / "dev" / "prompt-guard"))
+        self.assertEqual(run.find("gh", "api"), [])
+
+    def test_homelab_backup_deploy_waits_out_its_nightly_run_window(self):
+        store = FakeStore()
+        ctx = make_ctx(self.release_run(), store=store)
+        ctx.now = datetime(2026, 11, 3, 2, 40, tzinfo=timezone.utc)
+        outcome = self.playbook.advance(
+            action("homelab-backup", stage="deploy", merge_sha="mergesha1", has_ci=False, edit="go-module",
+                   merged_at=model.iso(ctx.now - timedelta(hours=30))), ctx)
+        self.assertEqual(outcome.status, "pending")
+        self.assertIn("not running bash release.sh", outcome.detail)
+        self.assertIn("03:00 UTC", outcome.detail)
+        self.assertFalse(outcome.state["production_touched"])
+        self.assertEqual(outcome.state["stage"], "deploy")
+        self.assertEqual(self.scripts.calls, [])
+        self.assertEqual(store.updates, [])
+
+    def test_release_script_dying_in_its_preconditions_is_untouched(self):
+        inspect = json.dumps({"image_id": "sha256:" + "cd" * 32, "image": "carter-monitor:x",
+                              "running": True, "status": "running"}) + "\n"
+        fetch = lambda url, **kw: net.Response(status=200, headers={}, body=b"ok", url=url)
+        self.script_out = lambda argv, kw: (1, "error: another release is in progress\n")
+        outcome = self.playbook.advance(
+            action("homelab-dashboard", stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
+            make_ctx(self.release_run(inspect=inspect), fetch))
+        self.assertEqual(outcome.status, "failed")
+        self.assertFalse(outcome.state["production_touched"])
+        self.assertIn("before changing production", outcome.detail)
+
+        self.script_out = lambda argv, kw: (1, "==> promoting deployhead1\n[release] rolled back to releases/a\n")
+        outcome = self.playbook.advance(
+            action("homelab-dashboard", stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
+            make_ctx(self.release_run(inspect=inspect), fetch))
+        self.assertEqual(outcome.status, "rolled_back")
+        self.assertTrue(outcome.state["production_touched"])
 
     def test_release_deploy_waits_for_a_dirty_checkout(self):
-        def respond(argv, kw):
-            if "symbolic-ref" in argv:
-                return 0, "main\n"
-            if "status" in argv:
-                return 0, " M notes.txt\n"
-            return None
-        run = FakeRun(respond)
         outcome = self.playbook.advance(
-            action("beatz", stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)), make_ctx(run))
+            action("beatz", stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
+            make_ctx(self.release_run(dirty=" M notes.txt\n")))
         self.assertEqual(outcome.status, "pending")
         self.assertFalse(outcome.state["production_touched"])
-        self.assertEqual(run.find("bash"), [])
+        self.assertEqual(self.scripts.calls, [])
 
 
 class RegistryTests(unittest.TestCase):

@@ -16,6 +16,7 @@ from datetime import timedelta
 from typing import Any, Sequence
 
 from security_watch import config, feeds, resolve
+from security_watch.assessments import NotAffected, Verdict
 from security_watch.config import ComponentSpec
 from security_watch.model import (
     URGENCY_LOW, URGENCY_NORMAL, URGENCY_URGENT, Finding, Inventory, Package, parse_iso,
@@ -403,7 +404,8 @@ _EXPOSED = ("public", "access")
 
 
 def prioritize(findings: list[Finding], specs: dict[str, ComponentSpec], policy, *, store, now,
-               stopgaps: Sequence[config.Stopgap] | None = None) -> None:
+               stopgaps: Sequence[config.Stopgap] | None = None,
+               not_affected: Sequence[tuple[NotAffected, Verdict]] | None = None) -> None:
     """Set urgency and reasons in place (run after reachability).
 
     urgent: affected AND (CISA KEV, or a Zero Wire item that needs attention -- both
@@ -414,6 +416,10 @@ def prioritize(findings: list[Finding], specs: dict[str, ComponentSpec], policy,
     low:    everything else.
     A finding covered by a stopgap (same component, a shared CVE) is capped at normal
     and its first reason names the stopgap.  ``stopgaps=None`` loads the ledger.
+    A finding covered by a not-affected assessment (same component, a shared CVE) whose
+    verdict is ok becomes low (even when KEV/Zero Wire) with the assessment as first
+    reason; a failed verdict fails closed (urgency kept, failure added to the reasons).
+    ``not_affected=None`` means no assessments.
     """
     if stopgaps is None:
         stopgaps = config.load_stopgaps()
@@ -427,6 +433,20 @@ def prioritize(findings: list[Finding], specs: dict[str, ComponentSpec], policy,
             if finding.urgency == URGENCY_URGENT:
                 finding.urgency = URGENCY_NORMAL
             finding.reasons = [f"stopgap active: {covering.id} since {covering.since}"] + finding.reasons
+        _apply_not_affected(finding, not_affected or ())
+
+
+def _apply_not_affected(finding: Finding, not_affected: Sequence[tuple[NotAffected, Verdict]]) -> None:
+    covered = [(entry, verdict) for entry, verdict in not_affected
+               if entry.component == finding.component_id and set(entry.cves) & set(finding.cves)]
+    failed = [f"not-affected check failed: {entry.id}: {verdict.detail}"
+              for entry, verdict in covered if not verdict.ok]
+    passed = next((entry for entry, verdict in covered if verdict.ok), None)
+    if passed is not None:
+        finding.urgency = URGENCY_LOW
+        finding.reasons = [f"verified not affected: {passed.id}: {passed.reason}"] + finding.reasons + failed
+    elif failed:
+        finding.reasons = finding.reasons + failed
 
 
 def _rate(finding: Finding, spec: ComponentSpec | None, policy, *, zero_wire: dict, window: timedelta,

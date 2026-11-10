@@ -57,7 +57,6 @@ LINK_LIMIT = 20
 USN_RELEASE = "noble"
 USN_ECOSYSTEM = "Ubuntu:24.04:LTS"
 
-CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}")
 CVE_EXACT_RE = re.compile(r"^CVE-\d{4}-\d+$")
 HREF_RE = re.compile(r"""href\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
@@ -193,7 +192,10 @@ def poll_zero_wire(state, fetch, policy, now):
         guid = (item.findtext("guid") or "").strip() or slug
         categories = [(c.text or "").strip() for c in item.findall("category")]
         content = item.findtext(CONTENT_NS) or ""
-        cves = _dedupe([c for c in categories if CVE_EXACT_RE.match(c)] + CVE_RE.findall(content))
+        # Only the briefing's <category> CVEs name what it is about.  Briefing prose cites
+        # unrelated CVEs (the RSC briefing mentions a Next.js fix id that OSV maps to librsvg),
+        # so body text never links a CVE to a briefing.
+        cves = _dedupe([c for c in categories if CVE_EXACT_RE.match(c)])
         status = next((c for c in categories if c in ZERO_WIRE_STATUSES), "")
         published = parse_date(item.findtext("pubDate"))
         signals.append(Signal(

@@ -7,7 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from security_watch import config, net, resolve, scan  # noqa: E402
+from security_watch import assessments, config, net, resolve, scan  # noqa: E402
 from security_watch.config import ComponentSpec, Policy  # noqa: E402
 from security_watch.model import (  # noqa: E402
     AdvisoryPackage, Finding, Inventory, Package, Reach, Signal, iso,
@@ -502,11 +502,55 @@ class PrioritizeTests(unittest.TestCase):
         base.update(kw)
         return Finding(**base)
 
-    def run_prioritize(self, findings, zero_wire=None, stopgaps=()):
+    def run_prioritize(self, findings, zero_wire=None, stopgaps=(), not_affected=None):
         specs = {"freshrss": spec("freshrss", exposure="public"), "host": spec("host", exposure="lan")}
         with FeedPatch(zero_wire=zero_wire):
             scan.prioritize(findings, specs, policy(), store=FakeStore(), now=NOW,
-                            stopgaps=None if stopgaps is None else list(stopgaps))
+                            stopgaps=None if stopgaps is None else list(stopgaps),
+                            not_affected=not_affected)
+
+    def assessment(self, ok=True, component="freshrss", cves=(CVE,)):
+        entry = assessments.NotAffected(
+            id="brotli-unused", component=component, cves=tuple(cves), reason="brotli is never loaded",
+            verified="2026-11-09", checks=(assessments.Check(argv=("true",), expect=""),))
+        verdict = assessments.Verdict(id=entry.id, ok=ok, detail="" if ok else "check 1: true: rc 1")
+        return entry, verdict
+
+    def test_verified_not_affected_is_low_even_with_kev_and_zero_wire(self):
+        zw = {CVE: [{"slug": "node2shell", "status": "Needs attention"}]}
+        f = self.finding(kev=True, zero_wire=["node2shell"], severity="critical", reach=self.reachable())
+        self.run_prioritize([f], zero_wire=zw, not_affected=[self.assessment()])
+        self.assertEqual(f.urgency, "low")
+        self.assertEqual(f.reasons, ["verified not affected: brotli-unused: brotli is never loaded",
+                                     "CISA KEV", "Zero Wire: node2shell (Needs attention)",
+                                     "reachable (p=0.93), critical"])
+
+    def test_verified_not_affected_wins_over_a_stopgap(self):
+        f = self.finding(kev=True)
+        self.run_prioritize([f], stopgaps=[self.stopgap()], not_affected=[self.assessment()])
+        self.assertEqual(f.urgency, "low")
+        self.assertEqual(f.reasons[:2], ["verified not affected: brotli-unused: brotli is never loaded",
+                                         "stopgap active: freshrss-brotli-off since 2026-11-03"])
+
+    def test_failed_not_affected_check_fails_closed(self):
+        f = self.finding(kev=True)
+        self.run_prioritize([f], not_affected=[self.assessment(ok=False)])
+        self.assertEqual(f.urgency, "urgent")
+        self.assertEqual(f.reasons, ["CISA KEV",
+                                     "not-affected check failed: brotli-unused: check 1: true: rc 1"])
+
+    def test_not_affected_does_not_cover_other_components_or_cves(self):
+        host = self.finding("host", kev=True)
+        other_cve = self.finding(kev=True, cves=["CVE-2026-9999"])
+        self.run_prioritize([host, other_cve], not_affected=[self.assessment(), self.assessment(ok=False)])
+        self.assertEqual((host.urgency, host.reasons), ("urgent", ["CISA KEV"]))
+        self.assertEqual((other_cve.urgency, other_cve.reasons), ("urgent", ["CISA KEV"]))
+
+    def test_not_affected_none_and_empty_change_nothing(self):
+        for value in (None, []):
+            f = self.finding(kev=True)
+            self.run_prioritize([f], not_affected=value)
+            self.assertEqual((f.urgency, f.reasons), ("urgent", ["CISA KEV"]))
 
     def stopgap(self, component="freshrss", cves=(CVE,)):
         return config.Stopgap(id="freshrss-brotli-off", component=component, cves=tuple(cves),

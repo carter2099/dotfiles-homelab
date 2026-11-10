@@ -204,11 +204,20 @@ def shadow_metrics(store, policy, sources: list[dict], breaker: dict, now: datet
     }
 
 
+def not_affected_rows(not_affected) -> list[dict]:
+    """One row per verified not-affected assessment with this tick's verdict."""
+    return [{"id": entry.id, "component": entry.component, "cves": list(entry.cves),
+             "reason": entry.reason, "verified": entry.verified, "ok": bool(verdict.ok),
+             "detail": verdict.detail}
+            for entry, verdict in not_affected]
+
+
 def build_report(store, policy, specs, scan_result, act_result, tick: dict, now: datetime, *,
-                 stopgaps=None) -> dict:
+                 stopgaps=None, not_affected=None) -> dict:
     """report.json schema 1.  ``tick`` = {"started", "finished", "outcome"} (datetime or ISO).
 
-    ``stopgaps`` defaults to ``config.load_stopgaps()``.
+    ``stopgaps`` defaults to ``config.load_stopgaps()``.  ``not_affected`` is the
+    ``[(NotAffected, Verdict)]`` list from this tick (``None`` -> no assessments).
     """
     if stopgaps is None:
         stopgaps = config.load_stopgaps()
@@ -232,12 +241,14 @@ def build_report(store, policy, specs, scan_result, act_result, tick: dict, now:
         "findings": [finding_row(f, specs) for f in findings],
         "unknown": [{"component": u.get("component", ""), "reason": u.get("reason", "")} for u in unknown],
         "actions_24h": executed,
-        "proposed": proposed,
+        # Proposals only describe shadow mode; once active they were never applied and would mislead.
+        "proposed": proposed if policy.mode == "shadow" else [],
         "refused": _refused(store, day),
         "leads_24h": _leads(store, day),
         "resolved_24h": _resolved(store, day),
         "shadow": shadow_metrics(store, policy, sources, breaker, now),
         "stopgaps": stopgap_rows(store, stopgaps),
+        "not_affected": not_affected_rows(not_affected or ()),
         "last_tick": {"started": _iso(tick.get("started")), "finished": _iso(tick.get("finished")),
                       "outcome": tick.get("outcome") or "ok"},
     }

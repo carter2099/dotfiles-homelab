@@ -128,7 +128,8 @@ class ZeroWireTests(unittest.TestCase):
         by_key = {s.key: s for s in signals}
         node = by_key["node2shell"]
         self.assertEqual(node.version, "node2shell@2026-10-25")
-        self.assertEqual(node.cves, ("CVE-2026-111497", "CVE-2026-111498"))
+        # The body-only "related CVE-2026-111498" mention is prose, not what the briefing covers.
+        self.assertEqual(node.cves, ("CVE-2026-111497",))
         self.assertEqual(node.urgency_hint, "needs-attention")
         self.assertEqual(node.tier, model.TIER_CURATED)
         self.assertEqual(node.links, ("https://www.cve.org/CVERecord?id=CVE-2026-111497",
@@ -139,6 +140,7 @@ class ZeroWireTests(unittest.TestCase):
         index = state["_kv"]["zero_wire_index"]
         self.assertEqual(index["CVE-2026-60137"][0]["status"], "Reference")
         self.assertEqual(index["CVE-2026-111497"][0]["slug"], "node2shell")
+        self.assertNotIn("CVE-2026-111498", index)
 
     def test_zero_wire_index_is_maintained_even_when_items_are_not_new(self):
         store = FakeStore()

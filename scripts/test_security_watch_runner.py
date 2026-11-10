@@ -4,6 +4,7 @@
 import contextlib
 import dataclasses
 import io
+import json
 import os
 import sys
 import tempfile
@@ -71,35 +72,79 @@ class NotifyTests(_StoreCase):
                    url="https://go.dev/doc/devel/release", tier=model.TIER_ISSUER),
         ]
 
+    def _action(self, component, playbook, status, target, detail="", *, at=NOW):
+        plan = model.Plan(playbook=playbook, component_id=component, finding_keys=[f"{component}|CVE-2026-1"],
+                          target=target, lock_keys=[component], steps=[], undo="x")
+        action_id = self.store.start_action(plan, mode="active", status="running", now=at)
+        self.store.update_action(action_id, status=status, detail=detail, now=at, finished=True)
+        return action_id
+
     def test_urgent_items_selects_each_urgent_kind(self):
         self.store.put_inventory(Inventory("freshrss", NOW, "ok", "fp",
                                            packages=[Package(model.RUNTIME_ECOSYSTEM, "php", "8.4.27")]))
         self.store.trip_breaker("verify failed on freshrss", NOW)
-        act_result = SimpleNamespace(
-            executed=[{"id": 7, "playbook": "steward-freshrss", "component": "freshrss", "status": "rolled_back",
-                       "target": "freshrss 1.30.5", "detail": "health failed", "undo": "x"},
-                      {"id": 8, "playbook": "apt-security", "component": "host", "status": "verified",
-                       "target": "apt", "detail": "", "undo": ""}],
-            advanced=[{"id": 9, "playbook": "release-rebuild", "component": "llm-proxy", "status": "unverified",
-                       "target": "go1.27.4 rebuild", "detail": "finding still open", "undo": ""}])
+        rolled = self._action("freshrss", "steward-freshrss", "rolled_back", "freshrss 1.30.5", "health failed")
+        self._action("host", "apt-security", "verified", "apt")
+        unverified = self._action("llm-proxy", "release-rebuild", "unverified", "go1.27.4 rebuild",
+                                  "finding still open")
+        self._action("news", "compose-digest", "failed", "news old", at=NOW - timedelta(hours=25))
         findings = [_finding(), _finding(component="news", urgency=model.URGENCY_NORMAL)]
-        items = notify.urgent_items(findings, self._signals(), act_result, self.store, self.policy, self.specs, NOW)
+        items = notify.urgent_items(findings, self._signals(), self.store, self.policy, self.specs, NOW)
         dedupes = [i["dedupe"] for i in items]
         self.assertEqual(dedupes, [
             "finding:freshrss|CVE-2026-111497",
             "signal:php_announce:php-1",
             "signal:ransomware_live:victim-1",
             "signal:zero_wire:mystery",
-            "action:7:rolled_back",
-            "action:9:unverified",
+            f"action:{rolled}:rolled_back",
+            f"action:{unverified}:unverified",
             f"breaker:{self.store.breaker()['since']}",
         ])
         self.assertEqual({i["kind"] for i in items},
                          {"finding", "pre-announcement", "vendor-breach", "manual-check", "action", "breaker"})
+        action = next(i for i in items if i["kind"] == "action")
+        self.assertIn("Playbook: steward-freshrss on freshrss", action["lines"])
+        self.assertIn("Detail: health failed", action["lines"])
+
+    def test_failed_action_held_back_by_the_cap_is_sent_on_a_later_tick(self):
+        policy = dataclasses.replace(self.policy, urgent_max_per_day=1)
+        sent = []
+        earlier = NOW - timedelta(hours=23)
+        self.assertTrue(notify.send_urgent([self._item("earlier")], store=self.store, policy=policy, now=earlier,
+                                           send=lambda *a: sent.append(a)))
+        failed = self._action("freshrss", "steward-freshrss", "failed", "freshrss 1.30.5", "gh pr create failed")
+        capped = notify.urgent_items([], [], self.store, policy, self.specs, NOW)
+        self.assertFalse(notify.send_urgent(capped, store=self.store, policy=policy, now=NOW,
+                                            send=lambda *a: sent.append(a)))
+        later = NOW + timedelta(hours=2)
+        items = notify.urgent_items([], [], self.store, policy, self.specs, later)
+        self.assertEqual([i["dedupe"] for i in items], [f"action:{failed}:failed"])
+        self.assertTrue(notify.send_urgent(items, store=self.store, policy=policy, now=later,
+                                           send=lambda *a: sent.append(a)))
+        self.assertEqual(len(sent), 2)
+        self.assertIn("Remediation failed: steward-freshrss on freshrss", sent[1][0])
+
+    def test_reopened_finding_is_notified_again(self):
+        sent = []
+        finding = _finding()
+        self.store.upsert_finding(finding, NOW)
+        items = notify.urgent_items([self.store.get_finding(finding.key)], [], self.store, self.policy,
+                                    self.specs, NOW)
+        self.assertTrue(notify.send_urgent(items, store=self.store, policy=self.policy, now=NOW,
+                                           send=lambda *a: sent.append(a)))
+        self.assertFalse(notify.send_urgent(items, store=self.store, policy=self.policy,
+                                            now=NOW + timedelta(minutes=15), send=lambda *a: sent.append(a)))
+        self.store.close_missing_findings("freshrss", set(), NOW + timedelta(hours=1))
+        self.store.upsert_finding(_finding(), NOW + timedelta(hours=2))
+        items = notify.urgent_items([self.store.get_finding(finding.key)], [], self.store, self.policy,
+                                    self.specs, NOW + timedelta(hours=2))
+        self.assertTrue(notify.send_urgent(items, store=self.store, policy=self.policy,
+                                           now=NOW + timedelta(hours=2), send=lambda *a: sent.append(a)))
+        self.assertEqual(len(sent), 2)
 
     def test_php_pre_announcement_needs_a_php_runtime(self):
         self.store.put_inventory(Inventory("news", NOW, "ok", "fp", packages=[Package("Alpine:v3.24", "brotli", "1")]))
-        items = notify.urgent_items([], self._signals()[:1], None, self.store, self.policy, self.specs, NOW)
+        items = notify.urgent_items([], self._signals()[:1], self.store, self.policy, self.specs, NOW)
         self.assertEqual(items, [])
 
     def test_leads_published_before_the_urgent_window_are_not_emailed(self):
@@ -110,12 +155,12 @@ class NotifyTests(_StoreCase):
         fresh = (NOW - timedelta(hours=2)).isoformat()
         signals = [dataclasses.replace(s, published=old) for s in self._signals()[:3]]
         signals.append(dataclasses.replace(self._signals()[0], key="php-2", published=fresh))
-        items = notify.urgent_items([], signals, None, self.store, self.policy, self.specs, NOW)
+        items = notify.urgent_items([], signals, self.store, self.policy, self.specs, NOW)
         self.assertEqual([i["dedupe"] for i in items], ["signal:php_announce:php-2"])
 
     def test_send_urgent_dedupes_and_escapes(self):
         sent = []
-        items = notify.urgent_items([_finding()], self._signals()[2:3], None, self.store, self.policy,
+        items = notify.urgent_items([_finding()], self._signals()[2:3], self.store, self.policy,
                                     self.specs, NOW)
         self.assertTrue(notify.send_urgent(items, store=self.store, policy=self.policy, now=NOW,
                                            send=lambda *a: sent.append(a)))
@@ -183,7 +228,8 @@ class NotifyTests(_StoreCase):
 
 
 REPORT_KEYS = {"schema", "generated_at", "mode", "breaker", "sources", "findings", "unknown", "actions_24h",
-               "proposed", "refused", "leads_24h", "resolved_24h", "shadow", "stopgaps", "last_tick"}
+               "proposed", "refused", "leads_24h", "resolved_24h", "shadow", "stopgaps", "last_tick",
+               "not_affected"}
 STOPGAP_KEYS = {"id", "component", "cves", "description", "since", "remove", "doc", "status"}
 FINDING_KEYS = {"key", "component", "exposure", "package", "version", "fixed", "fix_available", "cves",
                 "advisories", "kev", "zero_wire", "severity", "summary", "reach", "urgency", "reasons",
@@ -260,6 +306,23 @@ class ReportTests(_StoreCase):
         self.assertEqual(shadow["source_ok_rate"], 0.0)
         self.assertFalse(shadow["eligible"])
 
+    def test_proposals_are_listed_only_in_shadow_mode(self):
+        plan = model.Plan(playbook="steward-freshrss", component_id="freshrss", finding_keys=["freshrss|CVE-2026-1"],
+                          target="freshrss 1.30.5", lock_keys=["freshrss"], steps=["pull"], undo="u")
+        self.store.start_action(plan, mode="shadow", status="proposed", now=NOW - timedelta(hours=1))
+        for mode, expected in (("shadow", 1), ("active", 0)):
+            policy = dataclasses.replace(self.policy, mode=mode)
+            data = report.build_report(self.store, policy, self.specs, None, None, self._tick(), NOW, stopgaps=[])
+            self.assertEqual(len(data["proposed"]), expected, mode)
+
+
+class UnitFileTests(unittest.TestCase):
+    def test_hard_stop_outlasts_the_longest_playbook(self):
+        unit = Path(__file__).resolve().parent.parent / ".config" / "systemd" / "user" / "security-watch.service"
+        lines = unit.read_text().splitlines()
+        self.assertIn("Type=oneshot", lines)
+        self.assertIn("TimeoutStartSec=2h", lines)
+
 
 class StopgapTests(_StoreCase):
     SG = config.Stopgap(id="sg-brotli", component="freshrss", cves=("CVE-2026-111497",),
@@ -275,7 +338,7 @@ class StopgapTests(_StoreCase):
         return rows[0]["status"]
 
     def _items(self):
-        return notify.urgent_items([], [], None, self.store, self.policy, self.specs, NOW, stopgaps=[self.SG])
+        return notify.urgent_items([], [], self.store, self.policy, self.specs, NOW, stopgaps=[self.SG])
 
     def test_unverified_when_no_covered_finding_was_seen(self):
         self.store.upsert_finding(_finding(component="news"), NOW)          # other component
@@ -389,6 +452,210 @@ class ReplayTests(unittest.TestCase):
 
     def test_replay_never_touches_the_configured_state_dir(self):
         self.assertFalse(self.unused_state.exists())
+
+
+def _fake_deps(clock_seconds: list[float] | None = None) -> runner.Deps:
+    t = clock_seconds if clock_seconds is not None else [0.0]
+
+    def no_subprocess(argv, **_kw):
+        raise AssertionError(f"unexpected subprocess {argv}")
+
+    def no_fetch(url, **_kw):
+        raise AssertionError(f"unexpected fetch {url}")
+
+    return runner.Deps(fetch=no_fetch, run=no_subprocess, collect=mock.Mock(side_effect=AssertionError),
+                       fingerprint=mock.Mock(side_effect=AssertionError), steward_active=lambda: False,
+                       send=None, lock=lambda *a, **k: contextlib.nullcontext(),
+                       host_lock=lambda *a, **k: contextlib.nullcontext(),
+                       clock=lambda: NOW + timedelta(seconds=t[0]), monotonic=lambda: t[0])
+
+
+class AssessmentWiringTests(_StoreCase):
+    def _tick(self, **patches):
+        from security_watch import assessments, scan
+        self.store.set_kv("last_scan", model.iso(NOW))   # nothing to scan: only the late phases run
+        prioritize, build = mock.Mock(), mock.Mock(return_value={})
+        deps = _fake_deps()
+        with mock.patch.object(feeds, "poll_due", return_value=None), \
+                mock.patch.object(scan, "prioritize", prioritize), \
+                mock.patch.object(notify, "urgent_items", return_value=[]), \
+                mock.patch.object(notify, "send_urgent", return_value=False), \
+                mock.patch.object(report, "build_report", build), \
+                mock.patch.object(report, "write_report"), \
+                mock.patch.object(assessments, "load", **patches["load"]), \
+                mock.patch.object(assessments, "verify", **patches.get("verify", {})) as verify:
+            summary = runner.run_tick(self.store, self.policy, {}, deps, act_enabled=False)
+        return summary, prioritize, build, verify, deps
+
+    def test_prioritize_and_report_get_verified_assessments(self):
+        entry = SimpleNamespace(id="sshole-not-affected")
+        verdict = SimpleNamespace(id=entry.id, ok=True, detail="")
+        summary, prioritize, build, verify, deps = self._tick(
+            load={"return_value": [entry]}, verify={"return_value": {entry.id: verdict}})
+        verify.assert_called_once_with([entry], run=deps.run)
+        self.assertEqual(prioritize.call_args.kwargs["not_affected"], [(entry, verdict)])
+        self.assertEqual(build.call_args.kwargs["not_affected"], [(entry, verdict)])
+        self.assertEqual(summary["phases"]["assessments"], "ok")
+        self.assertEqual(summary["outcome"], "ok")
+
+    def test_load_failure_degrades_and_downgrades_nothing(self):
+        summary, prioritize, build, verify, _deps = self._tick(load={"side_effect": ValueError("bad toml")})
+        verify.assert_not_called()
+        self.assertTrue(summary["phases"]["assessments"].startswith("failed"))
+        self.assertEqual(summary["phases"]["prioritize"], "ok")
+        self.assertEqual(summary["outcome"], "degraded")
+        self.assertEqual(prioritize.call_args.kwargs["not_affected"], [])
+        self.assertEqual(build.call_args.kwargs["not_affected"], [])
+
+
+class FakeMultiTick:
+    """Pending after apply; done (no rescan) after ``steps`` advance() calls."""
+    id = "steward-freshrss"
+    multi_tick = True
+
+    def __init__(self, steps=2, apply_status="pending"):
+        self.steps = steps
+        self.apply_status = apply_status
+        self.applied = 0
+        self.advanced = 0
+
+    def plan(self, findings, spec, ctx):
+        return model.Plan(playbook=self.id, component_id=spec.id, finding_keys=[f.key for f in findings],
+                          target="freshrss refreshed", lock_keys=[spec.lock], steps=["build", "up"], undo="undo")
+
+    def apply(self, plan, ctx):
+        self.applied += 1
+        return model.Outcome(self.apply_status, f"apply {self.apply_status}", verify=False,
+                             state={"production_touched": False})
+
+    def advance(self, action, ctx):
+        self.advanced += 1
+        status = "done" if self.advanced >= self.steps else "pending"
+        return model.Outcome(status, f"step {self.advanced}", verify=False, state={"production_touched": True})
+
+
+class FixCommandTests(_StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.specs = {"freshrss": config.ComponentSpec(id="freshrss", kind="container", collector="container",
+                                                       exposure="public", owner="steward-freshrss", lock="freshrss")}
+        self.policy = dataclasses.replace(self.policy, mode="shadow")
+        self.store.upsert_finding(_finding(), NOW)
+        self.t = [0.0]
+        self.sleeps = []
+
+    def sleep(self, seconds):
+        with runner.tick_lock() as free:       # fix never holds tick.lock while waiting
+            self.assertTrue(free)
+        self.sleeps.append(seconds)
+        self.t[0] += seconds
+
+    def fix(self, argv, pb):
+        args = runner._parser().parse_args(["fix", *argv])
+        self.assertEqual(runner._fix_usage_error(args), "")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = runner.run_fix(args, self.store, self.policy, self.specs, _fake_deps(self.t),
+                                  registry={pb.id: pb}, sleep=self.sleep, out=out)
+        lines = [line for line in err.getvalue().splitlines() if line.startswith("security-watch: fix:")]
+        return code, out.getvalue(), lines
+
+    def test_wait_advances_a_multi_tick_fix_to_done(self):
+        pb = FakeMultiTick(steps=3)
+        code, out, progress = self.fix(["freshrss", "--wait", "600"], pb)
+        row = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertEqual((row["status"], row["detail"], row["plan_steps"]), ("done", "step 3", ["build", "up"]))
+        self.assertEqual((pb.applied, pb.advanced), (1, 3))
+        self.assertEqual(self.sleeps, [runner.FIX_POLL_SECONDS] * 3)
+        self.assertEqual(len(progress), 4)
+        self.assertEqual(self.store.get_action(row["id"])["mode"], "manual")
+        self.assertEqual(self.store.executed_actions_since(NOW - timedelta(days=1)), 0)
+
+    def test_pending_at_timeout_exits_3_and_resume_finishes(self):
+        pb = FakeMultiTick(steps=3)
+        code, out, _ = self.fix(["freshrss", "--wait", "60"], pb)
+        row = json.loads(out)
+        self.assertEqual((code, row["status"], pb.advanced), (3, "pending", 1))
+        code, out, _ = self.fix(["--resume", str(row["id"])], pb)
+        self.assertEqual((code, json.loads(out)["status"], pb.advanced), (3, "pending", 2))
+        code, out, _ = self.fix(["--resume", str(row["id"]), "--wait", "120"], pb)
+        self.assertEqual((code, json.loads(out)["status"], pb.advanced), (0, "done", 3))
+
+    def test_refusal_exits_2(self):
+        self.store.trip_breaker("earlier failure", NOW)
+        pb = FakeMultiTick()
+        code, out, progress = self.fix(["freshrss"], pb)
+        self.assertEqual((code, json.loads(out)["status"], pb.applied), (2, "refused", 0))
+        self.assertIn("breaker open", progress[0])
+
+    def test_failure_exits_1(self):
+        pb = FakeMultiTick(apply_status="failed")
+        code, out, _ = self.fix(["freshrss"], pb)
+        self.assertEqual((code, json.loads(out)["status"]), (1, "failed"))
+
+    def test_dry_run_exits_0_without_applying(self):
+        pb = FakeMultiTick()
+        code, out, _ = self.fix(["freshrss", "--dry-run"], pb)
+        self.assertEqual((code, json.loads(out)["status"], pb.applied), (0, "planned", 0))
+
+    def test_list_prints_plan_targets_without_applying(self):
+        pb = FakeMultiTick()
+        code, out, _ = self.fix(["--list"], pb)
+        self.assertEqual(code, 0)
+        self.assertIn("freshrss  steward-freshrss  (freshrss|CVE-2026-111497)", out)
+        self.assertIn("target: freshrss refreshed", out)
+        self.assertEqual(pb.applied, 0)
+        self.assertEqual(self.store.actions_since(NOW - timedelta(days=1)), [])
+
+    def test_usage_errors_exit_2(self):
+        for argv in (["fix"], ["fix", "freshrss", "--list"], ["fix", "freshrss", "--resume", "3"],
+                     ["fix", "--resume", "3", "--playbook", "repo-pr"], ["fix", "--list", "--wait", "60"],
+                     ["fix", "freshrss", "--wait", "-1"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as raised:
+                runner.main(argv)
+            self.assertEqual(raised.exception.code, 2)
+
+    def _rescan_deps(self):
+        deps = _fake_deps(self.t)
+        deps.collect = lambda spec, at: Inventory(spec.id, at, "ok", "fp")
+        return deps
+
+    def test_act_ctx_rescan_reports_completeness(self):
+        from security_watch import scan
+        ctx = runner.act_ctx(self.store, self.policy, self.specs, self._rescan_deps(), NOW)
+        with mock.patch.object(scan, "scan", return_value=SimpleNamespace(findings=[], complete=set())):
+            found, complete = ctx.rescan("freshrss")
+        self.assertEqual(([f.key for f in found], complete), (["freshrss|CVE-2026-111497"], False))
+        self.assertEqual(self.store.get_kv("last_complete"), [])
+        with mock.patch.object(scan, "scan", return_value=SimpleNamespace(findings=[], complete={"freshrss"})):
+            self.assertEqual(ctx.rescan("freshrss"), ([], True))
+        self.assertEqual(self.store.get_kv("last_complete"), ["freshrss"])
+
+    def test_incomplete_verify_stays_pending_and_wait_verifies_it(self):
+        from security_watch import scan
+        pb = FakeVerifyingApply()
+        scans = [SimpleNamespace(findings=[], complete=set()), SimpleNamespace(findings=[], complete={"freshrss"})]
+        args = runner._parser().parse_args(["fix", "freshrss", "--wait", "120"])
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(scan, "scan", side_effect=scans), contextlib.redirect_stderr(err):
+            code = runner.run_fix(args, self.store, self.policy, self.specs, self._rescan_deps(),
+                                  registry={pb.id: pb}, sleep=self.sleep, out=out)
+        row = json.loads(out.getvalue())
+        self.assertEqual((code, row["status"], pb.applied, pb.advanced), (0, "verified", 1, 0))
+        self.assertEqual(self.sleeps, [60])
+        self.assertIn("verification pending", err.getvalue())
+
+
+class FakeVerifyingApply(FakeMultiTick):
+    """A single-tick apply that needs verification (rescan)."""
+    multi_tick = False
+
+    def apply(self, plan, ctx):
+        self.applied += 1
+        return model.Outcome("done", "applied", undo="undo", state={"production_touched": True})
+
 
 
 if __name__ == "__main__":

@@ -16,6 +16,10 @@
 #   edits      deterministic repo edits repo-pr may make: base-refresh | go-builder |
 #              go-toolchain | go-module | pip-pin
 #   pin_owner  ecosystems another automation owns (alert only, never edited here)
+#   revision_cmd  argv printing the binary's 40-hex source commit, for Go binaries built
+#              without VCS stamping (-buildvcs=false); inventory uses it as vcs_revision
+#   system_units / health on host: system units and loopback origins apt-security
+#              requires healthy after installing package upgrades
 
 [[component]]
 id = "host"
@@ -26,6 +30,10 @@ owner = "apt-security"
 lock = "host"
 description = "ThinkPad host (Ubuntu 24.04) packages and the running kernel"
 untrusted_input = "sshd from the LAN (192.168.4.0/22); cloudflared tunnel to loopback origins; Docker engine"
+system_units = ["ssh.service", "docker.service", "cloudflared.service"]
+# Loopback origins of the public hostnames (apt-security's post-install health gate).
+health = ["http://127.0.0.1:30144/healthz", "http://127.0.0.1:30149/i/", "http://127.0.0.1:30142/healthz",
+          "http://127.0.0.1:30148/healthz"]
 
 [[component]]
 id = "freshrss"
@@ -38,6 +46,7 @@ lock = "freshrss"
 public_host = "freshrss.carter2099.com"
 health = ["http://127.0.0.1:30149/i/"]
 description = "FreshRSS RSS reader (upstream image: Debian, Apache, PHP)"
+note = "deployed image is freshrss-local:current, a local derived build (~/freshrss/Dockerfile) of the pinned upstream freshrss/freshrss:<tag>@sha256 (compose build arg FRESHRSS_BASE) plus a Debian apt-upgrade layer keyed by SECURITY_REFRESH; steward-freshrss bumps the pin, or without a newer upstream tag rebuilds that layer"
 untrusted_input = "Fetches arbitrary third-party feeds every 15 minutes with PHP curl advertising every supported encoding; public login page, GReader/Fever API, WebSub callbacks and OPML upload"
 reach_container_paths = ["/var/www/FreshRSS/app", "/var/www/FreshRSS/lib", "/var/www/FreshRSS/p"]
 [component.runtimes]
@@ -165,6 +174,8 @@ id = "herdr-web-client"
 kind = "host-binary"
 collector = "go-binary"
 binaries = ["~/.local/bin/herdr-web-client"]
+# Built with -buildvcs=false from a git archive; `--version` prints the source commit sha.
+revision_cmd = ["~/.local/bin/herdr-web-client", "--version"]
 exposure = "access"
 owner = "release-rebuild"
 lock = "app-herdr-web-client"
@@ -277,7 +288,10 @@ exposure = "loopback"
 owner = "repo-pr"
 lock = "prompt-guard"
 repo = "prompt-guard"
-deploy = "release:release.sh"
+# deploy.sh builds the release (it runs release.sh itself), promotes the current/launcher
+# symlinks, restarts the unit and rolls back on a failed health check; release.sh alone
+# only builds an unused release dir.
+deploy = "release:deploy.sh"
 edits = ["pip-pin"]
 health = ["http://127.0.0.1:8090/health"]
 description = "Prompt-Guard classifier service (Python venv)"
@@ -327,7 +341,7 @@ advisory_repo = "oven-sh/bun"
 exposure = "none"
 owner = "alert"
 lock = "bun"
-note = "herdr-web-client's build requires Bun 1.3.14 exactly; raise that pin in the repo before upgrading the CLI"
+note = "builds pin Bun exactly (herdr-web-client .bun-version + scripts/build, homelab-dashboard .bun-version + Dockerfile oven/bun:<ver>-alpine, homelab-monitor and scripts CI bun-version); the CLI and those pins move together: raise the pins first, then upgrade the CLI (rollback copies in ~/.local/state/bun-rollback/)"
 description = "Bun CLI used for builds (bun install)"
 
 [[component]]
@@ -361,7 +375,8 @@ cmd = ["/usr/bin/cloudflared", "--version"]
 advisory_repo = "cloudflare/cloudflared"
 apt_packages = ["cloudflared"]
 exposure = "public"
-owner = "apt-security"
+owner = "alert"
+note = "the steward's nightly P1 auto_pkgs step upgrades cloudflared from the Cloudflare apt repository behind its tunnel health gate; security-watch only alerts"
 lock = "host"
 description = "Cloudflare Tunnel connector (Cloudflare apt repository)"
 untrusted_input = "Carries every public hostname's traffic to loopback origins"
@@ -375,7 +390,8 @@ cmd = ["docker", "version", "--format", "{{.Server.Version}}"]
 advisory_repo = "moby/moby"
 apt_packages = ["docker-ce", "docker-ce-cli", "containerd.io"]
 exposure = "none"
-owner = "apt-security"
+owner = "alert"
+note = "the steward's nightly P1 auto_pkgs step upgrades docker-ce/containerd.io from the Docker apt repository behind its docker stack gate; security-watch only alerts"
 lock = "host"
 description = "Docker Engine (Docker apt repository)"
 

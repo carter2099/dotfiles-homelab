@@ -4,7 +4,8 @@
 against the notification journal and sends ONE plain HTML email per call through
 ``scripts/send_digest.py``.  ``policy.urgent_max_per_day`` caps EMAILS per rolling
 24 h (counted in the kv log ``EMAIL_LOG_KEY``); each email carries every new item,
-the ``MAX_RENDERED`` most severe rendered in full.
+the ``MAX_RENDERED`` most severe rendered in full.  Failed actions come from the
+journal (24 h), so an item held back by the cap or a send failure goes out later.
 """
 
 from __future__ import annotations
@@ -82,6 +83,8 @@ def _finding_item(f: model.Finding, specs: Any) -> dict:
         lines.append(f.summary)
     return {
         "dedupe": f"finding:{f.key}",
+        # A finding that reopened after a fix has a new first_seen: notified again.
+        "since": f.first_seen,
         "title": f"{f.group} in {f.component_id} ({pkg.name} {pkg.version})",
         "lines": lines,
         "kind": "finding",
@@ -105,18 +108,15 @@ def _signal_item(sig: model.Signal, kind: str, title: str, extra: Iterable[str] 
     }
 
 
-def _action_rows(act_result) -> list[dict]:
-    if act_result is None:
-        return []
-    return list(getattr(act_result, "executed", []) or []) + list(getattr(act_result, "advanced", []) or [])
-
-
-def urgent_items(findings: list[model.Finding], new_signals: list[model.Signal], act_result, store, policy,
+def urgent_items(findings: list[model.Finding], new_signals: list[model.Signal], store, policy,
                  specs, now: datetime, *, stopgaps=None) -> list[dict]:
-    """Items that justify an immediate email; each ``{dedupe, title, lines, kind, rank}``.
+    """Items that justify an immediate email; each ``{dedupe, title, lines, kind, rank}``
+    (findings also carry ``since``: their first_seen).
 
-    ``stopgaps`` (config.Stopgap list, default none): a stopgap whose status is
-    "removable" is an item once (dedupe ``stopgap-removable:<id>``).
+    Remediation items are the journal's actions updated in the last 24 h whose status is in
+    ``FAILED_ACTION_STATUSES`` (dedupe ``action:<id>:<status>``).  ``stopgaps``
+    (config.Stopgap list, default none): a stopgap whose status is "removable" is an item
+    once (dedupe ``stopgap-removable:<id>``).
     """
     items: list[dict] = []
     for f in findings:
@@ -147,11 +147,11 @@ def urgent_items(findings: list[model.Finding], new_signals: list[model.Signal],
                 "No CVE is named, so nothing can be matched automatically: check manually.",
             ]))
 
-    for row in _action_rows(act_result):
+    for row in store.actions_since(now - timedelta(hours=24)):
         status = str(row.get("status") or "")
         if status not in FAILED_ACTION_STATUSES:
             continue
-        component = row.get("component") or row.get("component_id") or "?"
+        component = row.get("component_id") or "?"
         lines = [
             f"Playbook: {row.get('playbook', '?')} on {component}",
             f"Target: {row.get('target', '')}",
@@ -259,13 +259,22 @@ def _default_send() -> Callable[[str, str, list[str]], Any]:
     return send_digest.send
 
 
+def _unsent(store, item: dict) -> bool:
+    """Never notified, or last notified before the item's ``since`` (a reopened finding)."""
+    sent = store.notified_at(item["dedupe"])
+    if sent is None:
+        return True
+    since = model.parse_iso(item.get("since"))
+    return since is not None and sent < since
+
+
 def send_urgent(items: list[dict], *, store, policy, now: datetime, send: Callable | None = None) -> bool:
     """One email with every item not notified before, unless the daily EMAIL cap is reached.
 
     Renders the ``MAX_RENDERED`` most severe items; only rendered items are recorded as
     notified, so the rest stay eligible for a later email.  True when an email went out.
     """
-    fresh = [item for item in items if store.notified_at(item["dedupe"]) is None]
+    fresh = [item for item in items if _unsent(store, item)]
     if not fresh:
         return False
     sent_24h = emails_since(store, now - timedelta(hours=24))

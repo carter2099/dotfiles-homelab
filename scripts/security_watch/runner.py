@@ -1,6 +1,6 @@
 """security-watch CLI and the 15-minute tick.
 
-Subcommands: tick (default), scan, status, report, breaker-reset, replay.
+Subcommands: tick (default), scan, status, report, breaker-reset, replay, fix.
 Every tick phase is guarded: a failing phase logs, marks the run degraded and the
 tick continues.  Only a bug outside the phase guards exits 1 (so systemd's
 OnFailure=notify-failure fires).
@@ -173,6 +173,38 @@ def _flagging(signals: list[model.Signal]) -> list[model.Signal]:
     return [s for s in signals if s.tier in (model.TIER_ISSUER, model.TIER_CURATED) and s.cves]
 
 
+def act_ctx(store, policy: config.Policy, specs: dict[str, config.ComponentSpec], deps: Deps, now: datetime):
+    """The remediation context shared by ticks and ``fix``: every open finding, and a rescan
+    that re-inventories + scans one component and returns (its open affected findings,
+    whether the scan of that component was complete)."""
+    from security_watch import act as act_mod
+    from security_watch import scan
+
+    def rescan(component_id: str) -> tuple[list[model.Finding], bool]:
+        spec = specs[component_id]
+        at = deps.clock()
+        inv = deps.collect(spec, at)
+        store.put_inventory(inv)
+        result = scan.scan([inv], specs, store=store, fetch=deps.fetch, now=at)
+        _store_scan(store, result, now=at, only={component_id})
+        complete = set(store.get_kv("last_complete", []) or [])
+        is_complete = component_id in result.complete
+        if is_complete:
+            complete.add(component_id)
+        else:
+            complete.discard(component_id)
+        store.set_kv("last_complete", sorted(complete))
+        found = [f for f in store.open_findings() if f.component_id == component_id and f.status == "affected"]
+        return found, is_complete
+
+    return act_mod.ActCtx(
+        store=store, policy=policy, specs=specs, now=now, run=deps.run, fetch=deps.fetch,
+        lock=deps.lock, host_lock=deps.host_lock, steward_active=deps.steward_active, rescan=rescan,
+        findings={f.key: f for f in store.open_findings()},
+    )
+
+
+
 def run_tick(store, policy: config.Policy, specs: dict[str, config.ComponentSpec], deps: Deps, *,
              force_inventory: bool = False, force_scan: bool = False, act_enabled: bool = True) -> dict:
     """One pass over every phase; returns the run summary (also recorded in the store)."""
@@ -293,9 +325,19 @@ def run_tick(store, policy: config.Policy, specs: dict[str, config.ComponentSpec
     # prioritize (a stopgap load failure leaves findings un-downgraded: fail closed)
     stopgaps = phases.run("stopgaps", config.load_stopgaps, default=[]) or []
 
+    # Verified not-affected assessments; a load/verify failure degrades the run and downgrades
+    # nothing (fail closed).
+    def assessments_phase():
+        from security_watch import assessments
+        entries = assessments.load()
+        verdicts = assessments.verify(entries, run=deps.run)
+        return [(e, verdicts[e.id]) for e in entries]
+    not_affected = phases.run("assessments", assessments_phase, default=[]) or []
+
     def prioritize_phase():
         open_findings = store.open_findings()
-        scan.prioritize(open_findings, specs, policy, store=store, now=now, stopgaps=stopgaps)
+        scan.prioritize(open_findings, specs, policy, store=store, now=now, stopgaps=stopgaps,
+                        not_affected=not_affected)
         for f in open_findings:
             store.upsert_finding(f, now)
         return open_findings
@@ -310,29 +352,9 @@ def run_tick(store, policy: config.Policy, specs: dict[str, config.ComponentSpec
     elif over_budget():
         phases.skip("act", "tick budget exhausted")
     else:
-        def rescan(component_id: str) -> list[model.Finding]:
-            spec = specs[component_id]
-            at = deps.clock()
-            inv = deps.collect(spec, at)
-            store.put_inventory(inv)
-            result = scan.scan([inv], specs, store=store, fetch=deps.fetch, now=at)
-            _store_scan(store, result, now=at, only={component_id})
-            complete = set(store.get_kv("last_complete", []) or [])
-            if component_id in result.complete:
-                complete.add(component_id)
-            else:
-                complete.discard(component_id)
-            store.set_kv("last_complete", sorted(complete))
-            return [f for f in store.open_findings() if f.component_id == component_id and f.status == "affected"]
-
         def act_phase():
-            current = store.open_findings()
-            ctx = act_mod.ActCtx(
-                store=store, policy=policy, specs=specs, now=now, run=deps.run, fetch=deps.fetch,
-                lock=deps.lock, host_lock=deps.host_lock, steward_active=deps.steward_active, rescan=rescan,
-                findings={f.key: f for f in current},
-            )
-            return act_mod.act([f for f in current if f.status == "affected"], ctx)
+            ctx = act_ctx(store, policy, specs, deps, now)
+            return act_mod.act([f for f in ctx.findings.values() if f.status == "affected"], ctx)
         act_result = phases.run("act", act_phase)
         if act_result is not None:
             summary["act"] = {"proposed": len(act_result.proposed), "executed": len(act_result.executed),
@@ -340,7 +362,7 @@ def run_tick(store, policy: config.Policy, specs: dict[str, config.ComponentSpec
 
     # notify
     def notify_phase():
-        items = notify.urgent_items(store.open_findings(), new_signals, act_result, store, policy, specs, now,
+        items = notify.urgent_items(store.open_findings(), new_signals, store, policy, specs, now,
                                     stopgaps=stopgaps)
         return notify.send_urgent(items, store=store, policy=policy, now=now, send=deps.send)
     summary["urgent_email"] = bool(phases.run("notify", notify_phase, default=False))
@@ -352,7 +374,7 @@ def run_tick(store, policy: config.Policy, specs: dict[str, config.ComponentSpec
 
     def report_phase():
         data = report.build_report(store, policy, specs, scan_result, act_result, tick, finished,
-                                   stopgaps=stopgaps)
+                                   stopgaps=stopgaps, not_affected=not_affected)
         report.write_report(data)
         return data
     report_data = phases.run("report", report_phase)
@@ -439,6 +461,135 @@ def cmd_breaker_reset() -> int:
         store.reset_breaker(model.utcnow())
     print("breaker reset" + (f" (was open: {before.get('reason')})" if before.get("open") else " (was closed)"))
     return 0
+
+
+# --- fix (supervised remediation) ---------------------------------------------------
+
+FIX_POLL_SECONDS = 60        # --wait: one advance() step per minute
+FIX_LOCK_WAIT_SECONDS = 900  # a plain tick ends within policy.tick_budget_seconds; one running a long
+                             # apply may hold tick.lock up to the unit's TimeoutStartSec=2h (retry later)
+FIX_LOCK_POLL_SECONDS = 5
+FIX_EXIT = {"done": 0, "verified": 0, "planned": 0, "pending": 3, "running": 3, "refused": 2}
+
+
+def _fix_log(message: str) -> None:
+    print(f"security-watch: fix: {message}", file=sys.stderr)
+
+
+def _fix_progress(row: dict) -> None:
+    who = f"#{row['id']} " if row.get("id") is not None else ""
+    target = f" -> {row['target']}" if row.get("target") else ""
+    detail = f": {row['detail']}" if row.get("detail") else ""
+    _fix_log(f"{who}{row.get('playbook') or '-'} on {row.get('component') or '-'}{target}: "
+             f"{row.get('status')}{detail}")
+
+
+@contextlib.contextmanager
+def _fix_step(deps: Deps, sleep: Callable[[float], Any], wait_seconds: float) -> Iterator[bool]:
+    """Hold tick.lock around one apply/advance step so a concurrent tick neither declares the
+    running apply interrupted nor advances the same action twice; never held while ``--wait``
+    sleeps.  Yields False when a tick kept the lock for ``wait_seconds``."""
+    deadline = deps.monotonic() + wait_seconds
+    announced = False
+    while True:
+        with tick_lock() as acquired:
+            if acquired:
+                yield True
+                return
+        if deps.monotonic() >= deadline:
+            yield False
+            return
+        if not announced:
+            _fix_log("a tick is running; waiting for it to finish")
+            announced = True
+        sleep(FIX_LOCK_POLL_SECONDS)
+
+
+def _fix_list(store, policy, specs, deps, registry, out) -> int:
+    from security_watch import act as act_mod
+    rows = act_mod.list_manual(act_ctx(store, policy, specs, deps, deps.clock()), registry)
+    if not rows:
+        print("no open affected finding with a fix available", file=out)
+    for row in rows:
+        head = f"{row['component']}  {row['playbook'] or '-'}  ({', '.join(row['finding_keys'])})"
+        if row["refusal"]:
+            print(f"{head}\n    refused: {row['refusal']}", file=out)
+            continue
+        print(f"{head}\n    target: {row['target']}", file=out)
+        if row["age_gate"]:
+            print(f"    age gate: {row['age_gate']} (fix --skip-age-gate overrides)", file=out)
+        for step in row["plan_steps"]:
+            print(f"    - {step}", file=out)
+    return 0
+
+
+def run_fix(args: argparse.Namespace, store, policy: config.Policy, specs: dict[str, config.ComponentSpec],
+            deps: Deps, *, registry=None, sleep: Callable[[float], Any] = time.sleep, out=None) -> int:
+    """``fix``: list, start (``run_manual``) or resume (``advance_manual``) a supervised fix.
+
+    Prints one progress line per step to stderr and the final row as JSON to ``out``.  Exit 0 on
+    done/verified (and dry runs), 3 when still pending, 2 on refusal, 1 on failed/rolled_back/unverified.
+    """
+    from security_watch import act as act_mod
+    out = out or sys.stdout
+    if args.list:
+        return _fix_list(store, policy, specs, deps, registry, out)
+
+    with _fix_step(deps, sleep, FIX_LOCK_WAIT_SECONDS) as locked:
+        ctx = act_ctx(store, policy, specs, deps, deps.clock())
+        if not locked:
+            row = {"id": args.resume, "playbook": args.playbook or "", "component": args.component or "",
+                   "status": "refused", "target": "", "undo": "", "plan_steps": [],
+                   "detail": f"a tick held tick.lock for {FIX_LOCK_WAIT_SECONDS}s; retry later"}
+        elif args.resume is not None:
+            row = act_mod.advance_manual(args.resume, ctx, registry=registry)
+        else:
+            row = act_mod.run_manual(args.component, ctx, registry=registry, playbook=args.playbook,
+                                     finding_keys=args.findings, skip_age_gate=args.skip_age_gate,
+                                     dry_run=args.dry_run)
+    _fix_progress(row)
+
+    deadline = deps.monotonic() + max(0, args.wait)
+    while row.get("status") in ("pending", "running") and row.get("id") is not None:
+        remaining = deadline - deps.monotonic()
+        if remaining <= 0:
+            break
+        sleep(min(FIX_POLL_SECONDS, remaining))
+        with _fix_step(deps, sleep, 0) as locked:
+            if locked:
+                row = act_mod.advance_manual(row["id"], act_ctx(store, policy, specs, deps, deps.clock()),
+                                             registry=registry)
+            else:
+                row = act_mod.action_row(store.get_action(row["id"]))
+                row["detail"] = f"a tick is running (it advances the action too); {row['detail']}"
+        _fix_progress(row)
+
+    print(json.dumps(row, sort_keys=True, default=str), file=out)
+    return FIX_EXIT.get(row.get("status"), 1)
+
+
+def _fix_usage_error(args: argparse.Namespace) -> str:
+    modes = [name for name, on in (("<component>", args.component), ("--list", args.list),
+                                   ("--resume", args.resume is not None)) if on]
+    if len(modes) != 1:
+        return "fix needs exactly one of <component>, --list or --resume ACTION_ID"
+    start_only = [name for name, on in (("--playbook", args.playbook), ("--finding", args.findings),
+                                        ("--dry-run", args.dry_run), ("--skip-age-gate", args.skip_age_gate)) if on]
+    if start_only and modes[0] != "<component>":
+        return f"{', '.join(start_only)} only apply to fix <component>"
+    if args.list and args.wait:
+        return "--wait does not apply to fix --list"
+    if args.wait < 0:
+        return "--wait must be >= 0"
+    return ""
+
+
+def cmd_fix(args: argparse.Namespace) -> int:
+    from security_watch.store import Store
+    policy, specs = _load()
+    with Store() as store:
+        return run_fix(args, store, policy, specs, default_deps())
+
 
 
 # --- replay ---------------------------------------------------------------------
@@ -553,12 +704,31 @@ def _parser() -> argparse.ArgumentParser:
     rp = sub.add_parser("replay", help="shadow tick over a recorded fixture (offline)")
     rp.add_argument("fixture_dir", type=Path)
     rp.add_argument("--json", action="store_true", help="compact single-line JSON")
+    fp = sub.add_parser("fix", help="supervised fix of one component (Carter-approved: ignores shadow mode, "
+                                    "the daily cap and the cooldown)")
+    fp.add_argument("component", nargs="?", help="component id from components.toml")
+    fp.add_argument("--list", action="store_true",
+                    help="plan (never apply) every component with open affected findings that have a fix")
+    fp.add_argument("--resume", type=int, metavar="ACTION_ID", help="advance a pending manual action")
+    fp.add_argument("--playbook", metavar="ID", help="required when the findings need more than one playbook")
+    fp.add_argument("--finding", action="append", dest="findings", metavar="KEY",
+                    help="restrict to this finding key (repeatable)")
+    fp.add_argument("--dry-run", action="store_true", help="plan and gate only; apply nothing")
+    fp.add_argument("--skip-age-gate", action="store_true",
+                    help="allow a fix release younger than release_min_age_hours with one issuer source")
+    fp.add_argument("--wait", type=int, default=0, metavar="SECONDS",
+                    help=f"advance a pending action every {FIX_POLL_SECONDS}s until done or SECONDS pass")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
     command = args.command or "tick"
+    if command == "fix":
+        error = _fix_usage_error(args)
+        if error:
+            parser.error(error)
     try:
         if command == "tick":
             return cmd_tick()
@@ -574,6 +744,8 @@ def main(argv: list[str] | None = None) -> int:
             result = replay(args.fixture_dir)
             print(json.dumps(result, indent=None if args.json else 2, sort_keys=True, default=str))
             return 0
+        if command == "fix":
+            return cmd_fix(args)
     except Exception:  # noqa: BLE001 - escaped the phase guards: a bug; exit 1 for OnFailure
         traceback.print_exc(file=sys.stderr)
         return 1

@@ -209,15 +209,19 @@ class FindingTests(StoreTestCase):
         self.assertEqual(self.store.close_missing_findings("freshrss", {keep.key}, NOW + 2 * HOUR), [])
         self.assertEqual([f.key for f in self.store.findings_resolved_since(NOW + 90 * timedelta(minutes=1))], [])
 
-    def test_reopened_finding_keeps_first_seen_and_clears_resolution(self):
+    def test_reopened_finding_gets_new_first_seen_and_clears_resolution(self):
         f = make_finding()
         self.store.upsert_finding(f, NOW)
         self.store.close_missing_findings("freshrss", set(), NOW + HOUR)
         back = make_finding()
         self.assertEqual(self.store.upsert_finding(back, NOW + 2 * HOUR), "updated")
-        self.assertEqual(back.first_seen, iso(NOW))
+        self.assertEqual(back.first_seen, iso(NOW + 2 * HOUR))
+        self.assertEqual(self.store.get_finding(f.key).first_seen, iso(NOW + 2 * HOUR))
         self.assertEqual([x.key for x in self.store.open_findings()], [f.key])
         self.assertEqual(self.store.findings_resolved_since(NOW), [])
+        again = make_finding()
+        self.assertEqual(self.store.upsert_finding(again, NOW + 3 * HOUR), "same")
+        self.assertEqual(again.first_seen, iso(NOW + 2 * HOUR))
 
 
 class ReachAndInventoryTests(StoreTestCase):
@@ -280,6 +284,21 @@ class ActionJournalTests(StoreTestCase):
         self.assertIsNone(got["finished_at"])
         with self.assertRaises(KeyError):
             self.store.get_action(9999)
+
+    def test_manual_actions_are_in_flight_but_never_count_against_the_cap(self):
+        auto = self.store.start_action(make_plan(), mode="active", status="running", now=NOW)
+        manual = self.store.start_action(make_plan("blog", "blog rebuild"), mode="manual", status="running", now=NOW)
+        done = self.store.start_action(make_plan("news"), mode="manual", status="running", now=NOW)
+        self.store.update_action(manual, status="pending", detail="PR opened", now=NOW)
+        self.store.update_action(done, status="verified", detail="ok", now=NOW, finished=True)
+
+        self.assertEqual(self.store.executed_actions_since(NOW - HOUR), 1)
+        self.assertEqual([a["id"] for a in self.store.active_actions()], [auto, manual])
+        self.assertEqual(self.store.get_action(manual)["mode"], "manual")
+        self.assertIsNone(self.store.last_action("blog"))   # default mode stays "active"
+        self.assertEqual(self.store.last_action("blog", mode="manual")["id"], manual)
+        with self.assertRaises(ValueError):
+            self.store.start_action(make_plan(), mode="supervised", status="running", now=NOW)
 
 
 class NotificationBreakerRefusalTests(StoreTestCase):

@@ -1,0 +1,29 @@
+# Verified not-affected assessments.
+# An entry says `component` is not affected by `cves` and lists deterministic checks
+# that prove the condition.  Entries are re-verified every scan: each check runs
+# `argv` (inside `container` via `docker exec` when set) and passes only when it exits 0
+# and the `expect` regex (Python re.search) matches stdout.  While every check passes,
+# covered findings are downgraded to low with "verified not affected".  A failing check
+# fails closed: the finding keeps its normal urgency and the failure is shown as a reason.
+# Remove an entry when it no longer applies (the component changed or the CVE is fixed).
+# Agents add entries only with checks that prove the condition; `verified` is the ISO
+# date a human/agent last verified the reasoning.
+
+[[not_affected]]
+id = "openssh-sshole-glibc-nopassword"
+component = "host"
+cves = ["CVE-2026-123158"]
+reason = "the sshole bypass needs sshd built without PAM on musl libc with password authentication; the host sshd links glibc (Ubuntu) and has PasswordAuthentication no and KbdInteractiveAuthentication no"
+verified = "2026-11-09"
+
+[[not_affected.checks]]
+argv = ["ldd", "/usr/sbin/sshd"]
+expect = 'libc\.so\.6'
+
+[[not_affected.checks]]
+argv = ["sudo", "-n", "sshd", "-T"]
+expect = '(?m)^passwordauthentication no$'
+
+[[not_affected.checks]]
+argv = ["sudo", "-n", "sshd", "-T"]
+expect = '(?m)^kbdinteractiveauthentication no$'

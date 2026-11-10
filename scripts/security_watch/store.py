@@ -442,11 +442,16 @@ class Store:
 
     # findings ----------------------------------------------------------------------------
     def upsert_finding(self, f: Finding, now) -> str:
+        """Insert or update a finding; ``first_seen`` is kept, except that a fixed finding that
+        reopens starts over (``first_seen = now``) so urgency windows and alerts treat it as new."""
         at = _ts(now)
-        row = self._conn.execute("SELECT data, first_seen FROM findings WHERE key = ?", (f.key,)).fetchone()
+        row = self._conn.execute("SELECT data, first_seen, status FROM findings WHERE key = ?",
+                                 (f.key,)).fetchone()
         if row is None:
             f.first_seen = f.first_seen or at
             result = "new"
+        elif row["status"] == "fixed" and f.status != "fixed":
+            f.first_seen = at
         else:
             f.first_seen = row["first_seen"]
         data = _dumps(f)
@@ -460,9 +465,10 @@ class Store:
                     "VALUES(?,?,?,?,?,?,?)", (f.key, f.component_id, f.status, data, f.first_seen, at, resolved_at))
             elif result == "updated":
                 self._conn.execute(
-                    "UPDATE findings SET component_id = ?, status = ?, data = ?, updated_at = ?, "
+                    "UPDATE findings SET component_id = ?, status = ?, data = ?, first_seen = ?, updated_at = ?, "
                     "resolved_at = CASE WHEN ? = 'fixed' THEN COALESCE(resolved_at, ?) ELSE NULL END "
-                    "WHERE key = ?", (f.component_id, f.status, data, at, f.status, resolved_at, f.key))
+                    "WHERE key = ?", (f.component_id, f.status, data, f.first_seen, at, f.status, resolved_at,
+                                      f.key))
         return result
 
     def get_finding(self, key) -> Finding | None:
@@ -535,8 +541,10 @@ class Store:
         }
 
     def start_action(self, plan: Plan, *, mode: str, status: str, now) -> int:
-        if mode not in ("shadow", "active"):
-            raise ValueError(f"action mode must be shadow or active, got {mode!r}")
+        """Journal a new action: ``shadow`` proposal, ``active`` autonomous run or ``manual``
+        (human-approved ``fix`` run, never counted against the autonomous daily cap)."""
+        if mode not in ("shadow", "active", "manual"):
+            raise ValueError(f"action mode must be shadow, active or manual, got {mode!r}")
         at = _ts(now)
         with self._conn:
             cur = self._conn.execute(
@@ -581,11 +589,13 @@ class Store:
             (ts, ts))]
 
     def active_actions(self) -> list[dict]:
+        """Running/pending autonomous and manual actions (multi-tick work still in flight)."""
         return [self._action_row(r) for r in self._conn.execute(
-            f"SELECT {_ACTION_COLUMNS} FROM actions WHERE mode = 'active' AND status IN ('running', 'pending') "
-            "ORDER BY id")]
+            f"SELECT {_ACTION_COLUMNS} FROM actions WHERE mode IN ('active', 'manual') "
+            "AND status IN ('running', 'pending') ORDER BY id")]
 
     def executed_actions_since(self, since) -> int:
+        """Autonomous executions only: manual ``fix`` runs never consume the daily cap."""
         row = self._conn.execute(
             "SELECT COUNT(*) AS n FROM actions WHERE mode = 'active' AND status NOT IN ('proposed', 'refused') "
             "AND started_at >= ?", (_ts(since),)).fetchone()
