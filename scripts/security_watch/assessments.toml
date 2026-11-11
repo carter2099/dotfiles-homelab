@@ -27,3 +27,14 @@ expect = '(?m)^passwordauthentication no$'
 [[not_affected.checks]]
 argv = ["sudo", "-n", "sshd", "-T"]
 expect = '(?m)^kbdinteractiveauthentication no$'
+
+[[not_affected]]
+id = "openssh-sshole-glibc-nopassword-rig"
+component = "rig"
+cves = ["CVE-2026-123158"]
+reason = "the sshole bypass needs sshd built without PAM on musl libc with password authentication; the rig's Ubuntu sshd links glibc and has PasswordAuthentication no and KbdInteractiveAuthentication no (10-hardening.conf). One SSH call: while the rig is in Windows or asleep the check fails closed and the finding keeps its urgency"
+verified = "2026-11-10"
+
+[[not_affected.checks]]
+argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ConnectionAttempts=1", "-o", "StrictHostKeyChecking=yes", "gamingrig-linux", "ldd /usr/sbin/sshd && sudo -n sshd -T"]
+expect = '(?ms)\A(?=.*libc\.so\.6)(?=.*^passwordauthentication no$)(?=.*^kbdinteractiveauthentication no$)'

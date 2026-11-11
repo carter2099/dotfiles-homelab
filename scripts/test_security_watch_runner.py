@@ -16,7 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from security_watch import config, feeds, model, notify, report, runner  # noqa: E402
+from security_watch import act, config, feeds, model, notify, report, runner  # noqa: E402
 from security_watch.model import Finding, Inventory, Package, Signal  # noqa: E402
 from security_watch.store import Store  # noqa: E402
 
@@ -105,6 +105,29 @@ class NotifyTests(_StoreCase):
         action = next(i for i in items if i["kind"] == "action")
         self.assertIn("Playbook: steward-freshrss on freshrss", action["lines"])
         self.assertIn("Detail: health failed", action["lines"])
+
+    def test_finding_items_lead_with_their_remediation_status(self):
+        rack = _finding(component="blog", group="CVE-2026-125111", name="rack", version="3.2.6")
+        bun = _finding(component="bun", group="CVE-2026-2")
+        fresh = _finding()
+        plan = model.Plan(playbook="repo-pr", component_id="blog", finding_keys=[rack.key], target="t",
+                          lock_keys=["app-blog"], steps=[], undo="x")
+        action_id = self.store.start_action(plan, mode="active", status="running", now=NOW)
+        self.store.update_action(action_id, status="pending", detail="deploying it next tick", now=NOW)
+        result = act.ActResult(refused=[
+            model.Refusal("steward-freshrss", "freshrss", "about another finding", finding_keys=["freshrss|CVE-9"]),
+            model.Refusal("steward-freshrss", "freshrss", "no newer FreshRSS release"),
+        ])
+        items = notify.urgent_items([rack, bun, fresh], [], self.store, self.policy, self.specs, NOW,
+                                    act_result=result)
+        first = {i["dedupe"]: i["lines"][0] for i in items}
+        self.assertEqual(first[f"finding:{rack.key}"],
+                         f"Remediation: action #{action_id} repo-pr pending: deploying it next tick")
+        self.assertTrue(first[f"finding:{bun.key}"].startswith("Remediation: no automated fix (alert-only component"))
+        self.assertEqual(first[f"finding:{fresh.key}"],
+                         "Remediation: steward-freshrss did not run: no newer FreshRSS release")
+        skipped = notify.urgent_items([fresh], [], self.store, self.policy, self.specs, NOW)
+        self.assertIn("act phase did not run", skipped[0]["lines"][0])
 
     def test_failed_action_held_back_by_the_cap_is_sent_on_a_later_tick(self):
         policy = dataclasses.replace(self.policy, urgent_max_per_day=1)

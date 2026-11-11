@@ -162,6 +162,7 @@ class Refusal:
     component_id: str
     reason: str                     # precondition that failed, human readable
     alert: bool = True              # surface to Carter (False for transient, e.g. lock busy)
+    finding_keys: list[str] = field(default_factory=list)  # findings it concerns; empty = the whole group
 
 
 @dataclass

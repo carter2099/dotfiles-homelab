@@ -15,7 +15,9 @@
 #              app_deploy) or "release:<script>" (run in ~/dev/<repo>)
 #   edits      deterministic repo edits repo-pr may make: base-refresh | go-builder |
 #              go-toolchain | go-module | pip-pin
-#   pin_owner  ecosystems another automation owns (alert only, never edited here)
+#   pin_owner  ecosystems another automation owns: never edited here; on a repo-pr component
+#              the fix is deployed (deploy-only) once origin/main's lockfile resolves it
+#              (RubyGems: Gemfile.lock), else refused with this reason
 #   revision_cmd  argv printing the binary's 40-hex source commit, for Go binaries built
 #              without VCS stamping (-buildvcs=false); inventory uses it as vcs_revision
 #   system_units / health on host: system units and loopback origins apt-security

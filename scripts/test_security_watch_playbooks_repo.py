@@ -253,14 +253,50 @@ class BumpTests(unittest.TestCase):
 
 
 class PlanTests(TempHomeTestCase):
-    def test_refuses_an_ecosystem_with_a_pin_owner(self):
-        run = FakeRun()
-        result = RepoPrPlaybook().plan(
-            [finding("blog", "RubyGems", "rack", "3.1.0", ["3.1.1"])], SPECS["blog"], make_ctx(run))
+    @staticmethod
+    def gemfile_responder(rack):
+        lock = f"GEM\n  remote: https://rubygems.org/\n  specs:\n    rack ({rack})\n    rails (8.1.4.1)\n"
+
+        def responder(argv, kw):
+            if "show" in argv:
+                path = argv[-1]
+                return (0, lock) if path == "origin/main:Gemfile.lock" else (0, BLOG_DOCKERFILE)
+            if "rev-parse" in argv:
+                return 0, "mainsha1\n"
+            if "ls-tree" in argv:
+                return 0, ".github/workflows/ci.yml\n"
+            return None
+        return responder
+
+    def test_pin_owner_fix_not_on_main_refuses_without_blocking_other_edits(self):
+        rack = finding("blog", "RubyGems", "rack", "3.2.6", ["3.1.23", "3.2.8"], group="CVE-2026-125111",
+                       urgency="urgent")
+        run = FakeRun(self.gemfile_responder("3.2.6"))
+        result = RepoPrPlaybook().plan([rack], SPECS["blog"], make_ctx(run))
         self.assertIsInstance(result, Refusal)
         self.assertTrue(result.alert)
         self.assertIn("dependabot-webhook", result.reason)
-        self.assertEqual(run.calls, [])
+        self.assertIn("origin/main still resolves rack 3.2.6 (fixed in 3.2.8)", result.reason)
+        self.assertEqual(result.finding_keys, ["blog|CVE-2026-125111"])
+        brotli = finding("blog", "Debian:12", "brotli", "1.0.9-2", ["1.0.9-2+deb12u1"])
+        result = RepoPrPlaybook().plan([rack, brotli], SPECS["blog"], make_ctx(FakeRun(self.gemfile_responder("3.2.6"))))
+        self.assertIsInstance(result, Plan)
+        self.assertEqual(result.state["edit"], "base-refresh")
+        self.assertEqual(result.finding_keys, ["blog|CVE-2026-111497"])
+
+    def test_pin_owner_fix_merged_on_main_plans_a_deploy_only_action(self):
+        group = [finding("blog", "RubyGems", "rack", "3.2.6", ["2.2.25", "3.1.23", "3.2.8"], group=g, urgency=u)
+                 for g, u in (("CVE-2026-125111", "urgent"), ("CVE-2026-125109", "normal"))]
+        result = RepoPrPlaybook().plan(group, SPECS["blog"], make_ctx(FakeRun(self.gemfile_responder("3.2.8"))))
+        self.assertIsInstance(result, Plan)
+        self.assertTrue(result.state["deploy_only"])
+        self.assertEqual(result.finding_keys, ["blog|CVE-2026-125111", "blog|CVE-2026-125109"])
+        self.assertEqual(result.target, "blog: redeploy origin/main mainsha (Gemfile.lock resolves rack 3.2.8)")
+        self.assertIsNone(result.release_published)
+        outcome = RepoPrPlaybook().apply(result, make_ctx(FakeRun()))
+        self.assertEqual(outcome.status, "pending")
+        self.assertEqual(outcome.state["stage"], "deploy")
+        self.assertEqual(outcome.state["merge_sha"], "mainsha1")
 
     def test_refuses_an_edit_the_component_does_not_allow(self):
         run = FakeRun()

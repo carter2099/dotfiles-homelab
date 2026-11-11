@@ -376,7 +376,7 @@ class NoFixRefusalTests(ActTestBase):
     def specs(self):
         return {
             "bun": make_spec("bun", "alert", note="herdr-web-client's build requires Bun 1.3.14 exactly"),
-            "blog": make_spec("blog", "repo-pr", repo="blog", pin_owner={"RubyGems": "dependabot owns bundler"}),
+            "freshrss": make_spec("freshrss", "steward-freshrss", pin_owner={"PHP": "upstream image owns php"}),
             "host": make_spec("host", "apt-security"),
             "llm-proxy": make_spec("llm-proxy", "release-rebuild", repo="llm-proxy", edits=["go-toolchain"]),
         }
@@ -387,18 +387,19 @@ class NoFixRefusalTests(ActTestBase):
         unknown = make_finding("bun", cve="CVE-2026-1002", eco="runtime", name="bun")
         unknown.status = "unknown"
         return [no_fix, unknown,
-                make_finding("blog", eco="RubyGems", name="rack"),
+                make_finding("freshrss", eco="PHP", name="php"),
                 make_finding("host", eco="Ubuntu:24.04:LTS", name="linux", binary="running-kernel"),
                 make_finding("llm-proxy", eco="Go", name="golang.org/x/net")]
 
     def check(self, mode):
         result = act.act(self.findings(), self.ctx(mode=mode, specs=self.specs()), registry={})
         alerts = {r.component_id: r for r in result.refused if r.alert}
-        self.assertEqual(set(alerts), {"bun", "blog"})
+        self.assertEqual(set(alerts), {"bun", "freshrss"})
         self.assertIn("requires Bun 1.3.14 exactly", alerts["bun"].reason)
         self.assertIn("bun|CVE-2026-1001", alerts["bun"].reason)
         self.assertNotIn("CVE-2026-1002", alerts["bun"].reason)
-        self.assertIn("dependabot owns bundler", alerts["blog"].reason)
+        self.assertIn("upstream image owns php", alerts["freshrss"].reason)
+        self.assertEqual(alerts["freshrss"].finding_keys, ["freshrss|CVE-2026-1001"])
         quiet = {r.component_id for r in result.refused if not r.alert}
         self.assertEqual(quiet, {"host", "llm-proxy"})
         self.assertEqual(len(self.store.refusals_since(NOW - timedelta(hours=1))), 2)
@@ -891,11 +892,12 @@ class SelectPlaybookTests(unittest.TestCase):
     def test_alert_owner_selects_nothing(self):
         self.assertIsNone(act.select_playbook(make_finding("bun"), make_spec("bun", "alert")))
 
-    def test_pin_owner_ecosystem_selects_nothing(self):
+    def test_pin_owner_ecosystem_goes_to_repo_pr_only_on_repo_pr_components(self):
         spec = make_spec("blog", "repo-pr", repo="blog", pin_owner={"RubyGems": "dependabot owns bundler"})
         gem = make_finding("blog", eco="RubyGems", name="rack")
-        self.assertIsNone(act.select_playbook(gem, spec))
-        self.assertEqual(act.select_playbook(make_finding("blog"), spec), "repo-pr")
+        self.assertEqual(act.select_playbook(gem, spec), "repo-pr")
+        other = make_spec("blog", "steward-freshrss", pin_owner={"RubyGems": "dependabot owns bundler"})
+        self.assertIsNone(act.select_playbook(gem, other))
 
     def test_release_rebuild_stdlib_vs_module(self):
         spec = make_spec("llm-proxy", "release-rebuild", repo="llm-proxy", edits=["go-module"])

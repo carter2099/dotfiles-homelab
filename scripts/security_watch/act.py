@@ -113,11 +113,13 @@ def playbooks() -> dict[str, Playbook]:
 
 # --- playbook selection ------------------------------------------------------
 
-def _selection(finding: Finding, spec: config.ComponentSpec) -> tuple[str | None, str, bool]:
+def selection(finding: Finding, spec: config.ComponentSpec) -> tuple[str | None, str, bool]:
     """(playbook id or None, reason when None, whether that reason is surfaced to Carter).
 
-    Alert-only owners and pin_owner ecosystems are permanent "no automated fix" facts
-    (alert=True, recorded); the running kernel and rebuild-without-edit are not.
+    Alert-only owners are permanent "no automated fix" facts (alert=True, recorded), as are
+    pin_owner ecosystems unless the component is repo-pr's: repo-pr never edits the owner's
+    pins, it only deploys an origin/main that already resolves the fix (else it refuses with
+    the owner's reason).  The running kernel and rebuild-without-edit are not recorded.
     """
     pkg = finding.package
     if spec.owner == "alert":
@@ -126,6 +128,8 @@ def _selection(finding: Finding, spec: config.ComponentSpec) -> tuple[str | None
     pin_owner = spec.get("pin_owner") or {}
     for eco in (pkg.ecosystem, pkg.ecosystem.split(":", 1)[0]):
         if eco in pin_owner:
+            if spec.owner == "repo-pr" and spec.repo:
+                return "repo-pr", "", False
             return None, str(pin_owner[eco]), True
     if spec.owner == "release-rebuild":
         if pkg.ecosystem == "Go" and pkg.name == "stdlib":
@@ -143,7 +147,7 @@ def _selection(finding: Finding, spec: config.ComponentSpec) -> tuple[str | None
 
 
 def select_playbook(finding: Finding, spec: config.ComponentSpec) -> str | None:
-    return _selection(finding, spec)[0]
+    return selection(finding, spec)[0]
 
 
 # --- helpers -----------------------------------------------------------------
@@ -471,12 +475,13 @@ def act(findings: list[Finding], ctx: ActCtx, registry: Mapping[str, Playbook] |
         spec = ctx.specs.get(finding.component_id)
         if spec is None:
             continue
-        pb_id, why, alert = _selection(finding, spec)
+        pb_id, why, alert = selection(finding, spec)
         if pb_id is None:
             if alert:  # alert-only owner / pin_owner: explain why there is no automated fix
                 no_fix.setdefault((spec.id, spec.owner, why), []).append(finding.key)
             elif finding.fix_available:
-                result.refused.append(Refusal(spec.owner, spec.id, f"{finding.key}: {why}", alert=False))
+                result.refused.append(Refusal(spec.owner, spec.id, f"{finding.key}: {why}", alert=False,
+                                              finding_keys=[finding.key]))
             continue
         if finding.fix_available:
             prior = attempted.get((spec.id, finding.key))
@@ -492,10 +497,11 @@ def act(findings: list[Finding], ctx: ActCtx, registry: Mapping[str, Playbook] |
         keys = ", ".join(sorted({f.key for f, _ in entries}))
         _refuse(ctx, result, Refusal(pb_id, component,
                                      f"already attempted by {by} within {policy.component_cooldown_hours}h; "
-                                     f"still open: {keys}", alert=False))
+                                     f"still open: {keys}", alert=False,
+                                     finding_keys=sorted({f.key for f, _ in entries})))
     for (component, owner, why), keys in sorted(no_fix.items()):
         _refuse(ctx, result, Refusal(owner, component, f"no automated fix: {why} ({', '.join(sorted(keys))})",
-                                     alert=True))
+                                     alert=True, finding_keys=sorted(keys)))
 
     since_day = ctx.now - timedelta(hours=24)
     executed_today = ctx.store.executed_actions_since(since_day) if policy.active and groups else 0
@@ -642,7 +648,7 @@ def _fix_groups(ctx: ActCtx, spec: config.ComponentSpec, finding_keys: list[str]
         if wanted and finding.key not in wanted:
             continue
         seen.add(finding.key)
-        pb_id, why, _alert = _selection(finding, spec)
+        pb_id, why, _alert = selection(finding, spec)
         if pb_id is None:
             no_fix.setdefault(why, []).append(finding.key)
         else:

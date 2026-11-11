@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import subprocess
@@ -17,6 +18,7 @@ import jev
 from steward import dotfiles
 
 from steward import audit, config, fixes, report, routing, updates
+import steward_rig_maintenance
 
 _ISOLATED_STATE = None
 _ENV_PATCH = None
@@ -3248,6 +3250,71 @@ class EmailTriageTests(unittest.TestCase):
         (needs,) = self.rig_triage(last_ok)["needs"]
         self.assertIn(f"more than {report.RIG_MAINTENANCE_SCAN_DAYS} days", needs["text"])
 
+    @staticmethod
+    def write_manual_records(root, *records):
+        with (Path(root) / "rig-maintenance.jsonl").open("w") as fh:
+            for record in records:
+                fh.write((record if isinstance(record, str) else json.dumps(record)) + "\n")
+
+    @staticmethod
+    def manual_record(date, status="ok", step="gamingrig_maintenance"):
+        return {"schema": 1, "date": date, "status": status,
+                "steps": [{"step": step, "status": status}]}
+
+    def test_manual_rig_maintenance_newer_than_the_last_ok_run_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "2026-10-15").mkdir()
+            (root / "2026-10-15" / "01-applied.json").write_text(json.dumps(
+                {"steps": [{"step": "gamingrig_maintenance", "status": "ok"}]}))
+            self.write_manual_records(root, self.manual_record("2026-10-12"),
+                                      self.manual_record("2026-10-18"))
+            last_ok = report._rig_last_maintained(root / "2026-10-20", "2026-10-20")
+            self.assertEqual(last_ok, {"date": "2026-10-18", "nights": 2})
+            self.write_manual_records(root, self.manual_record("2026-10-12"))
+            older = report._rig_last_maintained(root / "2026-10-20", "2026-10-20")
+        self.assertEqual(older, {"date": "2026-10-15", "nights": 5})
+        self.assertEqual(report._rig_staleness(last_ok),
+                         " — last maintained 2026-10-18 (2 nights ago)")
+
+    def test_same_day_manual_rig_maintenance_reads_earlier_today(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_manual_records(tmp, self.manual_record("2026-10-20"))
+            last_ok = report._rig_last_maintained(Path(tmp) / "2026-10-20", "2026-10-20")
+        self.assertEqual(last_ok, {"date": "2026-10-20", "nights": 0})
+        self.assertEqual(report._rig_staleness(last_ok),
+                         " — last maintained 2026-10-20 (earlier today)")
+        triaged = self.rig_triage(last_ok)
+        self.assertEqual(triaged["needs"], [])
+        self.assertEqual(triaged["watching"][0]["text"],
+                         "Gaming rig not maintained tonight (offline or asleep) — "
+                         "last maintained 2026-10-20 (earlier today)")
+
+    def test_unusable_manual_rig_records_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_manual_records(
+                tmp,
+                self.manual_record("2026-10-19", status="failed"),
+                self.manual_record("2026-10-19", status="skipped"),
+                self.manual_record("2026-10-19", step="llama_cpp"),
+                self.manual_record("2026-08-20"),           # 61 days back
+                self.manual_record("2026-10-21"),           # after the run date
+                "not json", "", "[]", "5", json.dumps({"date": 5, "steps": []}),
+                json.dumps({"date": "19-10-2026", "steps": []}),
+                json.dumps({"steps": [{"step": "gamingrig_maintenance", "status": "ok"}]}),
+                json.dumps({"date": "2026-10-19", "steps": "gamingrig_maintenance"}),
+                json.dumps({"date": "2026-10-19", "steps": ["ok", None]}),
+            )
+            last_ok = report._rig_last_maintained(Path(tmp) / "2026-10-20", "2026-10-20")
+            self.assertEqual(last_ok, {"date": None, "days": report.RIG_MAINTENANCE_SCAN_DAYS})
+            self.write_manual_records(tmp, self.manual_record("2026-10-17"))
+            bounded = report._rig_last_maintained(Path(tmp) / "2026-10-20", "2026-10-20",
+                                                  max_days=3)
+            self.assertEqual(bounded, {"date": "2026-10-17", "nights": 3})
+            (Path(tmp) / "rig-maintenance.jsonl").write_bytes(b"\xff\xfe\x00garbage")
+            undecodable = report._rig_last_maintained(Path(tmp) / "2026-10-20", "2026-10-20")
+        self.assertEqual(undecodable, {"date": None, "days": report.RIG_MAINTENANCE_SCAN_DAYS})
+
     def test_deferred_row_names_the_blocking_pr(self):
         triaged = self.triage(self.route(
             status="deferred", summary="Deferred: queued behind open steward-code PR #8, ...",
@@ -3453,6 +3520,79 @@ class RunTimingAndMemoryTests(unittest.TestCase):
         self.assertEqual(report._steward_memory_high_mib(cgroup), 6144)
         (cgroup / "memory.high").write_text(f"{4096 * self.MIB}\n")
         self.assertEqual(report._steward_memory_high_mib(cgroup), 4096)
+
+
+class RigMaintenanceEntrypointTests(unittest.TestCase):
+    RIG_OK = {"step": "gamingrig_maintenance", "status": "ok", "os": "Linux",
+              "substeps": [{"step": "rig_apt_upgrade", "status": "ok"}],
+              "reboot_requested": False, "new_boot_observed": False, "rebooted": False,
+              "post_reboot_health_passed": False}
+    NOW_UTC = datetime(2026, 11, 10, 9, 30, tzinfo=timezone.utc)
+    NOW_LOCAL = datetime(2026, 11, 10, 10, 30)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.record_path = Path(tmp.name) / "rig-maintenance.jsonl"
+        clock = MagicMock()
+        clock.now.side_effect = lambda tz=None: self.NOW_UTC if tz else self.NOW_LOCAL
+        for p in (patch.object(steward_rig_maintenance, "RECORD_PATH", self.record_path),
+                  patch.object(steward_rig_maintenance, "datetime", clock)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_main(self, rig, llama, running=False):
+        with patch.object(steward_rig_maintenance.resolver, "_steward_running",
+                          return_value=running), \
+                patch.object(updates, "_p1_gamingrig_maintenance", return_value=rig) as rig_mock, \
+                patch.object(updates, "_p1_llama_cpp_update", return_value=llama) as llama_mock, \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            code = steward_rig_maintenance.main([])
+        return code, rig_mock, llama_mock
+
+    def records(self):
+        return [json.loads(line) for line in self.record_path.read_text().splitlines()]
+
+    def test_refuses_while_the_steward_runs_and_writes_nothing(self):
+        code, rig_mock, llama_mock = self.run_main(self.RIG_OK, {"status": "ok"}, running=True)
+        self.assertEqual(code, 2)
+        rig_mock.assert_not_called()
+        llama_mock.assert_not_called()
+        self.assertFalse(self.record_path.exists())
+
+    def test_ok_run_appends_one_record_the_report_counts(self):
+        llama = {"step": "llama_cpp", "status": "ok"}
+        code, _, llama_mock = self.run_main(dict(self.RIG_OK), dict(llama))
+        self.assertEqual(code, 0)
+        llama_mock.assert_called_once_with()
+        (record,) = self.records()
+        self.assertEqual(record, {
+            "schema": 1, "date": "2026-11-10",
+            "started_at": "2026-11-10T09:30:00+00:00",
+            "finished_at": "2026-11-10T09:30:00+00:00",
+            "status": "ok", "steps": [self.RIG_OK, llama]})
+        self.assertEqual(self.record_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(
+            report._rig_last_maintained(self.record_path.parent / "2026-11-12", "2026-11-12"),
+            {"date": "2026-11-10", "nights": 2})
+
+    def test_failed_llama_update_fails_the_record(self):
+        code, _, _ = self.run_main(dict(self.RIG_OK),
+                                   {"step": "llama_cpp", "status": "failed", "error": "build"})
+        self.assertEqual(code, 1)
+        (record,) = self.records()
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual([s["status"] for s in record["steps"]], ["ok", "failed"])
+
+    def test_rig_not_in_linux_skips_llama_and_records_skipped(self):
+        rig = {"step": "gamingrig_maintenance", "status": "skipped", "substeps": [],
+               "reason": "offline or sleeping: no route to gamingrig-linux"}
+        code, _, llama_mock = self.run_main(rig, {"status": "ok"})
+        self.assertEqual(code, 1)
+        llama_mock.assert_not_called()
+        (record,) = self.records()
+        self.assertEqual((record["status"], record["steps"]), ("skipped", [rig]))
 
 
 if __name__ == "__main__":

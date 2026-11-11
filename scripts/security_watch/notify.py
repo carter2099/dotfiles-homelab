@@ -15,7 +15,7 @@ import sys
 from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable
 
-from security_watch import model
+from security_watch import act, model
 
 FAILED_ACTION_STATUSES = ("failed", "rolled_back", "unverified")
 MAX_RENDERED = 25
@@ -52,11 +52,41 @@ def _has_runtime(store, name: str) -> bool:
     return False
 
 
-def _finding_item(f: model.Finding, specs: Any) -> dict:
+def _remediation(f: model.Finding, spec, actions: list[dict], refused: list[model.Refusal] | None) -> str:
+    """What security-watch is doing about ``f`` after this tick's act phase.
+
+    The newest journaled action covering the finding wins; else the reason its playbook
+    did not run this tick (a refusal naming the finding, else one for its whole group);
+    ``refused`` is None when the act phase did not run.
+    """
+    covering = [a for a in actions if f.key in (a.get("finding_keys") or [])]
+    if covering:
+        newest = max(covering, key=lambda a: int(a.get("id") or 0))
+        detail = f": {newest['detail']}" if newest.get("detail") else ""
+        return f"Remediation: action #{newest.get('id')} {newest.get('playbook', '?')} {newest.get('status')}{detail}"
+    if spec is None:
+        return "Remediation: none (component not in components.toml); fix it by hand"
+    pb_id, why, _alert = act.selection(f, spec)
+    if pb_id is None:
+        return f"Remediation: no automated fix ({why}); fix it by hand"
+    if refused is None:
+        return f"Remediation: {pb_id} not attempted (the act phase did not run this tick)"
+    group = [r for r in refused if r.component_id == f.component_id and r.playbook == pb_id]
+    refusal = (next((r for r in group if f.key in r.finding_keys), None)
+               or next((r for r in group if not r.finding_keys), None))
+    if refusal is not None:
+        return f"Remediation: {pb_id} did not run: {refusal.reason}"
+    return (f"Remediation: {pb_id} did not act on it this tick; "
+            "plan: python3 ~/scripts/security_watch_runner.py fix --list")
+
+
+def _finding_item(f: model.Finding, specs: Any, actions: list[dict],
+                  refused: list[model.Refusal] | None) -> dict:
     spec = _spec(specs, f.component_id)
     exposure = spec.exposure if spec else "?"
     pkg = f.package
     lines = [
+        _remediation(f, spec, actions, refused),
         f"Component: {f.component_id} (exposure: {exposure})",
         f"Package: {pkg.ecosystem}/{pkg.name} {pkg.version}" + (f" ({pkg.binary})" if pkg.binary else ""),
         "Fixed in: " + (", ".join(f.fixed_versions) if f.fixed_versions else "no fix published yet"),
@@ -109,19 +139,25 @@ def _signal_item(sig: model.Signal, kind: str, title: str, extra: Iterable[str] 
 
 
 def urgent_items(findings: list[model.Finding], new_signals: list[model.Signal], store, policy,
-                 specs, now: datetime, *, stopgaps=None) -> list[dict]:
+                 specs, now: datetime, *, stopgaps=None, act_result=None) -> list[dict]:
     """Items that justify an immediate email; each ``{dedupe, title, lines, kind, rank}``
     (findings also carry ``since``: their first_seen).
 
+    Each finding item starts with its remediation status: journaled actions covering it, else
+    ``act_result`` (this tick's ``act.ActResult``; None when the act phase did not run).
     Remediation items are the journal's actions updated in the last 24 h whose status is in
     ``FAILED_ACTION_STATUSES`` (dedupe ``action:<id>:<status>``).  ``stopgaps``
     (config.Stopgap list, default none): a stopgap whose status is "removable" is an item
     once (dedupe ``stopgap-removable:<id>``).
     """
     items: list[dict] = []
-    for f in findings:
-        if f.urgency == model.URGENCY_URGENT and f.status != "fixed":
-            items.append(_finding_item(f, specs))
+    urgent = [f for f in findings if f.urgency == model.URGENCY_URGENT and f.status != "fixed"]
+    if urgent:
+        actions = list({a["id"]: a for a in [*store.actions_since(now - timedelta(hours=24)),
+                                             *store.active_actions()]}.values())
+        refused = list(act_result.refused) if act_result is not None else None
+        for f in urgent:
+            items.append(_finding_item(f, specs, actions, refused))
 
     php_running: bool | None = None
     stale_before = now - timedelta(hours=policy.urgent_window_hours)

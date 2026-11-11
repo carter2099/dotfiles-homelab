@@ -2268,7 +2268,10 @@ def _rig_apt_upgrade():
         "apt_upgrade_apply",
         [
             "sudo", "-n", "env", "DEBIAN_FRONTEND=noninteractive",
-            "apt-get", "-y", "-o", "Dpkg::Use-Pty=0",
+            # After a long absence the rig's persistent apt-daily-upgrade timer runs
+            # unattended-upgrades right after boot; wait for its dpkg lock rather than
+            # failing (the apt subprocess timeout is RIG_APT_TIMEOUT).
+            "apt-get", "-y", "-o", "Dpkg::Use-Pty=0", "-o", "DPkg::Lock::Timeout=300",
             "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
             "--with-new-pkgs", "upgrade",
         ],

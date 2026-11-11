@@ -11,6 +11,10 @@ version):
   go-module      ``go get <module>@v<fixed>`` + ``go mod tidy``
   pip-pin        requirements.txt ``name==<fixed>`` bump
 
+Ecosystems in a component's ``pin_owner`` (e.g. the blog's RubyGems, owned by the
+dependabot-webhook) are never edited: once origin/main's lockfile resolves a fixed version
+the plan is deploy-only, until then it refuses with the owner's reason.
+
 apply() opens the PR from a throw-away worktree of origin/main (repos without CI run
 their own checks there first; refused while another security-watch PR is open);
 advance() walks ``ci -> merging -> deploy`` across ticks.  Carter stops an action by
@@ -450,6 +454,44 @@ def _edit_kind(finding: Finding, spec: ComponentSpec) -> tuple[str | None, str]:
     return None, f"no repo edit for ecosystem {pkg.ecosystem}"
 
 
+# pin_owner ecosystem -> (repo-relative lockfile on origin/main, parser of its packages)
+_PIN_LOCKFILES = {"RubyGems": ("Gemfile.lock", inventory.parse_gemfile_lock)}
+
+
+def _pin_owner(pkg: model.Package, spec: ComponentSpec) -> str:
+    """The component's pin_owner reason for ``pkg``'s ecosystem, or ''."""
+    owners = spec.get("pin_owner") or {}
+    for eco in (pkg.ecosystem, pkg.ecosystem.split(":", 1)[0]):
+        if eco in owners:
+            return str(owners[eco])
+    return ""
+
+
+def _owner_landed(finding: Finding, owner: str, read: Callable[[str], str | None],
+                  lockfiles: dict[str, dict[str, str] | None]) -> tuple[str | None, str]:
+    """(version origin/main resolves, note) when the pin owner already merged a fixed version,
+    else (None, why there is nothing to deploy yet).  ``lockfiles`` caches parsed lockfiles."""
+    pkg = finding.package
+    head = f"{pkg.ecosystem} {pkg.name}: {owner}"
+    need = _smallest_fixed_above(finding.fixed_versions, pkg.version)
+    if need is None:
+        return None, f"{head}; no fixed version above {pkg.version} published yet"
+    entry = _PIN_LOCKFILES.get(pkg.ecosystem)
+    if entry is None:
+        return None, head
+    path, parse = entry
+    if path not in lockfiles:
+        text = read(path)
+        lockfiles[path] = None if text is None else {p.name: p.version for p in parse(text)}
+    resolved = lockfiles[path]
+    have = resolved.get(pkg.name) if resolved is not None else None
+    if have is None:
+        return None, f"{head}; origin/main:{path} does not resolve {pkg.name}"
+    if _vlt(have, need):
+        return None, f"{head}; origin/main still resolves {pkg.name} {have} (fixed in {need})"
+    return have, f"{path} resolves {pkg.name} {have}"
+
+
 def _group_slug(group: str) -> str:
     slug = re.sub(r"[^a-z0-9.]+", "-", group.lower()).strip("-.")
     return slug[:60] or "finding"
@@ -571,41 +613,13 @@ class RepoPrPlaybook:
     def plan(self, findings: list[Finding], spec: ComponentSpec, ctx) -> Plan | Refusal:
         pid = self.id
 
-        def refuse(reason: str, alert: bool = True) -> Refusal:
-            return Refusal(pid, spec.id, reason, alert=alert)
+        def refuse(reason: str, alert: bool = True, finding: Finding | None = None) -> Refusal:
+            return Refusal(pid, spec.id, reason, alert=alert, finding_keys=[finding.key] if finding else [])
 
         if not spec.repo:
             return refuse(f"{spec.id} has no repo for a PR")
         if not findings:
             return refuse("no findings to fix", alert=False)
-        allowed = list(spec.get("edits") or [])
-        pin_owner = spec.get("pin_owner") or {}
-        ordered = sorted(findings, key=lambda f: _URGENCY_RANK.get(f.urgency, 3))
-        candidates: list[tuple[str, Finding]] = []
-        refusals: list[Refusal] = []
-        for finding in ordered:
-            pkg = finding.package
-            if pkg.ecosystem in pin_owner:
-                refusals.append(refuse(f"{pkg.ecosystem} {pkg.name}: {pin_owner[pkg.ecosystem]}"))
-                continue
-            edit, why = _edit_kind(finding, spec)
-            if edit is None:
-                refusals.append(refuse(f"{pkg.ident()}: {why}"))
-                continue
-            if edit not in allowed:
-                refusals.append(refuse(
-                    f"{pkg.ident()} needs edit {edit}, not allowed for {spec.id} "
-                    f"(edits: {', '.join(allowed) or 'none'})"))
-                continue
-            if not finding.fix_available or not finding.fixed_versions:
-                refusals.append(refuse(f"{pkg.ident()}: no fixed version published yet", alert=False))
-                continue
-            candidates.append((edit, finding))
-        if not candidates:
-            return refusals[0]
-        edit = candidates[0][0]
-        group = [f for e, f in candidates if e == edit]
-
         repo = _repo_dir(spec)
         fetched: list[bool] = []
 
@@ -618,8 +632,53 @@ class RepoPrPlaybook:
             result = ctx.run(["git", "-C", str(repo), "show", f"origin/main:{path}"], timeout=60)
             return result.stdout if result.returncode == 0 else None
 
+        allowed = list(spec.get("edits") or [])
+        ordered = sorted(findings, key=lambda f: _URGENCY_RANK.get(f.urgency, 3))
+        candidates: list[tuple[str, Finding]] = []
+        refusals: list[Refusal] = []
+        owner_fixed: dict[str, tuple[str, str]] = {}   # finding key -> (version on origin/main, note)
+        lockfiles: dict[str, dict[str, str] | None] = {}
+        for finding in ordered:
+            pkg = finding.package
+            owner = _pin_owner(pkg, spec)
+            if owner:
+                try:
+                    landed, note = _owner_landed(finding, owner, read, lockfiles)
+                except RuntimeError as exc:
+                    refusals.append(refuse(str(exc)[:500], alert=False, finding=finding))
+                    continue
+                if landed is None:
+                    refusals.append(refuse(note, finding=finding))
+                    continue
+                owner_fixed[finding.key] = (landed, note)
+                candidates.append(("pin-owner", finding))
+                continue
+            edit, why = _edit_kind(finding, spec)
+            if edit is None:
+                refusals.append(refuse(f"{pkg.ident()}: {why}", finding=finding))
+                continue
+            if edit not in allowed:
+                refusals.append(refuse(
+                    f"{pkg.ident()} needs edit {edit}, not allowed for {spec.id} "
+                    f"(edits: {', '.join(allowed) or 'none'})", finding=finding))
+                continue
+            if not finding.fix_available or not finding.fixed_versions:
+                refusals.append(refuse(f"{pkg.ident()}: no fixed version published yet", alert=False,
+                                       finding=finding))
+                continue
+            candidates.append((edit, finding))
+        if not candidates:
+            return refusals[0]
+        edit = candidates[0][0]
+        group = [f for e, f in candidates if e == edit]
+
         try:
-            part = getattr(self, "_plan_" + edit.replace("-", "_"))(group, spec, ctx, read)
+            if edit == "pin-owner":
+                # The owner already merged the fix: never a PR, only a deploy of origin/main.
+                part = {"deploy_only": True, "findings": group, "fixed_version": owner_fixed[group[0].key][0],
+                        "stale": "; ".join(sorted({owner_fixed[f.key][1] for f in group}))}
+            else:
+                part = getattr(self, "_plan_" + edit.replace("-", "_"))(group, spec, ctx, read)
             if isinstance(part, Refusal):
                 return part
             main_sha, has_ci = self._origin_main(repo, ctx) if part.get("deploy_only") else ("", True)

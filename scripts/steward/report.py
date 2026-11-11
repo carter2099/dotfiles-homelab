@@ -467,6 +467,8 @@ def _rig_staleness(last_ok):
         return ""
     if last_ok.get("date"):
         nights = last_ok["nights"]
+        if nights == 0:
+            return f" — last maintained {last_ok['date']} (earlier today)"
         return (f" — last maintained {last_ok['date']} "
                 f"({_plural(nights, 'night')} ago)")
     return f" — no successful maintenance in the last {last_ok.get('days')} days of runs"
@@ -497,7 +499,9 @@ def _rig_skipped_item(why, last_ok):
         why="It is missing security updates, and herdr, omp and llama.cpp on the inference "
             "host keep drifting from the versions the rest of the homelab runs.",
         todo="Leave the rig booted into Linux overnight so the 04:00 UTC steward run can "
-             "maintain it. The steward never wakes the rig or switches its OS, by design.")
+             "maintain it, or use Return to Linux on the rig dashboard, run "
+             "`python3 ~/scripts/steward_rig_maintenance.py`, then Switch to Windows. "
+             "The steward never wakes the rig or switches its OS, by design.")
 
 
 def _rig_events(step, last_ok=None):
@@ -807,14 +811,46 @@ def _p1_events(applied, rig_last_ok=None):
     return items
 
 
+RIG_MANUAL_RECORD_NAME = "rig-maintenance.jsonl"
+
+
+def _rig_manual_nights(base, today, max_days):
+    """Fewest nights since an ok `steward_rig_maintenance.py` record (None if none).
+
+    Records live in <base>/rig-maintenance.jsonl, one JSON object per line;
+    only dates within [today - max_days, today] count.
+    """
+    try:
+        lines = (Path(base) / RIG_MANUAL_RECORD_NAME).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    best = None
+    for line in lines:
+        try:
+            record = json.loads(line)
+            back = (today - datetime.strptime(record["date"], "%Y-%m-%d")).days
+            steps = record.get("steps") or []
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        if not 0 <= back <= max_days or not isinstance(steps, list):
+            continue
+        if any(isinstance(s, dict) and s.get("step") == "gamingrig_maintenance"
+               and s.get("status") == "ok" for s in steps):
+            best = back if best is None else min(best, back)
+    return best
+
+
 def _rig_last_maintained(run_dir, date_str, max_days=RIG_MAINTENANCE_SCAN_DAYS):
-    """Last earlier run whose gaming-rig maintenance succeeded (bounded scan)."""
+    """Last earlier run or manual run whose gaming-rig maintenance succeeded (bounded scan)."""
     try:
         today = datetime.strptime(date_str, "%Y-%m-%d")
     except (TypeError, ValueError):
         return None
     base = Path(run_dir).parent
+    manual = _rig_manual_nights(base, today, max_days)
     for back in range(1, max_days + 1):
+        if manual is not None and manual <= back:
+            break
         day = (today - timedelta(days=back)).strftime("%Y-%m-%d")
         path = base / day / "01-applied.json"
         if not path.exists():
@@ -826,6 +862,8 @@ def _rig_last_maintained(run_dir, date_str, max_days=RIG_MAINTENANCE_SCAN_DAYS):
         if any(isinstance(s, dict) and s.get("step") in _RIG_STEPS and s.get("status") == "ok"
                for s in steps):
             return {"date": day, "nights": back}
+    if manual is not None:
+        return {"date": (today - timedelta(days=manual)).strftime("%Y-%m-%d"), "nights": manual}
     return {"date": None, "days": max_days}
 
 

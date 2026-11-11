@@ -363,7 +363,7 @@ def run_tick(store, policy: config.Policy, specs: dict[str, config.ComponentSpec
     # notify
     def notify_phase():
         items = notify.urgent_items(store.open_findings(), new_signals, store, policy, specs, now,
-                                    stopgaps=stopgaps)
+                                    stopgaps=stopgaps, act_result=act_result)
         return notify.send_urgent(items, store=store, policy=policy, now=now, send=deps.send)
     summary["urgent_email"] = bool(phases.run("notify", notify_phase, default=False))
 
