@@ -16,7 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from security_watch import act, config, feeds, model, notify, report, runner  # noqa: E402
+from security_watch import act, assessments, config, feeds, model, notify, report, runner  # noqa: E402
 from security_watch.model import Finding, Inventory, Package, Signal  # noqa: E402
 from security_watch.store import Store  # noqa: E402
 
@@ -103,10 +103,11 @@ class NotifyTests(_StoreCase):
         self.assertEqual({i["kind"] for i in items},
                          {"finding", "pre-announcement", "vendor-breach", "manual-check", "action", "breaker"})
         action = next(i for i in items if i["kind"] == "action")
-        self.assertIn("Playbook: steward-freshrss on freshrss", action["lines"])
-        self.assertIn("Detail: health failed", action["lines"])
+        self.assertEqual(action["status"], notify.STATUS_FIX_FAILED)
+        self.assertIn("failed and was rolled back to the previous version: health failed.",
+                      dict(action["sections"])["Status"])
 
-    def test_finding_items_lead_with_their_remediation_status(self):
+    def test_open_findings_carry_a_code_decided_status(self):
         rack = _finding(component="blog", group="CVE-2026-125111", name="rack", version="3.2.6")
         bun = _finding(component="bun", group="CVE-2026-2")
         fresh = _finding()
@@ -118,16 +119,98 @@ class NotifyTests(_StoreCase):
             model.Refusal("steward-freshrss", "freshrss", "about another finding", finding_keys=["freshrss|CVE-9"]),
             model.Refusal("steward-freshrss", "freshrss", "no newer FreshRSS release"),
         ])
-        items = notify.urgent_items([rack, bun, fresh], [], self.store, self.policy, self.specs, NOW,
-                                    act_result=result)
-        first = {i["dedupe"]: i["lines"][0] for i in items}
-        self.assertEqual(first[f"finding:{rack.key}"],
-                         f"Remediation: action #{action_id} repo-pr pending: deploying it next tick")
-        self.assertTrue(first[f"finding:{bun.key}"].startswith("Remediation: no automated fix (alert-only component"))
-        self.assertEqual(first[f"finding:{fresh.key}"],
-                         "Remediation: steward-freshrss did not run: no newer FreshRSS release")
-        skipped = notify.urgent_items([fresh], [], self.store, self.policy, self.specs, NOW)
-        self.assertIn("act phase did not run", skipped[0]["lines"][0])
+        items = {i["dedupe"]: i for i in notify.urgent_items([rack, bun, fresh], [], self.store, self.policy,
+                                                               self.specs, NOW, act_result=result)}
+        rack_item = items[f"finding:{rack.key}"]
+        self.assertEqual((rack_item["status"], rack_item["title"]),
+                         (notify.STATUS_IN_PROGRESS, "Blog (blog.carter2099.com)"))
+        self.assertIn("Current step: deploying it next tick.", dict(rack_item["sections"])["Status"])
+        bun_item = items[f"finding:{bun.key}"]
+        self.assertEqual(bun_item["status"], notify.STATUS_VULNERABLE)
+        self.assertTrue(dict(bun_item["sections"])["Next"].startswith(
+            "Needs you: there is no automatic fix (alert-only component"))
+        self.assertEqual(dict(items[f"finding:{fresh.key}"]["sections"])["Next"],
+                         f"The automatic fix did not run: no newer FreshRSS release. {notify._RETRY}")
+        entry = assessments.NotAffected("chk", "freshrss", ("CVE-2026-111497",), "brotli is never loaded",
+                                        "2026-11-10", ())
+        failing = notify.urgent_items([fresh], [], self.store, self.policy, self.specs, NOW,
+                                      not_affected=[(entry, assessments.Verdict("chk", False, "check 1: no route"))])
+        self.assertEqual(failing[0]["status"], notify.STATUS_UNVERIFIED)
+        self.assertIn("Checked on 2026-11-10 and found not exploitable here: brotli is never loaded.",
+                      dict(failing[0]["sections"])["Status"])
+
+    def test_emailed_findings_get_an_honest_confirmation(self):
+        sent = []
+        fixed = _finding()
+        safe = _finding(component="news", group="CVE-2026-125350", name="libxslt", version="1.1.43-r3")
+        unchanged = _finding(component="blog", group="CVE-2026-3", name="librsvg", version="2.54.7")
+        never = _finding(component="beatz", group="CVE-2026-5")
+        for f in (fixed, safe, unchanged, never):
+            self.store.upsert_finding(f, NOW)
+        first = notify.urgent_items([fixed, safe, unchanged], [], self.store, self.policy, self.specs, NOW)
+        self.assertTrue(notify.send_urgent(first, store=self.store, policy=self.policy, now=NOW,
+                                           send=lambda *a: sent.append(a)))
+        later = NOW + timedelta(hours=1)
+        self.store.close_missing_findings("freshrss", set(), later,
+                                          installed={("Debian:13", "brotli"): ["1.1.0-2+deb13u1"]})
+        self.store.close_missing_findings("blog", set(), later, installed={("Debian:13", "librsvg"): ["2.54.7"]})
+        self.store.close_missing_findings("beatz", set(), later, installed={})
+        low = dataclasses.replace(safe, urgency=model.URGENCY_LOW)
+        entry = assessments.NotAffected("libxslt-news", "news", ("CVE-2026-125350",), "nginx never loads libxslt",
+                                        "2026-11-11", ())
+        passing = [(entry, assessments.Verdict("libxslt-news", True, ""))]
+        items = notify.urgent_items([low], [], self.store, self.policy, self.specs, later, not_affected=passing)
+        by_key = {i["dedupe"]: i for i in items}
+        self.assertEqual(set(by_key), {f"resolved:{fixed.key}", f"resolved:{unchanged.key}", f"safe:{safe.key}"})
+        fixed_item = by_key[f"resolved:{fixed.key}"]
+        self.assertEqual(fixed_item["status"], notify.STATUS_FIXED)
+        self.assertIn("no longer has the flaw; brotli 1.1.0-2 was replaced by 1.1.0-2+deb13u1 (seen by the complete "
+                      "rescan at 2026-11-03 13:00 UTC)", dict(fixed_item["sections"])["Status"])
+        same = by_key[f"resolved:{unchanged.key}"]
+        self.assertEqual(same["status"], notify.STATUS_UNFLAGGED)
+        self.assertTrue(dict(same["sections"])["Status"].startswith(
+            "Not fixed by any change in the homelab: Blog still runs librsvg 2.54.7."))
+        self.assertEqual(by_key[f"safe:{safe.key}"]["status"], notify.STATUS_SAFE)
+        self.assertTrue(notify.send_urgent(items, store=self.store, policy=self.policy, now=later,
+                                           send=lambda *a: sent.append(a), open_now=[]))
+        subject, body, _ = sent[-1]
+        self.assertEqual(subject, "Security watch: 1 no longer flagged, 1 fixed, 1 not exploitable here — Blog")
+        self.assertIn("Bottom line: no urgent security issue is open in the homelab right now.", body)
+        again = notify.urgent_items([low], [], self.store, self.policy, self.specs, later + timedelta(minutes=15),
+                                    not_affected=passing)
+        self.assertFalse(notify.send_urgent(again, store=self.store, policy=self.policy,
+                                            now=later + timedelta(minutes=15), send=lambda *a: sent.append(a)))
+
+    def test_explainer_writes_the_plain_lines_once_and_failures_fall_back(self):
+        calls, sent = [], []
+
+        def explainer(prompt):
+            calls.append(prompt)
+            return ('{"flaw": "An attacker can run their own code on the service.", '
+                    '"risk_here": "Anyone on the internet could take over the RSS reader."}')
+        finding = _finding()
+        self.store.upsert_finding(finding, NOW)
+        items = notify.urgent_items([finding], [], self.store, self.policy, self.specs, NOW)
+        self.assertTrue(notify.send_urgent(items, store=self.store, policy=self.policy, now=NOW,
+                                           send=lambda *a: sent.append(a), explainer=explainer,
+                                           open_now=["FreshRSS reader (freshrss.carter2099.com): still vulnerable"]))
+        self.assertIn("<b>What it is:</b> An attacker can run their own code on the service.", sent[0][1])
+        self.assertIn("Bottom line: 1 urgent issue is still open", sent[0][1])
+        self.assertIn("anyone on the internet can reach it", calls[0])
+        self.store.close_missing_findings("freshrss", set(), NOW + timedelta(hours=1))
+        fixed = notify.urgent_items([], [], self.store, self.policy, self.specs, NOW + timedelta(hours=1))
+        self.assertTrue(notify.send_urgent(fixed, store=self.store, policy=self.policy, now=NOW + timedelta(hours=1),
+                                           send=lambda *a: sent.append(a), explainer=explainer))
+        self.assertEqual(len(calls), 1)
+        self.assertIn("<b>What it is:</b> An attacker can run their own code on the service.", sent[1][1])
+
+        def broken(prompt):
+            raise RuntimeError("login expired")
+        other = _finding(component="blog", group="CVE-2026-4", name="rack", version="3.2.6")
+        items = notify.urgent_items([other], [], self.store, self.policy, self.specs, NOW)
+        self.assertTrue(notify.send_urgent(items, store=self.store, policy=self.policy, now=NOW + timedelta(hours=2),
+                                           send=lambda *a: sent.append(a), explainer=broken))
+        self.assertIn("<b>What it is:</b> rack has a known critical security flaw", sent[2][1])
 
     def test_failed_action_held_back_by_the_cap_is_sent_on_a_later_tick(self):
         policy = dataclasses.replace(self.policy, urgent_max_per_day=1)
@@ -145,7 +228,7 @@ class NotifyTests(_StoreCase):
         self.assertTrue(notify.send_urgent(items, store=self.store, policy=policy, now=later,
                                            send=lambda *a: sent.append(a)))
         self.assertEqual(len(sent), 2)
-        self.assertIn("Remediation failed: steward-freshrss on freshrss", sent[1][0])
+        self.assertEqual("Security watch: 1 automatic fix failed — FreshRSS reader", sent[1][0])
 
     def test_reopened_finding_is_notified_again(self):
         sent = []
@@ -189,7 +272,7 @@ class NotifyTests(_StoreCase):
                                            send=lambda *a: sent.append(a)))
         self.assertEqual(len(sent), 1)
         subject, body, recipients = sent[0]
-        self.assertTrue(subject.startswith("Security watch: 2 urgent — CVE-2026-111497 in freshrss"))
+        self.assertEqual(subject, "Security watch: 1 still vulnerable, 1 check needed — FreshRSS reader")
         self.assertEqual(recipients, [self.policy.recipient])
         self.assertIn("Mystery &lt;b&gt;bug&lt;/b&gt;", body)
         self.assertNotIn("<b>bug</b>", body)
@@ -199,7 +282,8 @@ class NotifyTests(_StoreCase):
         self.assertEqual(len(sent), 1)
 
     def _item(self, name, rank=(notify.RANK_FINDING, 4)):
-        return {"dedupe": f"finding:{name}|CVE-1", "title": name, "lines": [], "kind": "finding", "rank": rank}
+        return {"dedupe": f"finding:{name}|CVE-1", "status": notify.STATUS_VULNERABLE, "title": name,
+                "sections": [], "kind": "finding", "rank": rank}
 
     def test_daily_cap_counts_emails_not_items(self):
         policy = dataclasses.replace(self.policy, urgent_max_per_day=2)
@@ -209,11 +293,11 @@ class NotifyTests(_StoreCase):
             sent.append(args)
         first = [self._item(f"a{n}") for n in range(8)]
         self.assertTrue(notify.send_urgent(first, store=self.store, policy=policy, now=NOW, send=send))
-        self.assertTrue(sent[0][0].startswith("Security watch: 8 urgent — a0"))
+        self.assertTrue(sent[0][0].startswith("Security watch: 8 still vulnerable — a0"))
         self.assertTrue(all(self.store.notified_at(i["dedupe"]) for i in first))
         self.assertTrue(notify.send_urgent(first + [self._item("b")], store=self.store, policy=policy,
                                            now=NOW + timedelta(minutes=15), send=send))
-        self.assertTrue(sent[1][0].startswith("Security watch: 1 urgent — b"))
+        self.assertTrue(sent[1][0].startswith("Security watch: 1 still vulnerable — b"))
         self.assertFalse(notify.send_urgent([self._item("c")], store=self.store, policy=policy,
                                             now=NOW + timedelta(hours=1), send=send))
         self.assertEqual(len(sent), 2)
@@ -228,13 +312,13 @@ class NotifyTests(_StoreCase):
         plain = [self._item(f"p{n:02d}") for n in range(28)]
         curated = [self._item("kev-high", (notify.RANK_CURATED_FINDING, 1)),
                    self._item("kev-critical", (notify.RANK_CURATED_FINDING, 0))]
-        breaker = {"dedupe": "breaker:x", "title": "Remediation breaker opened", "lines": [], "kind": "breaker",
-                   "rank": (notify.RANK_OPERATIONAL, 0)}
+        breaker = {"dedupe": "breaker:x", "status": notify.STATUS_PAUSED, "title": "All automatic security fixes",
+                   "sections": [], "kind": "breaker", "rank": (notify.RANK_OPERATIONAL, 0)}
         items = plain + curated + [breaker]
         self.assertTrue(notify.send_urgent(items, store=self.store, policy=self.policy, now=NOW,
                                            send=lambda *a: sent.append(a)))
         subject, body, _ = sent[0]
-        self.assertEqual(subject, "Security watch: 31 urgent — Remediation breaker opened")
+        self.assertEqual(subject, "Security watch: 30 still vulnerable, 1 automatic fixes paused — kev-critical")
         self.assertIn("+6 more in tonight's steward report", body)
         self.assertLess(body.index("kev-critical"), body.index("kev-high"))
         self.assertLess(body.index("kev-high"), body.index("p00"))
@@ -246,7 +330,7 @@ class NotifyTests(_StoreCase):
                              item["dedupe"])
         self.assertTrue(notify.send_urgent(items, store=self.store, policy=self.policy,
                                            now=NOW + timedelta(minutes=15), send=lambda *a: sent.append(a)))
-        self.assertTrue(sent[1][0].startswith("Security watch: 6 urgent — p22"))
+        self.assertTrue(sent[1][0].startswith("Security watch: 6 still vulnerable — p22"))
         self.assertNotIn("more in tonight", sent[1][1])
 
 
@@ -389,14 +473,16 @@ class StopgapTests(_StoreCase):
         self.assertEqual(self._status(), "removable")
         items = self._items()
         self.assertEqual([i["dedupe"] for i in items], ["stopgap-removable:sg-brotli"])
-        self.assertIn("Remove with: cloudflare: disable rule sg-brotli", items[0]["lines"])
+        self.assertEqual(items[0]["status"], notify.STATUS_STOPGAP)
+        self.assertIn("Remove the temporary protection: cloudflare: disable rule sg-brotli",
+                      dict(items[0]["sections"])["Next"])
         sent = []
         self.assertTrue(notify.send_urgent(items, store=self.store, policy=self.policy, now=NOW,
                                            send=lambda *a: sent.append(a)))
         self.assertFalse(notify.send_urgent(self._items(), store=self.store, policy=self.policy,
                                             now=NOW + timedelta(minutes=15), send=lambda *a: sent.append(a)))
         self.assertEqual(len(sent), 1)
-        self.assertIn("Stopgap removable: sg-brotli", sent[0][0])
+        self.assertEqual("Security watch: 1 stopgap can be removed — FreshRSS reader", sent[0][0])
 
 
 class TickLockTests(unittest.TestCase):
@@ -471,7 +557,7 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(self.report["mode"], "shadow")
         self.assertEqual(self.report["actions_24h"], [])
         self.assertEqual(len(self.result["outbox"]), 1)
-        self.assertIn("urgent", self.result["outbox"][0])
+        self.assertEqual(self.result["outbox"][0], "Security watch: 3 still vulnerable — FreshRSS reader")
 
     def test_replay_never_touches_the_configured_state_dir(self):
         self.assertFalse(self.unused_state.exists())

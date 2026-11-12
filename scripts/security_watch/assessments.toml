@@ -38,3 +38,15 @@ verified = "2026-11-10"
 [[not_affected.checks]]
 argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ConnectionAttempts=1", "-o", "StrictHostKeyChecking=yes", "gamingrig-linux", "ldd /usr/sbin/sshd && sudo -n sshd -T"]
 expect = '(?ms)\A(?=.*libc\.so\.6)(?=.*^passwordauthentication no$)(?=.*^kbdinteractiveauthentication no$)'
+
+[[not_affected]]
+id = "libxslt-news-xslt-module-not-loaded"
+component = "news"
+cves = ["CVE-2026-125350"]
+reason = "libxslt is in the news image only as a dependency of the optional nginx XSLT module; the news nginx.conf loads no dynamic modules, so no running nginx process has libxslt mapped and the static site never parses XSLT"
+verified = "2026-11-11"
+
+[[not_affected.checks]]
+container = "carter-news"
+argv = ["sh", "-c", "pids=$(pidof nginx) && [ -n \"$pids\" ] || exit 1; for p in $pids; do [ -r /proc/$p/maps ] || exit 1; if grep -q -e libxslt -e libexslt /proc/$p/maps; then exit 1; fi; done; if grep -rqs load_module /etc/nginx/; then exit 1; fi; echo libxslt-not-loaded"]
+expect = '^libxslt-not-loaded$'

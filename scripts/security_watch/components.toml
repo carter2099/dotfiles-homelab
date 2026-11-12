@@ -20,11 +20,13 @@
 #              (RubyGems: Gemfile.lock), else refused with this reason
 #   revision_cmd  argv printing the binary's 40-hex source commit, for Go binaries built
 #              without VCS stamping (-buildvcs=false); inventory uses it as vcs_revision
+#   name       what Carter calls the service (plus its public hostname), used in emails
 #   system_units / health on host: system units and loopback origins apt-security
 #              requires healthy after installing package upgrades
 
 [[component]]
 id = "host"
+name = "ThinkPad server (host OS and kernel)"
 kind = "host"
 collector = "host-dpkg"
 exposure = "lan"
@@ -39,6 +41,7 @@ health = ["http://127.0.0.1:30144/healthz", "http://127.0.0.1:30149/i/", "http:/
 
 [[component]]
 id = "freshrss"
+name = "FreshRSS reader (freshrss.carter2099.com)"
 kind = "container"
 collector = "container"
 container = "freshrss"
@@ -59,6 +62,7 @@ php_curl_version = ["php", "-r", "var_export(curl_version());"]
 
 [[component]]
 id = "open-webui"
+name = "Open WebUI chat (chat.carter2099.com)"
 kind = "container"
 collector = "container"
 container = "open-webui"
@@ -73,6 +77,7 @@ reach_container_paths = ["/app/backend/open_webui"]
 
 [[component]]
 id = "searxng"
+name = "SearXNG search backend"
 kind = "container"
 collector = "container"
 container = "searxng"
@@ -86,6 +91,7 @@ untrusted_input = "Parses responses from public search engines; loopback-only li
 
 [[component]]
 id = "blog"
+name = "Blog (blog.carter2099.com)"
 kind = "container"
 collector = "container"
 container = "blog-web-1"
@@ -108,6 +114,7 @@ RubyGems = "dependabot-webhook owns blog bundler updates"
 
 [[component]]
 id = "beatz"
+name = "Beats music player (beatz.carter2099.com)"
 kind = "container"
 collector = "container"
 container = "carter-beatz"
@@ -127,6 +134,7 @@ reach_host_paths = ["~/dev/beatz"]
 
 [[component]]
 id = "homelab-dashboard"
+name = "Homelab Monitor dashboard (monitor.carter2099.com)"
 kind = "container"
 collector = "container"
 container = "carter-monitor"
@@ -144,6 +152,7 @@ reach_host_paths = ["~/dev/homelab-dashboard/deploy"]
 
 [[component]]
 id = "homelab-dashboard-collector"
+name = "Homelab Monitor data collector"
 kind = "host-binary"
 collector = "go-binary"
 binaries = ["~/.local/lib/homelab-dashboard/current/homelab-dashboard-collector"]
@@ -159,6 +168,7 @@ untrusted_input = "Reads local Docker/systemd state and rig metrics; no listener
 
 [[component]]
 id = "news"
+name = "Daily News website (news.carter2099.com)"
 kind = "container"
 collector = "container"
 container = "carter-news"
@@ -173,6 +183,7 @@ untrusted_input = "Public GET of static files only"
 
 [[component]]
 id = "herdr-web-client"
+name = "Herdr Web terminal (remote.carter2099.com)"
 kind = "host-binary"
 collector = "go-binary"
 binaries = ["~/.local/bin/herdr-web-client"]
@@ -194,6 +205,7 @@ untrusted_input = "Cloudflare Access-authenticated browser sessions; PTY over We
 
 [[component]]
 id = "llm-proxy"
+name = "LLM proxy and rig dashboard (rig.carter2099.com)"
 kind = "host-binary"
 collector = "go-binary"
 binaries = ["~/.local/bin/llm-proxy", "~/.local/bin/rig-dashboard"]
@@ -212,6 +224,7 @@ untrusted_input = "8081 reachable only from the Open WebUI bridge (UFW); rig das
 
 [[component]]
 id = "comfy-web"
+name = "ComfyUI image app (comfy.carter2099.com)"
 kind = "host-binary"
 collector = "go-binary"
 binaries = ["~/.local/bin/comfy-web"]
@@ -230,6 +243,7 @@ untrusted_input = "Behind Cloudflare Access with origin JWT validation"
 
 [[component]]
 id = "opencode-go-proxy"
+name = "OpenCode Go proxy"
 kind = "host-binary"
 collector = "go-binary"
 binaries = ["~/.local/bin/opencode-go-proxy"]
@@ -248,6 +262,7 @@ untrusted_input = "No client authentication; UFW allows 8082 from the gaming rig
 
 [[component]]
 id = "dependabot-webhook"
+name = "Dependabot webhook (hooks.carter2099.com)"
 kind = "host-binary"
 collector = "go-binary"
 binaries = ["~/.local/bin/dependabot-webhook"]
@@ -267,6 +282,7 @@ untrusted_input = "Public webhook endpoint; payloads are HMAC-verified"
 
 [[component]]
 id = "homelab-backup"
+name = "Nightly backup to R2"
 kind = "host-binary"
 collector = "go-binary"
 binaries = ["~/homelab-backup/homelab-backup"]
@@ -283,6 +299,7 @@ untrusted_input = "Outbound to Cloudflare R2 only; no listener"
 
 [[component]]
 id = "prompt-guard"
+name = "Prompt-Guard classifier"
 kind = "venv"
 collector = "venv"
 python = "~/.local/lib/prompt-guard/current/venv/bin/python3"
@@ -301,6 +318,7 @@ untrusted_input = "Classifies untrusted Dependabot PR text; loopback listener"
 
 [[component]]
 id = "node"
+name = "Node.js runtime"
 kind = "runtime"
 collector = "runtime"
 runtime = "node"
@@ -313,6 +331,7 @@ description = "fnm default Node.js"
 
 [[component]]
 id = "go-user"
+name = "Go toolchain (~/.local/go, builds the homelab's Go services)"
 kind = "runtime"
 collector = "go-toolchain"
 cmd = ["~/.local/go/bin/go", "version"]
@@ -324,6 +343,7 @@ description = "~/.local/go toolchain used to build host Go binaries"
 
 [[component]]
 id = "go-root"
+name = "Go toolchain (/usr/local/go)"
 kind = "runtime"
 collector = "go-toolchain"
 cmd = ["/usr/local/go/bin/go", "version"]
@@ -335,6 +355,7 @@ description = "/usr/local/go toolchain (held on the 1.26 line)"
 
 [[component]]
 id = "bun"
+name = "Bun runtime (builds)"
 kind = "runtime"
 collector = "runtime"
 runtime = "bun"
@@ -348,6 +369,7 @@ description = "Bun CLI used for builds (bun install)"
 
 [[component]]
 id = "omp"
+name = "omp agent CLI"
 kind = "runtime"
 collector = "runtime"
 runtime = "omp"
@@ -359,6 +381,7 @@ description = "omp agent CLI (standalone binary with embedded Bun)"
 
 [[component]]
 id = "herdr"
+name = "Herdr terminal multiplexer"
 kind = "runtime"
 collector = "runtime"
 runtime = "herdr"
@@ -370,6 +393,7 @@ description = "Herdr terminal multiplexer client (server keeps its version until
 
 [[component]]
 id = "cloudflared"
+name = "Cloudflare Tunnel connector"
 kind = "runtime"
 collector = "runtime"
 runtime = "cloudflared"
@@ -385,6 +409,7 @@ untrusted_input = "Carries every public hostname's traffic to loopback origins"
 
 [[component]]
 id = "docker"
+name = "Docker Engine"
 kind = "runtime"
 collector = "runtime"
 runtime = "docker"
@@ -399,6 +424,7 @@ description = "Docker Engine (Docker apt repository)"
 
 [[component]]
 id = "rig"
+name = "Gaming rig (Linux)"
 kind = "rig"
 collector = "rig"
 exposure = "lan"

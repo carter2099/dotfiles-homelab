@@ -106,7 +106,7 @@ assert [f for f in findings.values() if f["component"] == "bun" and f["fixed"] =
 assert report["mode"] == "shadow", report["mode"]
 assert report["actions_24h"] == [], report["actions_24h"]
 assert len(result["outbox"]) == 1, result["outbox"]
-assert "urgent" in result["outbox"][0], result["outbox"]
+assert result["outbox"][0].startswith("Security watch: 3 still vulnerable"), result["outbox"]
 print(f"replay: {len(findings)} findings, outbox {result['outbox'][0]!r}")
 PY
 }

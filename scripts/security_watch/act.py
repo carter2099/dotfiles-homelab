@@ -133,6 +133,11 @@ def selection(finding: Finding, spec: config.ComponentSpec) -> tuple[str | None,
             return None, str(pin_owner[eco]), True
     if spec.owner == "release-rebuild":
         if pkg.ecosystem == "Go" and pkg.name == "stdlib":
+            # A repo that opts into the go-toolchain edit pins `toolchain` in go.mod: fix it at the
+            # source (PR -> CI -> deploy) so CI, govulncheck and release builds move with the binary.
+            # A rebuild alone left herdr-web-client's nightly govulncheck failing (2026-11-11).
+            if "go-toolchain" in (spec.get("edits") or ()) and spec.repo:
+                return "repo-pr", "", False
             return "release-rebuild", "", False
         edit = _EDIT_FOR_ECOSYSTEM.get(pkg.ecosystem)
         if edit and edit in (spec.get("edits") or ()) and spec.repo:

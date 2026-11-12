@@ -95,11 +95,14 @@ class Deps:
     clock: Callable[[], datetime] = model.utcnow
     monotonic: Callable[[], float] = time.monotonic
     reach_kwargs: dict[str, Any] = field(default_factory=dict)
+    # ``notify.omp_explainer``-style factory (tick deadline -> prompt -> text) for the email's
+    # plain-language lines; None keeps them deterministic (replay/tests).
+    explainer: Callable[[float], Callable[[str], str]] | None = None
 
 
 def default_deps() -> Deps:
     import deploy_lock
-    from security_watch import inventory
+    from security_watch import inventory, notify
 
     def collect(spec, now):
         return inventory.collect(spec, run=inventory.default_run, fetch=net.fetch, now=now)
@@ -109,7 +112,7 @@ def default_deps() -> Deps:
 
     return Deps(fetch=net.fetch, run=inventory.default_run, collect=collect, fingerprint=fingerprint,
                 steward_active=steward_active, send=None, lock=deploy_lock.surface_lock,
-                host_lock=deploy_lock.host_lock)
+                host_lock=deploy_lock.host_lock, explainer=notify.omp_explainer)
 
 
 class _Phases:
@@ -164,7 +167,11 @@ def _store_scan(store, result, *, now, only: set[str] | None = None) -> list[str
         if only is not None and component not in only:
             continue
         keys = {f.key for f in result.findings if f.component_id == component}
-        for key in store.close_missing_findings(component, keys, now):
+        inv = store.get_inventory(component)
+        installed: dict[tuple[str, str], list[str]] = {}
+        for pkg in (inv.packages if inv is not None else ()):
+            installed.setdefault((pkg.ecosystem, pkg.name), []).append(pkg.version)
+        for key in store.close_missing_findings(component, keys, now, installed=installed):
             _log(f"resolved {key}")
     return changed
 
@@ -362,9 +369,14 @@ def run_tick(store, policy: config.Policy, specs: dict[str, config.ComponentSpec
 
     # notify
     def notify_phase():
-        items = notify.urgent_items(store.open_findings(), new_signals, store, policy, specs, now,
-                                    stopgaps=stopgaps, act_result=act_result)
-        return notify.send_urgent(items, store=store, policy=policy, now=now, send=deps.send)
+        open_findings_now = store.open_findings()
+        items = notify.urgent_items(open_findings_now, new_signals, store, policy, specs, now,
+                                    stopgaps=stopgaps, act_result=act_result, not_affected=not_affected)
+        open_now = notify.open_issues(open_findings_now, store, specs, now, act_result=act_result,
+                                      not_affected=not_affected)
+        explainer = deps.explainer(deadline) if deps.explainer is not None else None
+        return notify.send_urgent(items, store=store, policy=policy, now=now, send=deps.send,
+                                  open_now=open_now, explainer=explainer, deadline=deadline)
     summary["urgent_email"] = bool(phases.run("notify", notify_phase, default=False))
 
     # report

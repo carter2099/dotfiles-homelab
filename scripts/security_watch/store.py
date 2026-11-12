@@ -479,7 +479,11 @@ class Store:
         return [finding_from_dict(json.loads(r["data"])) for r in
                 self._conn.execute("SELECT data FROM findings WHERE status != 'fixed' ORDER BY key")]
 
-    def close_missing_findings(self, component_id, open_keys: set[str], now) -> list[str]:
+    def close_missing_findings(self, component_id, open_keys: set[str], now,
+                               installed: dict[tuple[str, str], list[str]] | None = None) -> list[str]:
+        """Mark open findings of ``component_id`` not in ``open_keys`` fixed.  ``installed``
+        ((ecosystem, name) -> versions in the inventory that was just scanned completely) is
+        kept as ``data["resolution"]["installed"]``: what the closing scan actually saw."""
         at = _ts(now)
         keep = set(open_keys)
         closed: list[str] = []
@@ -492,11 +496,22 @@ class Store:
                     continue
                 data = json.loads(row["data"])
                 data["status"] = "fixed"
+                if installed is not None:
+                    pkg = data.get("package") or {}
+                    data["resolution"] = {"installed": sorted(set(
+                        installed.get((pkg.get("ecosystem"), pkg.get("name")), ())))}
                 self._conn.execute(
                     "UPDATE findings SET status = 'fixed', data = ?, updated_at = ?, resolved_at = ? WHERE key = ?",
                     (json.dumps(data, sort_keys=True), at, at, row["key"]))
                 closed.append(row["key"])
         return closed
+
+    def finding_resolution(self, key) -> dict | None:
+        """``{"installed": [...]}`` recorded when the finding closed (None: closed before
+        2026-11-11, open, or unknown)."""
+        row = self._conn.execute("SELECT data FROM findings WHERE key = ? AND status = 'fixed'", (key,)).fetchone()
+        value = json.loads(row["data"]).get("resolution") if row else None
+        return value if isinstance(value, dict) else None
 
     def findings_resolved_since(self, since) -> list[Finding]:
         return [finding_from_dict(json.loads(r["data"])) for r in self._conn.execute(

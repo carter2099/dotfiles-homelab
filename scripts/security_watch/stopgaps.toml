@@ -3,12 +3,5 @@
 # stopgap is listed.  Once a complete scan resolves every covered finding (the fixed
 # artifact is running), the report marks the stopgap removable and shows `remove`.
 # Remove the entry here when the stopgap itself is removed.
-
-[[stopgap]]
-id = "cve-2026-98432-nft"
-component = "host"
-cves = ["CVE-2026-98432"]
-description = "nftables table inet cve_2026_98432 drops IPv4 TCP carrying IP options"
-since = "2026-11-01"
-remove = "sudo bash ~/system-config/kernel-mitigations/install.sh remove nft"
-doc = "~/notes/docs/homelab/security-mitigations.md"
+# None active: cve-2026-98432-nft (host) was removed on 2026-11-11 once kernel
+# 6.8.0-149.149 (the fix) was running.

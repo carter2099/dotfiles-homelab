@@ -907,6 +907,7 @@ class SelectPlaybookTests(unittest.TestCase):
         self.assertEqual(act.select_playbook(module, spec), "repo-pr")
         no_edit = make_spec("x", "release-rebuild", repo="x", edits=["go-toolchain"])
         self.assertIsNone(act.select_playbook(module, no_edit))
+        self.assertEqual(act.select_playbook(stdlib, no_edit), "repo-pr")   # go.mod toolchain fixed at the source
         no_repo = make_spec("x", "release-rebuild", edits=["go-module"])
         self.assertIsNone(act.select_playbook(module, no_repo))
         self.assertIsNone(act.select_playbook(make_finding("llm-proxy", eco="npm", name="x"), spec))
