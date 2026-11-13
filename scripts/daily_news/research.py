@@ -928,10 +928,50 @@ def _recent_published_events(digests_root: Path, today: date) -> tuple[list[dict
                     recent.append({**story, "edition_date": day})
     return recent, corpus
 
-def _distinctive_event_terms_match(story: dict, item: dict, frequency: Any) -> bool:
+# An earlier story's summary often previews the next development of its topic
+# ("T1 face Bilibili Gaming in the semifinals on November 8"). Such a sentence
+# names that development's teams and stage, so its later result would match
+# every event term without being a repeat (11-09/10 Gaming dropped the Worlds
+# 2026 BLG-T1 semifinal result against the 11-07 T1-Karmine quarterfinal).
+_PREVIEW_MARKER = re.compile(
+    r"\b(?:will|won't|set to|scheduled|upcoming|faces?|ahead of|later this)\b", re.IGNORECASE)
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_MONTH = (r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?"
+          r"|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?")
+_MONTH_DAY = re.compile(rf"\b{_MONTH}\s+(\d{{1,2}})(?:st|nd|rd|th)?\b(?:,?\s+(\d{{4}}))?")
+_DAY_MONTH = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+{_MONTH}(?:,?\s+(\d{{4}}))?")
+
+
+def _mentions_later_date(sentence: str, story_day: date) -> bool:
+    found = [(month, day, year) for month, day, year in _MONTH_DAY.findall(sentence)]
+    found += [(month, day, year) for day, month, year in _DAY_MONTH.findall(sentence)]
+    for month, day, year in found:
+        try:
+            named = date(int(year) if year else story_day.year,
+                         _MONTHS.index(month[:3]) + 1, int(day))
+        except ValueError:
+            continue
+        if not year and named < story_day - timedelta(days=180):
+            named = named.replace(year=named.year + 1)
+        if named > story_day:
+            return True
+    return False
+
+
+def _reported_event_text(story: dict, story_day: date) -> str:
+    """The story's title, event and summary without its forward-looking sentences."""
+    sentences = re.split(r"(?<=[.!?])\s+", str(story.get("summary") or ""))
+    reported = [
+        sentence for sentence in sentences
+        if not _PREVIEW_MARKER.search(sentence) and not _mentions_later_date(sentence, story_day)
+    ]
+    return " ".join([str(story.get("title") or ""), str(story.get("event") or ""), *reported])
+
+
+def _distinctive_event_terms_match(story: dict, item: dict, frequency: Any, story_text: str) -> bool:
     """news_publish._same_event without its rare-headline-word gate: the two share
     its minimum title/event wording, every event term of ``item`` appears in
-    ``story``, and one term names a rare entity that ``item``'s headline does not.
+    ``story_text``, and one term names a rare entity that ``item``'s headline does not.
 
     Regression for 2026-11-02/03 Gaming: the Xbox Game Pass November additions
     (Gravhounds, Football Manager 27) re-ran from another outlet whose headline
@@ -949,8 +989,7 @@ def _distinctive_event_terms_match(story: dict, item: dict, frequency: Any) -> b
             or len(shared) / min(len(story_tokens), len(item_tokens)) < EVENT_MIN_TOKEN_OVERLAP):
         return False
     terms = item.get("event_terms")
-    text = " ".join(str(story.get(key) or "") for key in ("title", "event", "summary"))
-    if not attention_match.terms_all_present(terms, text, CROSS_DAY_EVENT_MIN_TERMS):
+    if not attention_match.terms_all_present(terms, story_text, CROSS_DAY_EVENT_MIN_TERMS):
         return False
     counts, documents = frequency
     rare_limit = max(2, documents // 100)
@@ -984,6 +1023,9 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     shared URL key: wording shared with a continuing story's live page does not
     make a later development the same event (11-07 World dropped the 11-06
     newsroom bomb-threat wave against the 11-05 Guardian flight-threat live blog).
+    Event terms never match a summary sentence that previews a later development
+    (a future marker or a date after the story's day): the story set that event
+    up, it did not report it.
     """
     from news_publish import _same_event, _story_event_tokens
 
@@ -999,13 +1041,12 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     if item_day > story_day and is_non_article_page(story.get("url", "")):
         return False
     if not _shares_distinctive_figures(story, item):
+        story_text = _reported_event_text(story, story_day)
         if not _same_event(story, item, frequency):
-            if not _distinctive_event_terms_match(story, item, frequency):
+            if not _distinctive_event_terms_match(story, item, frequency, story_text):
                 return False
         elif attention_match.terms_all_present(
-                item.get("event_terms"),
-                " ".join(str(story.get(key) or "") for key in ("title", "event", "summary")),
-                CROSS_DAY_EVENT_MIN_TERMS):
+                item.get("event_terms"), story_text, CROSS_DAY_EVENT_MIN_TERMS):
             return True
         else:
             story_tokens = _story_event_tokens(story)

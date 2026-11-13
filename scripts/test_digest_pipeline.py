@@ -1136,6 +1136,55 @@ def test_recent_publication_blocks_repeat_with_common_headline_words() -> None:
               and rejected["matched_story"]["url"] == original["url"], rejected)
 
 
+def test_recent_publication_keeps_result_previewed_by_earlier_summary() -> None:
+    """A result is not a repeat of the earlier story whose summary previewed it.
+
+    Regression for 2026-11-09/10 Gaming: the Worlds 2026 BLG-T1 semifinal result
+    was rejected against the 11-07 T1-Karmine quarterfinal story, whose summary
+    only said "T1 face Bilibili Gaming in the semifinals on November 8".
+    """
+    original = {
+        "title": "T1 sweep Karmine Corp to reach Worlds 2026 semifinals",
+        "event": "T1 beat Karmine Corp in the Worlds 2026 quarterfinals",
+        "summary": "Defending champions T1 swept Karmine Corp 3-0. T1 face Bilibili Gaming "
+                   "in the semifinals on November 8.",
+        "url": "https://esports.net/news/lol/t1-karmine-corp-worlds-2026-quarterfinal/",
+        "editorial_significance": "medium", "date_published": "2026-11-06",
+    }
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        published = root / "news" / "publications" / "2026-11-07"
+        published.mkdir(parents=True)
+        (published / f"{catalog.TOPICS['gaming']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [original],
+        }))
+        run_dir = root / catalog.TOPICS["gaming"]["category"] / "2026-11-09"
+        run_dir.mkdir(parents=True)
+        result = {
+            "title": "Bilibili Gaming knock out defending champions T1 to advance to Worlds "
+                     "2026 grand finals",
+            "event": "Bilibili Gaming beat T1 in the Worlds 2026 semifinals",
+            "event_terms": ["Bilibili Gaming", "T1", "Worlds 2026 Semifinals"],
+            "url": "https://dotesports.com/league-of-legends/news/blg-knock-out-t1-worlds-2026",
+            "editorial_significance": "medium", "date_published": "2026-11-08",
+        }
+        repeat = {
+            "title": "T1 beat Karmine Corp at Worlds 2026",
+            "event": "T1 swept Karmine Corp in the Worlds 2026 quarterfinals",
+            "event_terms": ["T1", "Karmine Corp"],
+            "url": "https://example.com/2026/11/08/t1-karmine-corp",
+            "editorial_significance": "medium", "date_published": "2026-11-08",
+        }
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(
+                catalog.TOPICS["gaming"], [copy.deepcopy(result), copy.deepcopy(repeat)], run_dir)
+        check([item["url"] for item in queue] == [result["url"]], f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["url"] == repeat["url"]
+              and rejected["matched_story"]["url"] == original["url"], rejected)
+
+
 
 def test_fetch_alternate_repeating_published_story_is_not_assigned() -> None:
     """Another outlet's headline for a new candidate cannot re-run a published story.
@@ -3777,6 +3826,7 @@ def main() -> None:
         test_recent_publication_blocks_repeat_named_by_event_terms,
         test_recent_publication_blocks_event_terms_repeat_beyond_date_gap,
         test_recent_publication_blocks_repeat_with_common_headline_words,
+        test_recent_publication_keeps_result_previewed_by_earlier_summary,
         test_recent_publication_blocks_repeat_sharing_precise_figures,
         test_fetch_alternate_repeating_published_story_is_not_assigned,
         test_phase_two_ledger_drops_redated_url_of_covered_article,
