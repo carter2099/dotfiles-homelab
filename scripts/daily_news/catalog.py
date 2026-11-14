@@ -12,6 +12,14 @@ BATCH_SIZE = 10  # findings/summaries per LLM call in phases 2 and 5
 
 FRESH_CAP = 12       # Pool A: max fresh findings passed to Phase 4
 CROSS_DAY_DEDUP_DAYS = 5
+# Press time of an edition (digests-daily.timer: 02:00 America/New_York) and how long
+# before it a story no section has run may have been published (Carter, 2026-11-13;
+# the calendar rule alone gave a story published on a US afternoon exactly one run).
+PRESS_HOUR = 2
+PRESS_TIMEZONE = "America/New_York"
+FRESH_WINDOW_HOURS = 36
+# Stories one publisher may hold in a section (Phase 6 drops the lower-ranked extras).
+SOURCE_DOMAIN_CAP = 2
 
 REFERENCED_URLS_SCHEMA_VERSION = 1
 
@@ -98,6 +106,12 @@ TOPICS: dict[str, dict[str, Any]] = {
         "category": "ai-tech",
         "web_slug": "ai-tech",
         "web_title": "AI & Tech",
+        "beat": (
+            "Artificial intelligence and the technology industry: AI models and labs, tech "
+            "companies and their leaders, funding and deals, tech policy and regulation, "
+            "security incidents, software and developer tools."
+        ),
+        "lead_inventories": ("techmeme", "hn", "kagi:ai", "kagi:tech"),
         "editorial_significance_rubric_specific": EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC["ai-tech"],
         "research_angles": [
             {
@@ -195,6 +209,12 @@ TOPICS: dict[str, dict[str, Any]] = {
         "category": "agentic-platform",
         "web_slug": "agents",
         "web_title": "Agents",
+        "beat": (
+            "AI agents: coding agents such as Claude Code, Codex, Cursor and Copilot, agent "
+            "platforms and products, agent frameworks and SDKs, MCP servers and tools, agent "
+            "evaluation, and research on agentic systems."
+        ),
+        "lead_inventories": ("techmeme", "hn", "kagi:ai", "kagi:tech"),
         "editorial_significance_rubric_specific": EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC["agentic-platform"],
         "research_angles": [
             {
@@ -274,6 +294,12 @@ TOPICS: dict[str, dict[str, Any]] = {
         "category": "ai-hardware",
         "web_slug": "ai-hardware",
         "web_title": "AI Hardware",
+        "beat": (
+            "AI hardware and infrastructure: AI chips and accelerators, GPUs, memory, "
+            "chipmakers and foundries, chip export controls, data centers and their power "
+            "supply, and the companies that build and finance them."
+        ),
+        "lead_inventories": ("techmeme", "hn", "kagi:ai", "kagi:tech", "kagi:business"),
         "editorial_significance_rubric_specific": EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC["ai-hardware"],
         "research_angles": [
             {
@@ -384,6 +410,11 @@ TOPICS: dict[str, dict[str, Any]] = {
         "category": "gaming-digest",
         "web_slug": "gaming",
         "web_title": "Gaming",
+        "beat": (
+            "Video games: game releases and announcements, studios and publishers, consoles "
+            "and gaming hardware, the games business, and esports."
+        ),
+        "lead_inventories": ("kagi:gaming",),
         "editorial_significance_rubric_specific": EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC["gaming"],
         "research_angles": [
             {
@@ -452,6 +483,12 @@ TOPICS: dict[str, dict[str, Any]] = {
         "category": "world-digest",
         "web_slug": "world",
         "web_title": "World",
+        "beat": (
+            "Major United States and international news: politics and elections, government "
+            "and courts, war and diplomacy, disasters, the economy, science, health and the "
+            "environment."
+        ),
+        "lead_inventories": ("kagi:world", "kagi:usa", "kagi:business", "kagi:science"),
         "editorial_significance_rubric_specific": EDITORIAL_SIGNIFICANCE_RUBRIC_SPECIFIC["world"],
         "research_angles": [
             {

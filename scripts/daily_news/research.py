@@ -100,6 +100,25 @@ def refetch_article_date(url: str, title: str) -> str | None:
     except Exception:
         return None
 
+def _confirm_late_window(item: dict, issue_date: date) -> bool:
+    """True when the article's own metadata times it inside the fresh window.
+
+    Records that instant as ``published_at``: the one field that keeps a story
+    dated before yesterday eligible in every later phase.
+    """
+    published = published_time(item.get("url", ""))
+    if published is None or published < fresh_cutoff(issue_date) or published.date() > issue_date:
+        item.pop("published_at", None)
+        return False
+    item["published_at"] = published.isoformat()
+    return True
+
+def _warm_published_times(urls: list[str]) -> None:
+    """Look up several articles' publication times at once (``published_time`` memoizes)."""
+    if urls:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(published_time, urls))
+
 def batch(items: list[Any], size: int = BATCH_SIZE) -> list[list[Any]]:
     """Split items into batches of at most `size`."""
     return [items[i:i + size] for i in range(0, len(items), size)]
@@ -267,12 +286,267 @@ def phase_1_research(topic: dict, run_dir: Path) -> list[dict]:
     print(f"  Phase 1 done: {len(findings)} total findings")
     return findings
 
+LEADS_SCHEMA_VERSION = 1
+# Strongest rows asked about per inventory, and leads one section may add (one judge batch).
+LEAD_ROWS_PER_INVENTORY = 12
+LEADS_PER_SECTION = 8
+# A Hacker News story below this many points is too thin a signal to become a candidate.
+LEAD_MIN_HN_POINTS = 100
+# Jev Noul thresholds, the Jev docs' starting "yes" and "no": a lead must clearly belong
+# in the section and clearly not be among the research findings.
+LEAD_MIN_RELEVANCE = 0.7
+LEAD_MAX_ALREADY_FOUND = 0.3
+LEAD_JEV_BATCH = 8
+LEAD_JEV_WORKERS = 6
+LEAD_JEV_DEADLINE_SECONDS = 120.0
+_HN_OLD_OR_META = re.compile(r"\(\d{4}\)\s*$|^(?:Ask|Tell) HN\b", re.IGNORECASE)
+_KAGI_CITATION = re.compile(r"\s*\[[^\[\]]*#\d+\]")
+
+def _inventory_rows(rows: list[dict], inventory: str) -> list[dict]:
+    """Strongest rows of one lead inventory: "techmeme", "hn", or "kagi:<category>"."""
+    if inventory == "techmeme":
+        found = sorted((row for row in rows if row.get("src") == "techmeme"),
+                       key=lambda row: row.get("rank") or 999)
+    elif inventory == "hn":
+        found = sorted(
+            (row for row in rows
+             if row.get("src") == "hn" and row.get("url")
+             and (row.get("points") or 0) >= LEAD_MIN_HN_POINTS
+             and not _HN_OLD_OR_META.search(str(row.get("title") or ""))),
+            key=lambda row: -(row.get("points") or 0),
+        )
+    else:
+        category = inventory.partition(":")[2]
+        found = sorted(
+            (row for row in rows if row.get("src") == "kagi" and row.get("category") == category),
+            key=lambda row: row.get("rank") or 999,
+        )
+    return found[:LEAD_ROWS_PER_INVENTORY]
+
+def _lead_strength(row: dict) -> float:
+    """A row's prominence on its own inventory's attention scale (about 0 to 1)."""
+    source = row["src"]
+    measures = {
+        "techmeme": {"techmeme_weight": 1.0, "techmeme_more": len(row.get("more") or [])},
+        "hn": {"hn_points": row.get("points") or 0, "hn_comments": row.get("comments") or 0},
+        "kagi": {"kagi_domains": row.get("unique_domains") or 0},
+    }[source]
+    return attention.source_magnitudes(measures)[source] / attention.DEFAULT_REFERENCE[source]
+
+def _lead_url(row: dict) -> str:
+    """The article a lead links.
+
+    Techmeme's and Hacker News's own link when the reader can open it; else,
+    and for a Kagi cluster (which carries only its sources), an established
+    outlet's article among the row's sources, else the first usable one.
+    """
+    own = canonicalize_publisher_url(row.get("url") or "")
+    usable = [
+        url for url in map(canonicalize_publisher_url, ([own] if own else []) + list(row.get("more") or []))
+        if attention_match._is_publisher_article(url, "") and is_event_url(url)
+    ]
+    if not usable:
+        return ""
+    if own and usable[0] == own:
+        return own
+    return next((url for url in usable if established_outlet(url)), usable[0])
+
+def _lead_finding(row: dict, inventory: str, position: int, observed_day: date) -> dict | None:
+    """A snapshot row in the shape of a research finding, or None without a usable link."""
+    url = _lead_url(row)
+    title = " ".join(str(row.get("title") or "").split())
+    if not url or not title:
+        return None
+    summary = _KAGI_CITATION.sub("", str(row.get("text") or "")).strip() or title
+    stamp = row.get("t")
+    return {
+        "title": title,
+        "url": url,
+        "source_domain": attention_match.registrable_domain(url),
+        # A Techmeme or Kagi row was current news when collected, and Phase 5 still
+        # checks the page's own date. A Hacker News link can be any age, so it stays
+        # date-unverified until the fetch confirms it.
+        "date_published": "" if inventory == "hn" else (
+            datetime.fromtimestamp(stamp, timezone.utc).date() if stamp else observed_day
+        ).isoformat(),
+        "summary": summary[:400],
+        "category": "",
+        "editorial_significance": "medium",
+        "event": title,
+        "event_terms": [],
+        "research_angle_id": f"lead:{inventory}",
+        "lead": {"inventory": inventory, "position": position + 1,
+                 "strength": round(_lead_strength(row), 3)},
+    }
+
+def _screen_leads(client: Any, topic: dict, leads: list[dict], have: list[str]) -> dict[int, tuple[float, float]]:
+    """Jev's (belongs in the section, already among research findings) per lead index.
+
+    A failed batch leaves its leads unanswered: unknown, so they add nothing.
+    """
+    def ask(start: int) -> list[tuple[int, float, float]]:
+        chunk = leads[start:start + LEAD_JEV_BATCH]
+        state = {
+            "section": {"name": topic["web_title"], "covers": topic["beat"]},
+            "have": have,
+            "items": [
+                {"headline": lead["title"],
+                 "summary": "" if lead["summary"] == lead["title"] else lead["summary"][:300]}
+                for lead in chunk
+            ],
+        }
+        questions: dict[str, dict[str, Any]] = {}
+        for i in range(len(chunk)):
+            questions[f"fits_{i}"] = {
+                "type": "noul",
+                "instructions": f"Is `items[{i}]` a news story that belongs in the newspaper section "
+                                "described by `section`?",
+                "criteria": {
+                    "true": "It reports a new development on a subject `section.covers` names.",
+                    "false": "Its subject is outside `section.covers`, or it is not news: an essay, "
+                             "tutorial, discussion thread, job post, or old article.",
+                },
+            }
+            if have:
+                questions[f"have_{i}"] = {
+                    "type": "noul",
+                    "instructions": f"Does any headline in `have` report the same news event as `items[{i}]`?",
+                    "criteria": {
+                        "true": "A headline in `have` is about the same specific event or announcement.",
+                        "false": "No headline in `have` reports that event; sharing a company, person, "
+                                 "or topic is not enough.",
+                    },
+                }
+        try:
+            answers = client.ask("news.leads", state, questions)
+        except jev_api.JevUnavailable:
+            return []
+        return [
+            (start + i, float(answers[f"fits_{i}"]["noul"]),
+             float(answers[f"have_{i}"]["noul"]) if have else 0.0)
+            for i in range(len(chunk))
+        ]
+
+    with ThreadPoolExecutor(LEAD_JEV_WORKERS) as pool:
+        batches = list(pool.map(ask, range(0, len(leads), LEAD_JEV_BATCH)))
+    return {index: (fits, found) for answered in batches for index, fits, found in answered}
+
+@runtime.track_phase_failure("leads")
+def phase_1b_leads(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
+    """Phase 1b: candidates from the day's most prominent stories on curated inventories.
+
+    Research alone used to decide what an edition could contain, so a story its
+    searches missed could not run however widely it was covered (2026-11-13:
+    the Microsoft 365 outage, third on Techmeme, ran nowhere). The strongest
+    Techmeme, Hacker News and Kagi News rows of the attention snapshot become
+    candidates when Jev judges that they clearly belong in the section and
+    clearly are not among the research findings; the strongest
+    LEADS_PER_SECTION are returned. A lead then passes the same judge, fetch,
+    date check and editor as a research finding. Offline, without a Jev key,
+    or after a failed Jev batch, the affected rows add nothing.
+    """
+    output_path = run_dir / "01b-leads.json"
+    issue_date = runtime.issue_date_for_run(run_dir)
+    offline = os.environ.get("DAILY_NEWS_OFFLINE") == "1"
+    snapshot = _attention_snapshot(issue_date, offline)
+    phase_inputs = runtime.phase_inputs(
+        "leads", topic=topic,
+        upstream={
+            "findings": runtime.canonical_fingerprint(findings),
+            "snapshot": snapshot["id"],
+        },
+        policy={
+            "leads_schema": LEADS_SCHEMA_VERSION,
+            "inventories": list(topic["lead_inventories"]),
+            "beat": topic["beat"],
+            "rows_per_inventory": LEAD_ROWS_PER_INVENTORY,
+            "leads_per_section": LEADS_PER_SECTION,
+            "min_hn_points": LEAD_MIN_HN_POINTS,
+            "min_relevance": LEAD_MIN_RELEVANCE,
+            "max_already_found": LEAD_MAX_ALREADY_FOUND,
+            "jev_model": jev_api.MODEL,
+        },
+    )
+    state, cached = runtime.begin_or_load_phase(
+        run_dir, "leads", inputs=phase_inputs, artifact_path=output_path,
+        schema_version=LEADS_SCHEMA_VERSION, validator=lambda value: isinstance(value, dict),
+    )
+    if cached is not None:
+        return cached.get("leads", [])
+
+    started = time.time()
+    curated = [row for row in snapshot["rows"] if row.get("src") in ("techmeme", "hn", "kagi")]
+    observed_day = datetime.fromisoformat(snapshot["window_end"]).date()
+    seen_keys = {coverage_key(f.get("url", "")) for f in findings if isinstance(f, dict)}
+    headline_groups: list[dict[str, Any]] = []
+    candidates: list[dict] = []
+    for inventory in topic["lead_inventories"]:
+        for position, row in enumerate(_inventory_rows(curated, inventory)):
+            lead = _lead_finding(row, inventory, position, observed_day)
+            if lead is None or coverage_key(lead["url"]) in seen_keys:
+                continue
+            # One story often sits on several inventories under near-identical headlines.
+            tokens = set(attention_match.toks(lead["title"]))
+            if tokens and attention_match._near_duplicate(tokens, headline_groups) is not None:
+                continue
+            headline_groups.append({"tokens": tokens})
+            seen_keys.add(coverage_key(lead["url"]))
+            candidates.append(lead)
+
+    client = None
+    if candidates and not offline:
+        client = jev_api.load_client(deadline=time.monotonic() + LEAD_JEV_DEADLINE_SECONDS)
+    have = [str(f.get("title") or "") for f in findings if isinstance(f, dict) and f.get("title")]
+    answers = _screen_leads(client, topic, candidates, have) if client is not None else {}
+    screened: list[dict] = []
+    chosen: list[dict] = []
+    for index, lead in enumerate(candidates):
+        fits, found = answers.get(index, (None, None))
+        screened.append({
+            "title": lead["title"], "url": lead["url"], **lead["lead"],
+            "relevance": fits, "already_found": found,
+        })
+        if fits is not None and fits >= LEAD_MIN_RELEVANCE and found <= LEAD_MAX_ALREADY_FOUND:
+            lead["lead"].update(relevance=round(fits, 2), already_found=round(found, 2))
+            chosen.append(lead)
+    chosen.sort(key=lambda lead: lead["lead"]["strength"], reverse=True)
+    leads = chosen[:LEADS_PER_SECTION]
+
+    unanswered = len(candidates) - len(answers)
+    if client is None:
+        jev = {"status": "offline" if offline else "unconfigured" if candidates else "not_needed"}
+    else:
+        jev = {**client.usage(), "status": "degraded" if unanswered else "ok"}
+    output = {
+        "schema_version": LEADS_SCHEMA_VERSION,
+        "snapshot": snapshot["id"],
+        "considered": len(candidates),
+        "unanswered": unanswered if client is not None else len(candidates),
+        "jev": jev,
+        "screened": screened,
+        "leads": leads,
+    }
+    degraded = bool(candidates) and (client is None or unanswered > 0)
+    runtime.complete_phase_json(
+        state, "leads", output_path, output,
+        outcome="degraded" if degraded else "succeeded" if leads else "empty",
+        reason=(
+            f"Jev left {output['unanswered']} of {len(candidates)} lead candidate(s) unanswered"
+            if degraded else None if leads else "no lead cleared the section and novelty checks"
+        ),
+    )
+    print(f"  [done] leads — {len(leads)} added from {len(candidates)} candidate row(s); "
+          f"Jev {jev['status']} ({time.time() - started:.0f}s)")
+    return leads
+
 @runtime.track_phase_failure("judge-research")
 def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
     """Phase 2: Python date pre-tagging + batched LLM judge.
 
     1. Python parses date_published; findings published before yesterday are
-       dropped as stale without touching the LLM. Findings without a full
+       dropped as stale without touching the LLM, except one dated the day
+       before whose page metadata times it inside the FRESH_WINDOW_HOURS
+       before press time (``published_at``). Findings without a full
        date (empty, month-only "2026-10", unparseable) go on to the judge
        marked ``date_unverified``; Phase 5 keeps them only when the fetched
        page confirms a publication date in the freshness window. The artifact's
@@ -306,6 +580,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         },
         policy={
             "issue_date": today.isoformat(),
+            "fresh_window_hours": FRESH_WINDOW_HOURS,
             "judgment_rules": topic.get("judgment_rules", ""),
             "model": runtime._effective_model(runtime.MODEL),
         },
@@ -321,7 +596,12 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
     t0 = time.time()
 
     # ── Step 1: Python date pre-tagging ──
-    yesterday = today - timedelta(days=1)
+    def research_day(finding: dict) -> date | None:
+        published = str(finding.get("date_published") or "").strip()
+        # A month-only date names no day, so it never proves staleness either.
+        parsed = None if _MONTH_ONLY_DATE.match(published) else parse_date(published)
+        return parsed.date() if parsed else None
+
     for finding in findings:
         normalize_editorial_significance(finding)
         if finding.get("url"):
@@ -332,20 +612,29 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         "too_old": 0,
         "undated_forwarded": 0,
         "partial_date_forwarded": 0,
+        "late_window_forwarded": 0,
         "already_covered_previous_day": 0,
     }
     pre_filter_dropped: list[dict] = []
     ledger_rejected: list[dict] = []
 
+    uncovered = [
+        f for f in findings
+        if not recent_coverage_match(f.get("url", ""), recent_coverage, recent_dateless)
+    ]
+    _warm_published_times([
+        f.get("url", "") for f in uncovered
+        if research_day(f) and date_freshness(research_day(f), today) == "late"
+    ])
     for f in findings:
         if recent_coverage_match(f.get("url", ""), recent_coverage, recent_dateless):
             ledger_rejected.append({"finding": f, "reason": "already_covered_previous_day"})
             pre_filter["already_covered_previous_day"] += 1
             continue
         published = str(f.get("date_published") or "").strip()
-        # A month-only date names no day, so it never proves staleness either.
-        pub_date = None if _MONTH_ONLY_DATE.match(published) else parse_date(published)
-        if pub_date is None:
+        pub_day = research_day(f)
+        placement = date_freshness(pub_day, today) if pub_day else ""
+        if pub_day is None:
             # 10-18 gaming: 11 of 18 raw findings (VALORANT Champions final,
             # the official Steam Next Fest page) carried empty or month-only
             # dates and were silently dropped, leaving the section empty.
@@ -353,8 +642,14 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
             f["date_unverified"] = True
             pre_filter["partial_date_forwarded" if published else "undated_forwarded"] += 1
             pre_tagged.append(f)
-        elif pub_date.date() >= yesterday:
+        elif placement in ("fresh", "future"):
             f["date_tag"] = "fresh"
+            pre_tagged.append(f)
+        elif placement == "late" and _confirm_late_window(f, today):
+            # Dated the day before yesterday, but the page's own timestamp is
+            # inside the FRESH_WINDOW_HOURS before press time.
+            f["date_tag"] = "fresh"
+            pre_filter["late_window_forwarded"] += 1
             pre_tagged.append(f)
         else:
             pre_filter["too_old"] += 1
@@ -364,7 +659,9 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
             })
 
     unverified = pre_filter["undated_forwarded"] + pre_filter["partial_date_forwarded"]
-    print(f"  Date pre-tag: {len(pre_tagged) - unverified} fresh, {unverified} date-unverified "
+    print(f"  Date pre-tag: {len(pre_tagged) - unverified} fresh "
+          f"({pre_filter['late_window_forwarded']} by a publication time inside the "
+          f"{FRESH_WINDOW_HOURS}h window), {unverified} date-unverified "
           f"(forwarded for fetch confirmation), {pre_filter['too_old']} too_old, "
           f"{len(ledger_rejected)} covered by a section in the previous "
           f"{CROSS_DAY_DEDUP_DAYS} days (dropped)")
@@ -413,7 +710,12 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         "deprecations, patches, renames, or migration notices are not high without "
         "documented widespread disruption or affected scale. Never estimate popularity "
         "or attention. A finding with `date_unverified: true` has no full publication "
-        "date yet; a later article fetch confirms it, so never reject it for its date.\n\n"
+        "date yet; a later article fetch confirms it, so never reject it for its date. "
+        "A finding with a `lead` field came from a measured news inventory, not from "
+        "research, and is judged by the same rules. For each lead you approve, set "
+        "`category` to one of the section categories, `event` to a concise statement of "
+        "what happened, and `event_terms` to 2-4 distinctive names or phrases that "
+        "identify the event.\n\n"
         "Output a JSON object with two arrays wrapped in ```json fences:\n"
         '  {\n'
         '    "approved": [<findings that pass all quality checks>],\n'
@@ -426,6 +728,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         user = (
             f"## Rules\n\n{topic['judgment_rules']}\n\n"
             f"## Editorial Significance Rubric\n\n{rubric}\n\n"
+            f"## Section categories\n\n{', '.join(topic.get('categories', []))}\n\n"
             f"## Findings to evaluate (batch {batch_idx + 1}/{len(batches)})\n\n"
             f"{batch_json}\n\n"
             "Evaluate each finding against every rule. Output the approved and "
@@ -491,9 +794,30 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
             continue
         f = deepcopy(source)
         significance = judged.get("editorial_significance") or judged.get("importance")
+        source_was_high = f["editorial_significance"] == "high"
         if significance:
             f["editorial_significance"] = significance
             normalize_editorial_significance(f)
+        judged_evidence = judged.get("significance_evidence")
+        if (
+            f["editorial_significance"] == "high" and isinstance(judged_evidence, dict)
+            and not (source_was_high and isinstance(f.get("significance_evidence"), dict))
+        ):
+            # The judge raised the label (or the finding is a lead with no evidence of
+            # its own), so the evidence that justifies it is the judge's.
+            f["significance_evidence"] = judged_evidence
+        if f.get("lead"):
+            category = " ".join(str(judged.get("category") or "").split())
+            if category in topic.get("categories", []):
+                f["category"] = category
+            event = " ".join(str(judged.get("event") or "").split())
+            if event:
+                f["event"] = event[:300]
+            terms = judged.get("event_terms")
+            if isinstance(terms, list):
+                f["event_terms"] = [
+                    " ".join(term.split()) for term in terms if isinstance(term, str) and term.strip()
+                ][:4]
         url = normalize_url(f.get("url", ""))
         if url and url in seen_urls:
             dedup_rejected.append({"finding": f, "reason": "crossbatch_duplicate"})
@@ -831,6 +1155,18 @@ def _alternate_candidates(
             candidates.append(alternate)
     return candidates
 
+def _with_alternate(item: dict, best: dict, marker: str) -> dict:
+    """``item`` re-pointed at another outlet's article on its story; ``marker`` keeps the old URL."""
+    replacement = {key: best[key] for key in ("url", "title", "source_domain")}
+    if best["origin"] == "research":
+        replacement["date_published"] = best.get("date_published") or item.get("date_published", "")
+        replacement["summary"] = best.get("summary") or item.get("summary", "")
+    # ``published_at`` timed the replaced URL; Phase 5 re-times the new one.
+    return {
+        **{key: value for key, value in item.items() if key != "published_at"},
+        **replacement, marker: item.get("url", ""),
+    }
+
 def resolve_hard_paywalls(
     candidates: list[dict],
     research_findings: list[dict],
@@ -870,12 +1206,9 @@ def resolve_hard_paywalls(
             })
             continue
         best = options[0]
-        replacement = {key: best[key] for key in ("url", "title", "source_domain")}
-        if best["origin"] == "research":
-            replacement["date_published"] = best.get("date_published") or item.get("date_published", "")
-            replacement["summary"] = best.get("summary") or item.get("summary", "")
+        replacement = _with_alternate(item, best, "paywall_substituted_from")
         taken.add(coverage_key(replacement["url"]))
-        kept.append({**item, **replacement, "paywall_substituted_from": item.get("url", "")})
+        kept.append(replacement)
         substituted.append({
             "paywall_domain": domain,
             "original_url": item.get("url", ""),
@@ -886,6 +1219,93 @@ def resolve_hard_paywalls(
             "overlap": best["overlap"],
         })
     return kept, substituted, dropped
+
+# Outlets whose own article is preferred when several report one story: the attention
+# press panel's publishers, minus those the Phase 4 reader cannot open.
+ESTABLISHED_OUTLETS = (
+    frozenset(attention_sources.PANEL_SITEMAPS) | frozenset(attention_sources.PANEL_FEEDS)
+) - HARD_PAYWALL_DOMAINS
+# Jev's probability that a candidate's publisher is the original source of its news
+# (attention.IMPORTANCE_QUESTIONS["original_source"]). At or below this it is clearly a
+# third party's report (the Jev docs' starting "no"), which another outlet may replace.
+# 2026-11-13 probe of 129 published stories: company newsrooms, official blogs and
+# vendor research scored 0.80 or more, news outlets and aggregators 0.19 or less.
+ORIGINAL_SOURCE_MAX_FOR_SWAP = 0.3
+
+def established_outlet(url: str) -> str:
+    """The established outlet serving ``url`` (any subdomain), else empty."""
+    try:
+        host = (urlsplit(url if "://" in (url or "") else f"https://{url or ''}").hostname or "").lower()
+    except ValueError:
+        return ""
+    return next(
+        (domain for domain in ESTABLISHED_OUTLETS if host == domain or host.endswith(f".{domain}")),
+        "",
+    )
+
+def prefer_established_outlets(
+    candidates: list[dict],
+    research_findings: list[dict],
+    blocked_keys: set[str],
+    repeats: Any,
+) -> tuple[list[dict], list[dict]]:
+    """Link an established outlet's article instead of an unknown site's report of it.
+
+    A candidate is re-pointed when its publisher is not an established outlet,
+    Jev judged it clearly not the original source of the news, and one of its
+    alternates (``_alternate_candidates``: research findings on the same story,
+    then Jev-"same" attention URLs) is an established outlet's article. The
+    2026-11-13 AI & Tech edition ran Jensen Huang's resignation from decrypt.co
+    with TechCrunch and CNN versions in hand. An outlet already holding
+    SOURCE_DOMAIN_CAP candidates takes no more, so the swap never costs a
+    story at Phase 6's concentration cap. Without a Jev answer nothing moves.
+    Returns (candidates, audit records).
+    """
+    taken = {coverage_key(item.get("url", "")) for item in candidates} | set(blocked_keys)
+    alternates = _research_alternates(research_findings)
+    held: dict[str, int] = {}
+    for item in candidates:
+        outlet = established_outlet(item.get("url", ""))
+        if outlet:
+            held[outlet] = held.get(outlet, 0) + 1
+
+    def open_outlet(url: str) -> str:
+        outlet = established_outlet(url)
+        return outlet if outlet and held.get(outlet, 0) < SOURCE_DOMAIN_CAP else ""
+
+    kept: list[dict] = []
+    substituted: list[dict] = []
+    for item in candidates:
+        original = ((item.get("jev_importance") or {}).get("answers") or {}).get("original_source")
+        if (
+            established_outlet(item.get("url", ""))
+            or not isinstance(original, (int, float))
+            or original > ORIGINAL_SOURCE_MAX_FOR_SWAP
+        ):
+            kept.append(item)
+            continue
+        best = next(
+            (option for option in _alternate_candidates(item, alternates, taken, repeats)
+             if open_outlet(option["url"])),
+            None,
+        )
+        if best is None:
+            kept.append(item)
+            continue
+        outlet = open_outlet(best["url"])
+        held[outlet] = held.get(outlet, 0) + 1
+        taken.add(coverage_key(best["url"]))
+        kept.append(_with_alternate(item, best, "outlet_substituted_from"))
+        substituted.append({
+            "original_url": item.get("url", ""),
+            "original_title": item.get("title", ""),
+            "original_source": original,
+            "alternate_url": best["url"],
+            "alternate_title": best["title"],
+            "alternate_origin": best["origin"],
+            "overlap": best["overlap"],
+        })
+    return kept, substituted
 
 def assign_fetch_alternates(
     queue: list[dict],
@@ -1113,6 +1533,9 @@ def phase_3_rank(
             "cross_day_event_min_terms": CROSS_DAY_EVENT_MIN_TERMS,
             "cross_day_event_max_date_gap_days": CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS,
             "cross_day_event_min_shared_figures": CROSS_DAY_EVENT_MIN_SHARED_FIGURES,
+            "established_outlets": sorted(ESTABLISHED_OUTLETS),
+            "original_source_max_for_swap": ORIGINAL_SOURCE_MAX_FOR_SWAP,
+            "source_domain_cap": SOURCE_DOMAIN_CAP,
         },
     )
     state, cached = runtime.begin_or_load_phase(
@@ -1254,6 +1677,13 @@ def phase_3_rank(
         reverse=True,
     )[:FRESH_CAP]
 
+    # An unknown site's report of a story gives way to an established outlet's article on it.
+    pool_a, outlet_substituted = prefer_established_outlets(
+        pool_a, research_findings, other_topic_urls | recent_coverage, _alternate_repeat,
+    )
+    if outlet_substituted:
+        print(f"  [Phase 3 outlet] {len(outlet_substituted)} story(s) moved to an established outlet")
+
     phase_4_queue = pool_a
     for item in phase_4_queue:
         item["ranking_schema_version"] = RANKING_SCHEMA_VERSION
@@ -1272,6 +1702,7 @@ def phase_3_rank(
         "alternate_recent_coverage_rejected": alternate_rejected,
         "paywall_substituted": paywall_substituted,
         "paywall_dropped": paywall_dropped,
+        "outlet_substituted": outlet_substituted,
         "status": "ok" if phase_4_queue else "empty",
         "reason": "" if phase_4_queue else "no eligible URLs",
     }
@@ -1434,7 +1865,7 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
         if alternate.get("date_published"):
             replacement["date_published"] = alternate["date_published"]
         return {
-            **finding,
+            **{key: value for key, value in finding.items() if key != "published_at"},
             **replacement,
             **result,
             "url": url,
@@ -1550,23 +1981,32 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
 def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -> list[dict]:
     """Phase 5: Python date validation + batched LLM judge of summary accuracy.
 
-    1. Python validates date_confirmed against calendar thresholds:
+    1. Python validates date_confirmed against the edition date (the run directory):
        - date >= yesterday → ok (fresh, as expected)
-       - date 2-5 days old → drop (Phase 1/2 misclassified it as fresh)
+       - the day before yesterday → ok only when the page's own metadata times
+         the article inside the FRESH_WINDOW_HOURS before press time
+         (recorded as ``published_at``)
+       - otherwise 2-5 days old → drop (Phase 1/2 misclassified it as fresh)
        - date >5 days old → auto-drop
        - date missing → targeted re-fetch for date extraction, then re-check
        - a ``date_unverified`` finding (no full research date) passes only
-         when a fetched date of yesterday through today confirms it; otherwise
-         it drops as ``date_unconfirmed``
+         when a fetched fresh date confirms it; otherwise it drops as
+         ``date_unconfirmed``
     2. Surviving summaries go through batched LLM judge for faithfulness
        and completeness (date already verified, not re-checked).
     3. Python merges results.
     """
     output_path = run_dir / "05-summaries-judged.json"
+    today = runtime.issue_date_for_run(run_dir)
     phase_inputs = runtime.phase_inputs(
         "judge-summaries", topic=topic,
         upstream={"summaries": runtime.canonical_fingerprint(summaries)},
-        policy={"ranking_schema": RANKING_SCHEMA_VERSION, "model": runtime._effective_model(runtime.MODEL)},
+        policy={
+            "ranking_schema": RANKING_SCHEMA_VERSION,
+            "model": runtime._effective_model(runtime.MODEL),
+            "issue_date": today.isoformat(),
+            "fresh_window_hours": FRESH_WINDOW_HOURS,
+        },
     )
     state, cached = runtime.begin_or_load_phase(
         run_dir, "judge-summaries", inputs=phase_inputs, artifact_path=output_path,
@@ -1598,8 +2038,6 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
     # Uses date_confirmed from Phase 4's actual article fetch — an independent
     # source from Phase 1's date_published. Re-fetches only when
     # date_confirmed is missing.
-    now = datetime.now(timezone.utc)
-    today = now.date()
     yesterday = today - timedelta(days=1)
     stale_cutoff = today - timedelta(days=5)
 
@@ -1617,6 +2055,8 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
             # A future date is an event date, never the page's publication date.
             return None
         if d >= yesterday:
+            return ""
+        if date_freshness(d, today) == "late" and _confirm_late_window(s, today):
             return ""
         age = (today - d).days
         if d >= stale_cutoff:
@@ -1640,6 +2080,11 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
             validated.append(s)
             print(f"  [done] {label} → {outcome}, passing to LLM")
 
+    _warm_published_times([
+        s.get("url", "") for s in to_judge
+        if (parsed := parse_date((s.get("date_confirmed") or "").strip())) is not None
+        and date_freshness(parsed.date(), today) == "late"
+    ])
     for s in to_judge:
         issue = _date_check(s, (s.get("date_confirmed") or "").strip())
         if issue is None:

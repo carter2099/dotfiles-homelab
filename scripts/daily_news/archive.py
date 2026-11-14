@@ -137,7 +137,7 @@ def phase_7_write(
 def public_story(story: dict) -> dict:
     """Return only source-backed fields safe to publish on the news site."""
     fields = (
-        "title", "url", "source_domain", "date_published", "date_confirmed",
+        "title", "url", "source_domain", "date_published", "date_confirmed", "published_at",
         "summary", "category", "editorial_significance", "significance_evidence",
         "significance_validation", "author", "event", "priority_score",
         "priority_explanation",

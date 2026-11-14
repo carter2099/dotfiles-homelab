@@ -365,6 +365,29 @@ def test_quiet_publisher_sitemap_is_a_measured_zero_not_a_failure() -> None:
         check(False, "a sitemap whose entries carry no news titles is still a failed publisher")
 
 
+def test_panel_stays_measured_when_a_few_publishers_fail() -> None:
+    def collect(dead: int) -> dict:
+        feeds = {f"outlet{index}.example": f"https://outlet{index}.example/feed" for index in range(20)}
+        blocked = set(list(feeds.values())[:dead])
+
+        def get_ok(url: str, params=None) -> bytes:
+            if url in blocked:
+                raise RuntimeError("HTTP 401")
+            return b"<rss><channel></channel></rss>"
+
+        saved = attention_sources.PANEL_SITEMAPS, attention_sources.PANEL_FEEDS
+        attention_sources.PANEL_SITEMAPS, attention_sources.PANEL_FEEDS = {}, feeds
+        try:
+            return attention_sources.collect_panel(SimpleNamespace(get_ok=get_ok, start_s=0, end_s=1))[1]
+        finally:
+            attention_sources.PANEL_SITEMAPS, attention_sources.PANEL_FEEDS = saved
+
+    # 2026-10-21..11-13: one bot-walled sitemap left all 65 publishers out of every score.
+    one = collect(1)
+    check("incomplete" not in one and list(one["failed_publishers"]) == ["outlet0.example"], one)
+    check("incomplete" in collect(3), "3 of 20 publishers missing is a partial census")
+
+
 def test_a_missing_source_is_left_out_instead_of_counted_as_zero() -> None:
     found = {"measures": {"gkg_groups": 6, "gkg_domains": 8, "techmeme_weight": 1.0, "techmeme_more": 4},
              "recent": {}, "adjudication": {"jev": 5}}
@@ -473,38 +496,42 @@ def test_attention_never_rewrites_editorial_significance() -> None:
     check(observations[0]["editorial_significance"] == "medium", observations[0])
 
 
-def test_high_significance_requires_grounded_broad_impact() -> None:
-    deprecated = {
-        "title": "Codex MCP server command deprecated",
-        "summary": "OpenAI deprecated the command and directed users to a replacement app server.",
-        "editorial_significance": "high",
-        "significance_evidence": {
-            "basis": "widespread_mandatory_migration",
-            "affected_scope": "sector",
-            "impact": "Users of the deprecated command can move to the replacement app server.",
-        },
-    }
-    enforce_editorial_significance(deprecated)
-    check(deprecated["editorial_significance"] == "medium", deprecated)
-    check(
-        "lacks demonstrated broad impact"
-        in deprecated["significance_validation"]["reason"],
-        deprecated,
-    )
+def test_high_significance_needs_structured_evidence_and_survives_only_non_routine_news() -> None:
+    def story(basis: str = "major_financial_scale", **evidence: str) -> dict:
+        return {
+            "title": "Jensen Huang Resigns as Nvidia CEO, With CFO Colette Kress Named Interim Chief",
+            # The research summary is one search-snippet sentence; the impact sentence
+            # cites figures it does not repeat.
+            "summary": "Jensen Huang resigned as Nvidia's president, CEO and board member.",
+            "editorial_significance": "high",
+            "significance_evidence": {
+                "basis": basis,
+                "affected_scope": "broad",
+                "impact": "Huang's 33-year run ends; Nvidia filed an 8-K and the stock fell about 12%.",
+                **evidence,
+            },
+        }
 
-    binding = {
-        "title": "National regulator adopts binding AI safety rule",
-        "summary": "The national regulator adopted a binding AI safety rule covering every provider.",
-        "editorial_significance": "high",
-        "significance_evidence": {
-            "basis": "binding_policy_or_law",
-            "affected_scope": "broad",
-            "impact": "The binding AI safety rule covers every national provider.",
-        },
-    }
-    enforce_editorial_significance(binding)
-    check(binding["editorial_significance"] == "high", binding)
-    check(binding["significance_validation"]["status"] == "accepted", binding)
+    def jev(routine: float) -> dict:
+        return {"score": 40.0, "confidence": 0.4, "answers": {"routine": routine}}
+
+    for importance in (None, jev(0.01), jev(0.6)):
+        accepted = enforce_editorial_significance(story(), importance)
+        check(accepted["editorial_significance"] == "high", (importance, accepted))
+        check(accepted["significance_validation"]["status"] == "accepted", accepted)
+
+    routine = enforce_editorial_significance(story("major_product_or_platform_shift"), jev(0.95))
+    check(routine["editorial_significance"] == "medium", routine)
+    check("routine maintenance" in routine["significance_validation"]["reason"], routine)
+    # A security fix or a binding rule stays high even when it reads like a patch notice.
+    for basis in ("security_or_safety_incident", "binding_policy_or_law"):
+        exempt = enforce_editorial_significance(story(basis), jev(0.95))
+        check(exempt["editorial_significance"] == "high", exempt)
+
+    for evidence in ({"basis": "it trended"}, {"affected_scope": "niche"}, {"impact": "Big."}):
+        weak = enforce_editorial_significance(story(**evidence), jev(0.01))
+        check(weak["editorial_significance"] == "medium", weak)
+        check(weak["significance_validation"]["status"] == "downgraded", weak)
 
 
 def test_priority_ties_use_evidence_not_discovery_order() -> None:
@@ -582,13 +609,14 @@ def main() -> None:
         test_a_failed_adjudication_is_reported_per_story_and_stops_during_an_outage,
         test_measured_zero_is_not_unavailable,
         test_quiet_publisher_sitemap_is_a_measured_zero_not_a_failure,
+        test_panel_stays_measured_when_a_few_publishers_fail,
         test_a_missing_source_is_left_out_instead_of_counted_as_zero,
         test_failed_jev_importance_leaves_only_that_story_at_editorial_points,
         test_reference_scales_follow_history_once_it_is_deep_enough,
         test_importance_rewards_broad_consequence_and_discounts_routine_updates,
         test_priority_blends_importance_with_confident_attention_only,
         test_attention_never_rewrites_editorial_significance,
-        test_high_significance_requires_grounded_broad_impact,
+        test_high_significance_needs_structured_evidence_and_survives_only_non_routine_news,
         test_priority_ties_use_evidence_not_discovery_order,
         test_event_term_fallback_and_legacy_migration,
         test_canonicalize_publisher_url_maps_sample_hosts_only,

@@ -51,6 +51,7 @@ from .runtime import (
 from .research import (
     batch,
     phase_1_research,
+    phase_1b_leads,
     phase_2_judge_research,
     phase_2b_attention,
     phase_3_rank,
@@ -96,6 +97,7 @@ __all__ = (
     "run_digest",
     "validate_runtime_contract",
     "phase_1_research",
+    "phase_1b_leads",
     "phase_2_judge_research",
     "phase_2b_attention",
     "phase_3_rank",

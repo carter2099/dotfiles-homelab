@@ -509,7 +509,7 @@ def test_phase_two_forwards_undated_findings_for_confirmation() -> None:
         artifact = json.loads((run_dir / "02-research-judged.json").read_text())
         check(artifact["pre_filter"] == {
             "too_old": 1, "undated_forwarded": 1, "partial_date_forwarded": 1,
-            "already_covered_previous_day": 0,
+            "late_window_forwarded": 0, "already_covered_previous_day": 0,
         }, artifact["pre_filter"])
         check([(entry["url"], entry["reason"]) for entry in artifact["pre_filter_dropped"]]
               == [(older["url"], "too_old")], artifact["pre_filter_dropped"])
@@ -2271,6 +2271,249 @@ def _fetches_by_host(urls: list[str], failing: tuple[str, ...] = (), raising: tu
     return fake_omp
 
 
+def test_third_party_report_gives_way_to_an_established_outlet() -> None:
+    """Phase 3 links an established outlet's article instead of an unknown site's
+    report of the story, unless that site is the story's original source
+    (2026-11-13 AI & Tech ran Jensen Huang's resignation from decrypt.co with
+    TechCrunch's article among the research findings)."""
+    decrypt = "https://decrypt.co/383134/jensen-huang-resigns-as-nvidia-ceo"
+    newsroom = "https://nvidianews.nvidia.com/news/nvidia-announces-ceo-transition"
+
+    def story(url: str, original_source: float | None, **fields: object) -> dict:
+        item = {
+            "title": "Jensen Huang Resigns as Nvidia CEO, With CFO Colette Kress Named Interim Chief",
+            "url": url, "source_domain": contracts.normalize_url(url).split("/")[0],
+            "priority_score": 91.7, "editorial_significance": "high",
+            "date_published": "2026-11-12", "published_at": "2026-11-12T15:00:00+00:00",
+            "event": "Jensen Huang resigned as Nvidia CEO; Colette Kress was named interim CEO.",
+            "event_terms": ["Jensen Huang resigns", "Colette Kress interim CEO"],
+            **fields,
+        }
+        if original_source is not None:
+            item["jev_importance"] = {"score": 40.0, "confidence": 0.4,
+                                      "answers": {"original_source": original_source}}
+        return item
+
+    techcrunch = {
+        "title": "Nvidia's Jensen Huang resigns, chipmaker names CFO Colette Kress as interim CEO",
+        "url": "https://techcrunch.com/2026/11/12/nvidias-jensen-huang-resigns/",
+        "source_domain": "techcrunch.com", "date_published": "2026-11-12",
+        "summary": "Nvidia said Jensen Huang resigned and Colette Kress is interim CEO.",
+        "event": "Jensen Huang resigned as Nvidia CEO and Colette Kress became interim CEO.",
+        "event_terms": ["Jensen Huang resigns", "Nvidia interim CEO"],
+    }
+
+    def rank(fresh: list[dict]) -> tuple[list[dict], dict]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "ai-tech" / "2026-11-13"
+            run_dir.mkdir(parents=True)
+            with patch.object(runtime, "DIGESTS_DIR", root):
+                queue = research.phase_3_rank(
+                    catalog.TOPICS["ai-tech"], copy.deepcopy(fresh), run_dir,
+                    [copy.deepcopy(fresh[0]), techcrunch],
+                )
+            return queue, json.loads((run_dir / "03-urls-ranked.json").read_text())
+
+    queue, artifact = rank([story(decrypt, 0.04)])
+    moved = queue[0]
+    check(moved["url"] == techcrunch["url"] and moved["source_domain"] == "techcrunch.com", moved)
+    check(moved["outlet_substituted_from"] == decrypt and moved["priority_score"] == 91.7, moved)
+    check("published_at" not in moved, "the replaced URL's publication time must not follow the story")
+    check([(entry["original_url"], entry["alternate_url"]) for entry in artifact["outlet_substituted"]]
+          == [(decrypt, techcrunch["url"])], artifact["outlet_substituted"])
+
+    for kept_as_is in (
+        story(newsroom, 0.96),  # the company's own announcement is the better link
+        story(decrypt, None),   # no Jev answer: unknown, never a default
+        story(decrypt, 0.5),    # Jev unsure
+    ):
+        queue, artifact = rank([kept_as_is])
+        check(queue[0]["url"] == kept_as_is["url"] and artifact["outlet_substituted"] == [], queue[0])
+
+    # An outlet already holding the per-section cap takes no more, so the swap
+    # cannot cost a story at Phase 6's source-concentration cap.
+    crowd = [
+        {"title": f"Unrelated TechCrunch story {index}", "url": f"https://techcrunch.com/2026/11/12/other-{index}/",
+         "source_domain": "techcrunch.com", "priority_score": 50.0, "editorial_significance": "medium",
+         "date_published": "2026-11-12"}
+        for index in range(catalog.SOURCE_DOMAIN_CAP)
+    ]
+    queue, artifact = rank([story(decrypt, 0.04), *crowd])
+    check(queue[0]["url"] == decrypt and artifact["outlet_substituted"] == [], queue[0])
+
+
+class _LeadJev:
+    """Jev stand-in for lead screening: (belongs, already found) by headline."""
+
+    def __init__(self, table: dict[str, tuple[float, float]], *, fail: bool = False) -> None:
+        self.table = table
+        self.fail = fail
+        self.asked: list[str] = []
+        self.have: list[str] = []
+
+    def ask(self, purpose: str, state: dict, questions: dict) -> dict:
+        self.asked.extend(item["headline"] for item in state["items"])
+        self.have = state["have"]
+        if self.fail:
+            raise jev.JevUnavailable("server", "HTTP 503")
+        answers = {}
+        for key in questions:
+            kind, index = key.split("_")
+            fits, found = self.table[state["items"][int(index)]["headline"]]
+            answers[key] = {"type": "noul", "noul": fits if kind == "fits" else found}
+        return answers
+
+    def usage(self) -> dict:
+        return {"model": "jev-test", "requests": 1, "input_tokens": 10, "failures": int(self.fail)}
+
+
+def test_attention_leads_add_relevant_stories_research_missed() -> None:
+    """Phase 1b turns the snapshot's strongest Techmeme, Hacker News and Kagi News
+    rows into candidates when Jev says they clearly belong in the section and
+    research clearly lacks them (2026-11-13: the Microsoft 365 outage, third on
+    Techmeme, ran in no section because no research search returned it)."""
+    now_s = int(datetime(2026, 11, 13, 6, 30, tzinfo=timezone.utc).timestamp())
+    found = {"title": "Jensen Huang Resigns as Nvidia CEO", "url": "https://decrypt.co/383134/huang-resigns"}
+    outage = "Users report being unable to access Outlook, Teams, and other Microsoft 365 services"
+    rows = [
+        {"src": "techmeme", "rank": 1, "url": "https://nvidianews.nvidia.com/news/nvidia-announces-ceo-transition",
+         "title": "Jensen Huang resigns as Nvidia CEO, president, and board member", "more": ["x"] * 50},
+        # The primary link is unreadable; an established outlet among the sources is linked instead.
+        {"src": "techmeme", "rank": 3, "url": "https://www.bloomberg.com/news/articles/2026-11-12/m365-outage",
+         "title": outage,
+         "more": ["https://news.google.com/rss/articles/CBMi", "https://someblog.example/m365-outage-report",
+                  "https://www.engadget.com/big-tech/microsoft-365-outage-123456789.html"] + ["x"] * 27},
+        {"src": "techmeme", "rank": 9, "url": found["url"], "title": "Research already has this article", "more": []},
+        {"src": "hn", "t": now_s - 7200, "id": "1", "url": "https://blog.rust-lang.org/2026/11/12/Rust-1.100.0/",
+         "title": "Rust 1.100", "points": 603, "comments": 229},
+        {"src": "hn", "t": now_s - 7200, "id": "2", "url": "https://pron.github.io/posts/correctness-and-complexity",
+         "title": "Writing correct software is hard (2016)", "points": 900, "comments": 400},
+        {"src": "hn", "t": now_s - 7200, "id": "3", "url": "https://example.org/blog/thin-signal-story",
+         "title": "A story with few points", "points": 40, "comments": 3},
+        {"src": "kagi", "t": now_s - 66000, "category": "ai", "rank": 4, "url": "", "unique_domains": 24,
+         "title": "United blocks AI agents from airline transactions",
+         "text": "United will restrict AI agents [techcrunch.com#1] from booking [cnbc.com#2].",
+         "more": ["https://techcrunch.com/2026/11/12/united-airlines-blocks-ai-agents/"]},
+        {"src": "kagi", "t": now_s - 66000, "category": "tech", "rank": 5, "url": "", "unique_domains": 26,
+         "title": "EU proposes digital fairness law targeting dark patterns",
+         "text": "The European Commission proposed a Digital Fairness Act [theverge.com#1].",
+         "more": ["https://www.theverge.com/policy/2026/11/12/eu-digital-fairness-act"]},
+        {"src": "kagi", "t": now_s - 66000, "category": "gaming", "rank": 1, "url": "", "unique_domains": 20,
+         "title": "A gaming story outside this section's inventories",
+         "more": ["https://www.eurogamer.net/a-gaming-story-of-the-day"]},
+    ]
+    table = {
+        "Jensen Huang resigns as Nvidia CEO, president, and board member": (0.96, 0.96),
+        outage: (0.88, 0.08),
+        "Rust 1.100": (0.76, 0.09),
+        "United blocks AI agents from airline transactions": (0.4, 0.06),
+        "EU proposes digital fairness law targeting dark patterns": (0.83, 0.06),
+    }
+
+    def run_phase(client: _LeadJev | None, offline: str = "") -> tuple[list[dict], dict]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run" / "ai-tech" / "2026-11-13"
+            run_dir.mkdir(parents=True)
+            _write_snapshot(root / "snapshot", "2026-11-13", rows)
+            with (
+                patch.dict(os.environ, {"DAILY_NEWS_OFFLINE": offline}),
+                patch.object(runtime, "ATTENTION_SNAPSHOT_DIR", root / "snapshot"),
+                patch("jev.load_client", return_value=client),
+            ):
+                leads = research.phase_1b_leads(catalog.TOPICS["ai-tech"], [dict(found)], run_dir)
+            return leads, json.loads((run_dir / "01b-leads.json").read_text())
+
+    client = _LeadJev(table)
+    leads, artifact = run_phase(client)
+    # Belongs and not found: strongest first. The found story, the story Jev
+    # places outside the section, and the unasked rows add nothing.
+    check([lead["title"] for lead in leads]
+          == [outage, "Rust 1.100", "EU proposes digital fairness law targeting dark patterns"], leads)
+    check(sorted(client.asked) == sorted(table), client.asked)
+    check(client.have == [found["title"]], client.have)
+    by_title = {lead["title"]: lead for lead in leads}
+    check(by_title[outage]["url"] == "https://www.engadget.com/big-tech/microsoft-365-outage-123456789.html",
+          by_title[outage])
+    check(by_title[outage]["lead"]["inventory"] == "techmeme" and by_title[outage]["date_published"], by_title[outage])
+    # A Hacker News link can be any age: its date waits for the fetch.
+    check(by_title["Rust 1.100"]["date_published"] == "", by_title["Rust 1.100"])
+    eu = by_title["EU proposes digital fairness law targeting dark patterns"]
+    check(eu["url"].startswith("https://www.theverge.com/") and eu["date_published"] == "2026-11-12", eu)
+    check(eu["summary"] == "The European Commission proposed a Digital Fairness Act.", eu["summary"])
+    check(artifact["considered"] == 5 and artifact["jev"]["status"] == "ok", artifact)
+
+    with patch.object(research, "LEADS_PER_SECTION", 1):
+        capped, _ = run_phase(_LeadJev(table))
+    check([lead["title"] for lead in capped] == [outage], capped)
+
+    # Unknown is never a default: a failed Jev batch, a missing key, or an
+    # offline run adds no lead.
+    failed, artifact = run_phase(_LeadJev(table, fail=True))
+    check(failed == [] and artifact["jev"]["status"] == "degraded" and artifact["unanswered"] == 5, artifact)
+    unconfigured, artifact = run_phase(None)
+    check(unconfigured == [] and artifact["jev"]["status"] == "unconfigured", artifact)
+    with patch("daily_news.attention_sources.load_or_build_snapshot",
+               side_effect=AssertionError("offline runs must not load a snapshot")):
+        offline, artifact = run_phase(_LeadJev(table), offline="1")
+    check(offline == [] and artifact["considered"] == 0, artifact)
+
+
+def test_judge_completes_a_lead_and_its_high_label_keeps_its_evidence() -> None:
+    """A lead has no category, event terms or significance evidence of its own:
+    the judge's are kept for it, so a top story found only on an inventory can
+    still be rated high. A research finding keeps its own event fields."""
+    with tempfile.TemporaryDirectory() as temporary:
+        run_dir = Path(temporary) / "ai-tech" / "2026-11-13"
+        run_dir.mkdir(parents=True)
+        lead = {
+            "title": "Users report being unable to access Microsoft 365 services",
+            "url": "https://www.engadget.com/big-tech/microsoft-365-outage-123456789.html",
+            "source_domain": "engadget.com", "date_published": "2026-11-13",
+            "summary": "Users report being unable to access Microsoft 365 services",
+            "category": "", "editorial_significance": "medium",
+            "event": "Users report being unable to access Microsoft 365 services", "event_terms": [],
+            "research_angle_id": "lead:techmeme", "lead": {"inventory": "techmeme", "position": 3},
+        }
+        researched = {
+            "title": "Acme raises its seed round", "url": "https://example.com/acme-seed",
+            "source_domain": "example.com", "date_published": "2026-11-13",
+            "summary": "Acme raised a seed round.", "category": "Funding",
+            "editorial_significance": "medium", "event": "Acme raised a seed round",
+            "event_terms": ["Acme seed round"],
+        }
+        evidence = {"basis": "security_or_safety_incident", "affected_scope": "broad",
+                    "impact": "Microsoft 365 services were unavailable to many business users for hours."}
+
+        def judge(system: str, user: str, model: str | None = None) -> str:
+            check("## Section categories" in user and "`lead`" in system, "the judge is told how to complete a lead")
+            start = user.index("## Findings to evaluate")
+            items = json.loads(user[user.index("[", start):user.index("\n\nEvaluate each finding")])
+            for item in items:
+                if item.get("lead"):
+                    item.update(category="Industry News", event="A Microsoft 365 outage locked users out",
+                                event_terms=["Microsoft 365 outage", "Outlook", "Teams"],
+                                editorial_significance="high", significance_evidence=evidence)
+                else:
+                    item.update(event="Rewritten by the judge", event_terms=["rewritten"], category="Policy")
+            return json.dumps({"approved": items, "rejected": []})
+
+        with patch("daily_news.runtime._call_llm_proxy", side_effect=judge):
+            fresh = research.phase_2_judge_research(
+                catalog.TOPICS["ai-tech"], copy.deepcopy([researched, lead]), run_dir)
+        by_url = {item["url"]: item for item in fresh}
+        kept = by_url[lead["url"]]
+        check(kept["category"] == "Industry News" and kept["event"] == "A Microsoft 365 outage locked users out"
+              and kept["event_terms"] == ["Microsoft 365 outage", "Outlook", "Teams"], kept)
+        check(kept["editorial_significance"] == "high" and kept["significance_evidence"] == evidence, kept)
+        gated = attention.enforce_editorial_significance(copy.deepcopy(kept))
+        check(gated["editorial_significance"] == "high", gated)
+        untouched = by_url[researched["url"]]
+        check(untouched["event"] == researched["event"] and untouched["event_terms"] == researched["event_terms"]
+              and untouched["category"] == "Funding", untouched)
+
+
 FTC_STORY = {
     "title": "FTC opens investigation into OpenAI and Anthropic over consumer AI risks",
     "event": "The FTC opened an investigation into OpenAI and Anthropic over consumer AI risks.",
@@ -2731,27 +2974,127 @@ def test_editorial_drops_stale_fresh_selection() -> None:
 
 
 def test_freshness_gate_rejects_future_dates() -> None:
-    """The last-24h freshness window has an upper bound: a future-dated
+    """The freshness window has an upper bound: a future-dated
     candidate must never pass _is_fresh_eligible (digest-quality audit
     2026-08-14: a 2026-10-15-dated story rendered under "Fresh — Last 24 Hours"
     in the 2026-08-12 ai-tech digest)."""
-    yesterday = datetime(2026, 8, 13, tzinfo=timezone.utc).date()
     today = datetime(2026, 8, 14, tzinfo=timezone.utc).date()
     future = {"date_confirmed": "2026-10-15", "date_published": "2026-08-12"}
-    check(not contracts.is_fresh_eligible(future, yesterday, today),
+    check(not contracts.is_fresh_eligible(future, today),
           "future-dated candidate passed the freshness gate")
     fresh = {"date_confirmed": "2026-08-13"}
-    check(contracts.is_fresh_eligible(fresh, yesterday, today),
+    check(contracts.is_fresh_eligible(fresh, today),
           "yesterday-dated candidate must stay fresh-eligible")
     same_day = {"date_confirmed": "2026-08-14"}
-    check(contracts.is_fresh_eligible(same_day, yesterday, today),
+    check(contracts.is_fresh_eligible(same_day, today),
           "today-dated candidate must stay fresh-eligible")
     stale = {"date_confirmed": "2026-08-10"}
-    check(not contracts.is_fresh_eligible(stale, yesterday, today),
+    check(not contracts.is_fresh_eligible(stale, today),
           "stale candidate passed the freshness gate")
     undated = {"date_confirmed": "", "date_published": ""}
-    check(contracts.is_fresh_eligible(undated, yesterday, today),
+    check(contracts.is_fresh_eligible(undated, today),
           "undated candidate must pass through")
+
+
+def test_fresh_window_reaches_36_hours_back_only_on_a_publication_time() -> None:
+    """A never-covered story stays eligible for 36 hours before press time
+    (02:00 America/New_York). A date alone proves that only for the issue date
+    and the day before; the day before that needs the article's own timestamp
+    (Carter, 2026-11-13: a story published on a US afternoon had one run to be
+    found in, and Agents averaged 2.6 stories a day)."""
+    issue = date(2026, 11, 13)  # press 07:00 UTC, cutoff 2026-11-11 19:00 UTC
+    check(contracts.fresh_cutoff(issue) == datetime(2026, 11, 11, 19, tzinfo=timezone.utc),
+          contracts.fresh_cutoff(issue))
+    # Daylight time moves press time, and the cutoff with it, an hour earlier in UTC.
+    check(contracts.fresh_cutoff(date(2026, 7, 13)) == datetime(2026, 7, 11, 18, tzinfo=timezone.utc),
+          contracts.fresh_cutoff(date(2026, 7, 13)))
+
+    def story(published_at: str = "") -> dict:
+        return {"date_published": "2026-11-11", "date_confirmed": "2026-11-11",
+                **({"published_at": published_at} if published_at else {})}
+
+    check(not contracts.is_fresh_eligible(story(), issue), "a bare date two days back is not fresh")
+    check(contracts.is_fresh_eligible(story("2026-11-11T16:30:00-05:00"), issue), "33.5 hours before press")
+    check(not contracts.is_fresh_eligible(story("2026-11-11T09:00:00-05:00"), issue), "41 hours before press")
+    check(not contracts.is_fresh_eligible(story("2026-11-11T21:30:00"), issue),
+          "a time without a UTC offset cannot be placed")
+    check(not contracts.is_fresh_eligible({"published_at": "2026-11-20T09:00:00+00:00"}, issue),
+          "a future instant is not fresh")
+    check([contracts.date_freshness(date(2026, 11, day), issue) for day in (14, 13, 12, 11, 10)]
+          == ["future", "fresh", "fresh", "late", "stale"], "date placement")
+
+    page = (
+        '<meta property="article:published_time" content="2026-11-11T16:30:00-05:00">'
+        '<meta name="date" content="2026-11-13">'
+        '<script type="application/ld+json">{"datePublished": "2026-11-11T22:00:00Z",'
+        ' "dateModified": "2026-11-12T10:00:00Z"}</script>'
+    )
+    check(contracts.extract_published_time(page) == datetime(2026, 11, 11, 21, 30, tzinfo=timezone.utc),
+          contracts.extract_published_time(page))
+    check(contracts.extract_published_time('<meta name="citation_date" content="2026/11/11">') is None,
+          "a date-only stamp gives no time")
+
+
+def test_late_window_story_needs_its_page_timestamp_in_phases_two_and_five() -> None:
+    """Phase 2 forwards, and Phase 5 keeps, a story dated the day before
+    yesterday only when its page metadata times it inside the 36-hour window."""
+    times = {
+        "https://example.com/late-inside": datetime(2026, 11, 11, 21, 30, tzinfo=timezone.utc),
+        "https://example.com/late-outside": datetime(2026, 11, 11, 14, 0, tzinfo=timezone.utc),
+    }
+    looked_up: list[str] = []
+
+    def published_time(url: str):
+        looked_up.append(url)
+        return times.get(url)
+
+    def finding(slug: str, day: str) -> dict:
+        return {"title": f"{slug} story", "url": f"https://example.com/{slug}",
+                "source_domain": "example.com", "date_published": day,
+                "summary": "A source-grounded event.", "category": "Research",
+                "editorial_significance": "medium", "event": f"{slug} event"}
+
+    def approve_all(system: str, user: str, model: str | None = None) -> str:
+        start = user.index("## Findings to evaluate")
+        items = json.loads(user[user.index("[", start):user.index("\n\nEvaluate each finding")])
+        return json.dumps({"approved": items, "rejected": []})
+
+    with tempfile.TemporaryDirectory() as temporary:
+        run_dir = Path(temporary) / "agentic-platform" / "2026-11-13"
+        run_dir.mkdir(parents=True)
+        findings = [finding("late-inside", "2026-11-11"), finding("late-outside", "2026-11-11"),
+                    finding("late-untimed", "2026-11-11"), finding("older", "2026-11-10")]
+        with patch("daily_news.research.published_time", side_effect=published_time), \
+             patch("daily_news.runtime._call_llm_proxy", side_effect=approve_all):
+            fresh = research.phase_2_judge_research(
+                catalog.TOPICS["agentic-platform"], copy.deepcopy(findings), run_dir)
+        check([item["url"] for item in fresh] == ["https://example.com/late-inside"], fresh)
+        check(fresh[0]["published_at"] == "2026-11-11T21:30:00+00:00" and fresh[0]["date_tag"] == "fresh",
+              fresh[0])
+        check("https://example.com/older" not in looked_up, "a stale date needs no lookup")
+        artifact = json.loads((run_dir / "02-research-judged.json").read_text())
+        check(artifact["pre_filter"]["late_window_forwarded"] == 1
+              and artifact["pre_filter"]["too_old"] == 3, artifact["pre_filter"])
+
+        def summary(slug: str) -> dict:
+            return {**finding(slug, "2026-11-12"), "date_confirmed": "2026-11-11",
+                    "source_verdict": "fresh", "fetch_success": True}
+
+        summaries = [summary("late-inside"), summary("late-outside")]
+        judgments = json.dumps([
+            {"url": item["url"], "verdict": "keep", "issues": [], "fixed_summary": ""}
+            for item in summaries
+        ])
+        with patch("daily_news.research.published_time", side_effect=published_time), \
+             patch("daily_news.runtime._call_llm_proxy", return_value=judgments):
+            judged = research.phase_5_judge_summaries(
+                catalog.TOPICS["agentic-platform"], summaries, run_dir)
+        by_slug = {item["url"].rsplit("/", 1)[1]: item for item in judged}
+        check(by_slug["late-inside"]["judge_verdict"] == "keep"
+              and by_slug["late-inside"]["published_at"] == "2026-11-11T21:30:00+00:00", by_slug["late-inside"])
+        check(contracts.is_fresh_eligible(by_slug["late-inside"], date(2026, 11, 13)), by_slug["late-inside"])
+        check(by_slug["late-outside"]["judge_verdict"] == "drop"
+              and by_slug["late-outside"]["judge_issues"][0].startswith("date_mismatch:"), by_slug["late-outside"])
 
 
 def test_freshness_gate_ignores_future_event_date_confirmed() -> None:
@@ -2761,14 +3104,13 @@ def test_freshness_gate_ignores_future_event_date_confirmed() -> None:
     the previous preference logic treated as the best date and dropped as
     future-dated even though it was published within the 24h window
     (digest-quality audit 2026-08-17: ai-hardware shipped zero fresh stories)."""
-    yesterday = datetime(2026, 8, 16, tzinfo=timezone.utc).date()
     today = datetime(2026, 8, 17, tzinfo=timezone.utc).date()
     fresh_event = {"date_published": "2026-08-17", "date_confirmed": "2026-08-24"}
-    check(contracts.is_fresh_eligible(fresh_event, yesterday, today),
+    check(contracts.is_fresh_eligible(fresh_event, today),
           "future event date_confirmed dropped a fresh-eligible candidate")
     # Regression guard: keep the genuine future-dated (publication) rejection.
     genuine_future = {"date_published": "2026-10-15", "date_confirmed": ""}
-    check(not contracts.is_fresh_eligible(genuine_future, yesterday, today),
+    check(not contracts.is_fresh_eligible(genuine_future, today),
           "genuine future-dated publication must still be rejected")
 
 
@@ -3852,6 +4194,9 @@ def main() -> None:
         test_hard_paywall_story_never_reaches_fetch,
         test_hard_paywall_story_uses_alternate_source,
         test_hard_paywall_story_uses_same_event_attention_url,
+        test_third_party_report_gives_way_to_an_established_outlet,
+        test_attention_leads_add_relevant_stories_research_missed,
+        test_judge_completes_a_lead_and_its_high_label_keeps_its_evidence,
         test_phase_four_concurrency_and_shared_cache,
         test_failed_fetch_uses_alternate_source,
         test_failed_fetch_alternates_exhausted,
@@ -3864,6 +4209,8 @@ def main() -> None:
         test_editorial_critic_patch_contract,
         test_editorial_drops_stale_fresh_selection,
         test_freshness_gate_rejects_future_dates,
+        test_fresh_window_reaches_36_hours_back_only_on_a_publication_time,
+        test_late_window_story_needs_its_page_timestamp_in_phases_two_and_five,
         test_freshness_gate_ignores_future_event_date_confirmed,
         test_editorial_caps_source_concentration,
         test_editorial_proposal_retries_with_freshness_hint,

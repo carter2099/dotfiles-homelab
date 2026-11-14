@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
+from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit
+from zoneinfo import ZoneInfo
 
 import requests
 from workflow_state import atomic_write_json
@@ -17,7 +20,10 @@ from workflow_state import atomic_write_json
 from .attention import canonicalize_publisher_url, normalize_editorial_significance
 from .catalog import (
     CROSS_DAY_DEDUP_DAYS,
+    FRESH_WINDOW_HOURS,
     HTML_FETCH_HEADERS,
+    PRESS_HOUR,
+    PRESS_TIMEZONE,
     REFERENCED_URLS_SCHEMA_VERSION,
     REFERENCED_URL_SKIP_HOSTS,
     REFERENCED_URL_SKIP_SEGMENTS,
@@ -238,10 +244,20 @@ def is_event_url(url: str) -> bool:
 # apnews.com 13/4 (10-18..10-20 world, 10-20 agentic; 9/67 failed in September),
 # axios.com 7/5 (HTTP 403), gamespot.com 3/2 (HTTP 403), usnews.com 2/2.
 # science.org (2 failures, 1 run), reuters.com and ft.com (1 each) fall short.
+# 2026-11-13, every 04 run dir 10-31..11-13 (70 runs, same counting), 0 successes:
+# reuters.com 7/2 (HTTP 401 DataDome), bloomberg.com 5/4 (HTTP 403 PerimeterX),
+# science.org 3/2, neowin.net 3/3, gamedaily.com 3/3 (all HTTP 403),
+# globenewswire.com 2/2. investing.com (4 failures, 1 success) and ft.com (1) fall short.
 HARD_PAYWALL_DOMAINS = frozenset({
     "apnews.com",
     "axios.com",
+    "bloomberg.com",
+    "gamedaily.com",
     "gamespot.com",
+    "globenewswire.com",
+    "neowin.net",
+    "reuters.com",
+    "science.org",
     "theinformation.com",
     "usnews.com",
     "washingtonpost.com",
@@ -599,22 +615,112 @@ def candidate_fresh_date(candidate: dict, today: date | None = None) -> datetime
         return confirmed
     return parse_date((candidate.get("date_published") or "").strip())
 
-def is_fresh_eligible(candidate: dict, yesterday: date, today: date | None = None) -> bool:
-    """True when a candidate may legitimately appear under "Fresh — Last 24 Hours".
+def fresh_cutoff(issue_date: date) -> datetime:
+    """Earliest publication instant the edition for ``issue_date`` still runs."""
+    press = datetime.combine(issue_date, dtime(PRESS_HOUR), ZoneInfo(PRESS_TIMEZONE))
+    return press.astimezone(timezone.utc) - timedelta(hours=FRESH_WINDOW_HOURS)
 
-    A candidate with a parseable publication date is fresh-eligible only when
-    that date is within the last 24h (>= yesterday) and not in the future
-    (<= today). A candidate with no parseable date is kept, mirroring Phase 5's
-    pass-through for undetermined dates. This deterministic gate is the
-    backstop against the editorial model or critic placing older stories
-    under Fresh (digest-quality audit 2026-08-12) and against
-    future-dated candidates shipping under Fresh (digest-quality audit
-    2026-08-14: a 2026-10-15-dated story rendered under "Fresh — Last 24 Hours"
-    in the 2026-08-12 ai-tech digest).
+def date_freshness(day: date, issue_date: date) -> str:
+    """Place a publication *date* against the edition: fresh, late, stale, or future.
+
+    The issue date and the day before are fresh. An earlier day the fresh
+    window still touches is ``late``: only the article's publication time can
+    put it inside the window.
     """
-    if today is None:
-        today = datetime.now(timezone.utc).date()
-    fresh_date = candidate_fresh_date(candidate, today)
-    if fresh_date is None:
+    if day > issue_date:
+        return "future"
+    if day >= issue_date - timedelta(days=1):
+        return "fresh"
+    return "late" if day >= fresh_cutoff(issue_date).date() else "stale"
+
+def parse_timestamp(value: Any) -> datetime | None:
+    """An ISO 8601 instant with an explicit UTC offset; a zoneless time cannot be placed."""
+    try:
+        parsed = datetime.fromisoformat(str(value or "").strip())
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+
+_PUBLISHED_META_KEYS = frozenset({
+    "article:published_time", "og:article:published_time", "datepublished",
+    "parsely-pub-date", "sailthru.date", "pubdate", "dc.date.issued",
+})
+_JSON_LD_PUBLISHED = re.compile(r'"datePublished"\s*:\s*"([^"]+)"')
+
+class _PublishedTimeCollector(HTMLParser):
+    """Collect machine-readable publication times: meta tags and JSON-LD."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.values: list[str] = []
+        self._json_ld = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        fields = {key.lower(): value or "" for key, value in attrs}
+        if tag == "meta":
+            names = {fields.get(key, "").lower() for key in ("property", "name", "itemprop")}
+            if names & _PUBLISHED_META_KEYS:
+                self.values.append(fields.get("content", ""))
+        elif tag == "time" and fields.get("itemprop", "").lower() == "datepublished":
+            self.values.append(fields.get("datetime", ""))
+        elif tag == "script":
+            self._json_ld = fields.get("type", "").lower() == "application/ld+json"
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script":
+            self._json_ld = False
+
+    def handle_data(self, data: str) -> None:
+        if self._json_ld:
+            self.values.extend(_JSON_LD_PUBLISHED.findall(data))
+
+def extract_published_time(html_text: str) -> datetime | None:
+    """Earliest offset-aware publication time in a page's metadata, else None."""
+    collector = _PublishedTimeCollector()
+    try:
+        collector.feed(html_text)
+    except Exception:
+        return None
+    times = [parsed for parsed in map(parse_timestamp, collector.values) if parsed is not None]
+    return min(times, default=None)
+
+@lru_cache(maxsize=1024)
+def published_time(url: str) -> datetime | None:
+    """Best-effort fetch of an article's own publication time; never raises.
+
+    Memoized per process, so Phase 2 and Phase 5 see one answer for a URL.
+    """
+    if os.environ.get("DAILY_NEWS_OFFLINE") == "1" or not url:
+        return None
+    try:
+        response = requests.get(url, headers=HTML_FETCH_HEADERS, timeout=REFERENCED_URL_TIMEOUT)
+        response.raise_for_status()
+    except requests.RequestException:
+        return None
+    if len(response.content) > 4_000_000:
+        return None
+    return extract_published_time(response.text)
+
+def is_fresh_eligible(candidate: dict, issue_date: date) -> bool:
+    """True when a candidate may run in the edition for ``issue_date``.
+
+    Eligible: a best publication date (``candidate_fresh_date``) of the issue
+    date or the day before, or a ``published_at`` instant inside the
+    FRESH_WINDOW_HOURS before press time. A candidate with neither is kept,
+    mirroring Phase 5's pass-through for undetermined dates. This is the
+    deterministic backstop against the editorial model or critic placing
+    older stories in the section (digest-quality audit 2026-08-12) and against
+    future-dated candidates (digest-quality audit 2026-08-14: a
+    2026-10-15-dated story ran in the 2026-08-12 ai-tech digest).
+    """
+    published_at = parse_timestamp(candidate.get("published_at"))
+    if (
+        published_at is not None
+        and published_at >= fresh_cutoff(issue_date)
+        and published_at.date() <= issue_date
+    ):
         return True
-    return yesterday <= fresh_date.date() <= today
+    fresh_date = candidate_fresh_date(candidate, issue_date)
+    if fresh_date is None:
+        return published_at is None
+    return date_freshness(fresh_date.date(), issue_date) == "fresh"

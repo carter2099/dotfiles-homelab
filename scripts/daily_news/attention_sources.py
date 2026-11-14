@@ -71,10 +71,10 @@ SOURCES = (
 )
 LIVE_ONLY_SOURCES = frozenset({"panel", "techmeme", "mastodon", "bsky_trends"})
 
-# Publisher panel: news sitemaps (48-hour census; discovered through robots.txt
-# unless an explicit URL is known) plus RSS/Atom feeds for publishers without one.
+# Publisher panel: news sitemaps (48-hour census, discovered through robots.txt)
+# plus RSS/Atom feeds for publishers without one. reuters.com left the panel on
+# 2026-11-13: its sitemap has answered HTTP 401 (bot wall) since 2026-10-21.
 PANEL_SITEMAPS: dict[str, str | None] = {
-    "reuters.com": "https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml",
     "bbc.com": None, "theguardian.com": None, "nytimes.com": None, "cnn.com": None,
     "aljazeera.com": None, "france24.com": None, "theverge.com": None, "techcrunch.com": None,
     "wired.com": None, "zdnet.com": None, "businessinsider.com": None, "tomshardware.com": None,
@@ -125,6 +125,11 @@ PANEL_FEEDS: dict[str, str] = {
     "tweaktown.com": "https://www.tweaktown.com/news-feed/",
     "androidauthority.com": "https://www.androidauthority.com/feed/",
 }
+# The panel still counts as fully collected when at most this share of its publishers
+# failed: a story is then undercounted by those few outlets at most, while leaving the
+# panel out removes half the press weight from every story (2026-10-21..11-13: the one
+# blocked reuters.com sitemap voided all 65 publishers in every edition).
+PANEL_MAX_FAILED_SHARE = 0.1
 MASTODON_INSTANCES = (
     "mastodon.social", "mstdn.social", "mas.to", "fosstodon.org", "hachyderm.io",
     "infosec.exchange", "mastodon.world", "techhub.social", "universeodon.com",
@@ -476,7 +481,7 @@ def collect_panel(ctx: _Context) -> tuple[list[Row], dict[str, Any]]:
     if len(failed) == len(jobs):
         raise RuntimeError("every panel publisher failed")
     meta: dict[str, Any] = {"publishers": len(jobs), "failed_publishers": failed}
-    if failed:
+    if len(failed) > PANEL_MAX_FAILED_SHARE * len(jobs):
         meta["incomplete"] = f"{len(failed)} of {len(jobs)} panel publishers failed"
     return rows, meta
 

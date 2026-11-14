@@ -72,7 +72,6 @@ def validate_editorial_proposal(
     blocked = blocked_urls or set()
     warnings: list[str] = []
     today = issue_date or datetime.now(timezone.utc).date()
-    yesterday = today - timedelta(days=1)
     candidate_by_id = {
         candidate["candidate_id"]: candidate
         for candidate in candidates
@@ -121,19 +120,19 @@ def validate_editorial_proposal(
         if candidate_id in selected_ids:
             warnings.append(f"ignored duplicate fresh selection {candidate_id}")
             continue
-        if not is_fresh_eligible(source, yesterday):
-            # Deterministic freshness gate: a candidate older than yesterday
-            # must never ship under "Fresh — Last 24 Hours", even when the
-            # model selected it and the critic missed it (digest-quality audit
-            # 2026-08-12: ai-hardware + agentic-platform shipped stale stories
-            # under Fresh), and a future-dated candidate must not either
-            # (digest-quality audit 2026-08-14: a 2026-10-15-dated story shipped
-            # under Fresh). The candidate is treated as unselected.
-            stale_date = candidate_fresh_date(source)
-            kind = "future-dated" if stale_date.date() > yesterday else "stale"
+        if not is_fresh_eligible(source, today):
+            # Deterministic freshness gate: a candidate outside the fresh
+            # window must never ship, even when the model selected it and the
+            # critic missed it (digest-quality audit 2026-08-12: ai-hardware +
+            # agentic-platform shipped stale stories), and a future-dated
+            # candidate must not either (digest-quality audit 2026-08-14: a
+            # 2026-10-15-dated story shipped). The candidate is treated as
+            # unselected.
+            best = candidate_fresh_date(source, today) or parse_timestamp(source.get("published_at"))
+            kind = "future-dated" if best.date() > today else "stale"
             warnings.append(
                 f"dropped {kind} fresh selection {candidate_id} "
-                f"(best date {stale_date.date().isoformat()} is outside the 24h window)"
+                f"(best date {best.date().isoformat()} is outside the fresh window)"
             )
             continue
         duplicate_of = next(
@@ -173,9 +172,11 @@ def validate_editorial_proposal(
         source = candidate_by_id[item["candidate_id"]]
         domain = source.get("source_domain") or urlsplit(source.get("url", "")).hostname or ""
         domains[domain] = domains.get(domain, 0) + 1
-    concentrated = sorted(domain for domain, count in domains.items() if domain and count > 2)
+    concentrated = sorted(
+        domain for domain, count in domains.items() if domain and count > SOURCE_DOMAIN_CAP
+    )
     if concentrated:
-        warnings.append(f"source concentration above 2: {', '.join(concentrated)}")
+        warnings.append(f"source concentration above {SOURCE_DOMAIN_CAP}: {', '.join(concentrated)}")
         # Enforce the cap: keep the two highest-ranked candidates per over-limit
         # domain and drop the lower-ranked same-source selections, so a
         # single-source Fresh section can no longer ship (digest-quality audit
@@ -187,17 +188,17 @@ def validate_editorial_proposal(
             source = candidate_by_id[item["candidate_id"]]
             domain = source.get("source_domain") or urlsplit(source.get("url", "")).hostname or ""
             if domain in concentrated:
-                if per_domain.get(domain, 0) >= 2:
+                if per_domain.get(domain, 0) >= SOURCE_DOMAIN_CAP:
                     warnings.append(
                         f"dropped fresh selection {item['candidate_id']} "
-                        f"(source concentration cap: max 2 per domain)"
+                        f"(source concentration cap: max {SOURCE_DOMAIN_CAP} per domain)"
                     )
                     continue
                 per_domain[domain] = per_domain.get(domain, 0) + 1
             capped.append(item)
         fresh = capped
     if (
-        any(is_fresh_eligible(candidate, yesterday) for candidate in candidates)
+        any(is_fresh_eligible(candidate, today) for candidate in candidates)
         and not fresh
     ):
         warnings.append("proposal selected no valid fresh stories")
@@ -386,14 +387,13 @@ def phase_6_curate(
     started = time.time()
     today_str = issue_date.isoformat()
     candidates, dropped = prepare_editorial_candidates(summaries, blocked_urls)
-    # Deterministic freshness gate: only candidates within the last 24h (or
-    # with undetermined dates) may populate the Fresh section. When none are
-    # eligible, an empty Fresh section is the honest outcome and must not be
+    # Deterministic freshness gate: only candidates inside the fresh window
+    # (or with undetermined dates) may populate the section. When none are
+    # eligible, an empty section is the honest outcome and must not be
     # treated as a model/critic failure (digest-quality audit 2026-08-12).
-    yesterday = issue_date - timedelta(days=1)
     fresh_eligible = [
         candidate for candidate in candidates
-        if is_fresh_eligible(candidate, yesterday)
+        if is_fresh_eligible(candidate, issue_date)
     ]
     print(f"  [6a prep] {len(candidates)} candidates, "
           f"{len(blocked_urls)} cross-topic URL(s) blocked")
@@ -518,11 +518,11 @@ def phase_6_curate(
                         freshness_hint = (
                             "\n\n## Freshness window reminder\n"
                             "Your previous proposal was rejected because it "
-                            "selected no valid fresh stories. \"Fresh — Last 24 "
-                            "Hours\" may only contain stories whose best "
-                            "publication date (date_confirmed, else "
-                            "date_published) is yesterday or today (UTC) — "
-                            "never older or future-dated. Fresh-eligible "
+                            "selected no valid fresh stories. A story is fresh "
+                            "when its best publication date (date_confirmed, "
+                            "else date_published) is yesterday or today (UTC), "
+                            "or when it carries a `published_at` time; never "
+                            "older or future-dated. Fresh-eligible "
                             "candidates exist in the supplied list; re-select "
                             "5-7 fresh stories from them."
                         )

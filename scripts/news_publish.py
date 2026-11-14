@@ -171,8 +171,8 @@ def _public_story(story: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_editorial_significance(dict(story))
     result: dict[str, Any] = {}
     for key in (
-        "title", "source_domain", "date_published", "date_confirmed", "summary",
-        "category", "editorial_significance", "author", "event",
+        "title", "source_domain", "date_published", "date_confirmed", "published_at",
+        "summary", "category", "editorial_significance", "author", "event",
         "priority_explanation",
     ):
         value = _clean_text(normalized.get(key))
@@ -280,7 +280,7 @@ def _is_current_publication(
 def _within_edition_window(
     raw: dict[str, Any], topic: dict[str, Any], issue_date: str,
 ) -> dict[str, Any]:
-    """Drop Fresh stories whose best date is outside the edition's 24h window.
+    """Drop Fresh stories outside the edition's fresh window.
 
     Curation enforces the same gate; publishing rechecks it against the
     edition date so a stale or future-dated story can never ship as Fresh.
@@ -289,10 +289,9 @@ def _within_edition_window(
     if not isinstance(fresh, list):
         return raw
     edition = date.fromisoformat(issue_date)
-    yesterday = edition - timedelta(days=1)
     kept: list[Any] = []
     for story in fresh:
-        if isinstance(story, dict) and not is_fresh_eligible(story, yesterday, edition):
+        if isinstance(story, dict) and not is_fresh_eligible(story, edition):
             print(
                 f"[publish] {topic['web_slug']} {issue_date}: dropped Fresh story outside "
                 f"the edition window: {_clean_text(story.get('title'))[:120]}"

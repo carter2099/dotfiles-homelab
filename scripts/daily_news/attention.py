@@ -144,6 +144,20 @@ IMPORTANCE_QUESTIONS: dict[str, dict[str, Any]] = {
         "type": "noul",
         "instructions": "Is `story` opinion, commentary, or analysis rather than a report of a new development?",
     },
+    # Not part of the importance score: Phase 3 reads it to decide whether another
+    # outlet's article may replace this one (research.prefer_established_outlets).
+    "original_source": {
+        "type": "noul",
+        "instructions": "Is `story.source` the original source of the news in `story`: the organization or "
+                        "person that made the announcement, released the product, or produced the research "
+                        "or data, publishing it themselves (official blog, newsroom, press release, "
+                        "repository, filing, or paper)?",
+        "criteria": {
+            "true": "The publisher is itself the announcer, maker, or author of what the story reports.",
+            "false": "A news outlet, trade publication, newsletter, aggregator, or forum post reporting or "
+                     "summarizing what someone else announced, released, or found.",
+        },
+    },
 }
 IMPORTANCE_WORKERS = 6
 IMPORTANCE_EDITORIAL_WEIGHT = 0.65
@@ -195,13 +209,12 @@ def normalize_editorial_significance(item: dict[str, Any]) -> dict[str, Any]:
     item["editorial_significance"] = value if value in EDITORIAL_POINTS else "medium"
     return item
 
-def _significance_tokens(value: Any) -> set[str]:
-    return {
-        token.casefold()
-        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]*", _clean_text(value))
-        if len(token) >= 3 and token.casefold() not in _STOPWORDS
-    }
-
+# Jev's probability that a story is routine maintenance news; at or above it a `high`
+# label is vetoed. In the 2026-10-31..11-13 runs every candidate at 0.9 or more was a
+# changelog, patch notes, or a catalog update, and no judge-rated high exceeded 0.60.
+ROUTINE_VETO_PROBABILITY = 0.9
+# Consequence bases that stay high even when the news arrives as a patch or a notice.
+_ROUTINE_VETO_EXEMPT_BASES = frozenset({"binding_policy_or_law", "security_or_safety_incident"})
 
 def _downgrade_high(item: dict[str, Any], reason: str) -> dict[str, Any]:
     item["editorial_significance"] = "medium"
@@ -214,8 +227,19 @@ def _downgrade_high(item: dict[str, Any], reason: str) -> dict[str, Any]:
     return item
 
 
-def enforce_editorial_significance(item: dict[str, Any]) -> dict[str, Any]:
-    """Require source-grounded impact evidence before accepting `high`."""
+def enforce_editorial_significance(
+    item: dict[str, Any], importance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Accept `high` only with structured evidence, and never for routine maintenance news.
+
+    The evidence must name an allowed consequence basis, a broad or sector scope, and an
+    impact sentence. The sentence's wording is not compared with the story text: that test
+    ran against the one-sentence search snippet and demoted 37 of 101 judge-rated highs in
+    two weeks (2026-11-13: Jensen Huang's resignation, whose impact sentence said "33-year"
+    and "8-K"). Routine maintenance is Jev's judgment (``importance["answers"]["routine"]``),
+    not a word list ("remove", "patch" matched a board removing a CEO); without a Jev
+    answer the label stands.
+    """
     normalize_editorial_significance(item)
     if item["editorial_significance"] != "high":
         item.setdefault("significance_validation", {
@@ -237,47 +261,13 @@ def enforce_editorial_significance(item: dict[str, Any]) -> dict[str, Any]:
     if len(impact) < 30:
         return _downgrade_high(item, "impact evidence is missing or too vague")
 
-    source_text = " ".join([
-        _clean_text(item.get("title")),
-        _clean_text(item.get("summary")),
-        " ".join(
-            _clean_text(detail)
-            for detail in item.get("key_details", [])
-            if isinstance(detail, str)
-        ),
-    ])
-    impact_tokens = _significance_tokens(impact)
-    source_tokens = _significance_tokens(source_text)
-    required_overlap = min(3, len(impact_tokens))
-    if required_overlap == 0 or len(impact_tokens & source_tokens) < required_overlap:
-        return _downgrade_high(item, "impact evidence is not grounded in source facts")
-    source_numbers = set(re.findall(r"\b\d[\d,.]*%?\b", source_text))
-    impact_numbers = set(re.findall(r"\b\d[\d,.]*%?\b", impact))
-    if not impact_numbers.issubset(source_numbers):
-        return _downgrade_high(item, "impact evidence introduced unsupported numbers")
-
-    maintenance_change = bool(re.search(
-        r"\b(deprecat\w*|renam\w*|remov(?:e|ed|al)|patch(?:es)?|"
-        r"release notes?|minor update|version bump)\b",
-        source_text,
-        re.IGNORECASE,
-    ))
-    high_impact_exception = basis in {
-        "binding_policy_or_law",
-        "security_or_safety_incident",
-    }
-    demonstrated_scale = bool(re.search(
-        r"\b(all|every|millions?|thousands?|widely used|critical|outage|"
-        r"data loss|no replacement|breaking existing|mandatory|deadline)\b|"
-        r"\b\d[\d,.]*\s*(users?|customers?|organizations?|systems?)\b",
-        source_text,
-        re.IGNORECASE,
-    ))
-    if maintenance_change and not high_impact_exception and not demonstrated_scale:
-        return _downgrade_high(
-            item,
-            "routine maintenance or deprecation lacks demonstrated broad impact",
-        )
+    routine = ((importance or {}).get("answers") or {}).get("routine")
+    if (
+        isinstance(routine, (int, float))
+        and routine >= ROUTINE_VETO_PROBABILITY
+        and basis not in _ROUTINE_VETO_EXEMPT_BASES
+    ):
+        return _downgrade_high(item, "Jev judged the story routine maintenance news")
 
     item["significance_validation"] = {
         "status": "accepted",
@@ -570,6 +560,8 @@ def importance_from_answers(answers: dict[str, dict[str, Any]]) -> dict[str, Any
             "consequence": round(float(answers["consequence"]["score"]), 2),
             "scope": round(float(answers["scope"]["score"]), 2),
             **{key: round(value, 2) for key, value in nouls.items()},
+            **({"original_source": round(float(answers["original_source"]["noul"]), 2)}
+               if "original_source" in answers else {}),
         },
     }
 
@@ -686,7 +678,10 @@ def score_attention(
     on importance alone, neither boosted nor penalized by attention.
     """
     observed = observed_at or datetime.now(timezone.utc)
-    scored = [enforce_editorial_significance(copy.deepcopy(item)) for item in candidates]
+    scored = [
+        enforce_editorial_significance(copy.deepcopy(item), judged)
+        for item, judged in zip(candidates, importance)
+    ]
     observations: list[dict[str, Any]] = []
     for item, found, judged in zip(scored, evidence, importance):
         if found.get("unavailable_reason"):

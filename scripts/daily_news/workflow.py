@@ -78,7 +78,9 @@ def validate_runtime_contract() -> None:
         errors.append(f"TOPICS must contain five sections (got {len(TOPICS)})")
     for key, config in TOPICS.items():
         missing = {
-            field for field in ("category", "web_slug", "web_title", "research_angles")
+            field for field in (
+                "category", "web_slug", "web_title", "research_angles", "beat", "lead_inventories",
+            )
             if field not in config
         }
         if missing:
@@ -86,6 +88,7 @@ def validate_runtime_contract() -> None:
     for name, owner in (
         ("load_recent_coverage_ledger", contracts),
         ("load_cross_topic_urls", contracts),
+        ("phase_1b_leads", research),
         ("phase_2_judge_research", research),
         ("phase_2b_attention", research),
     ):
@@ -351,8 +354,13 @@ def run_digest(category: str, dry_run: bool = False) -> None:
                 else:
                     runtime.check_search_health("post-fallback-retry")
             phase_done("Phase 1: Research", started)
+
+            started = phase_start("Phase 1b: Attention Leads")
+            findings = findings + research.phase_1b_leads(topic, findings, run_dir)
+            phase_done("Phase 1b: Attention Leads", started)
             # Phase 2 edits findings in place; Phase 3 draws paywall alternates
-            # from the research output as persisted in 01-research-raw.json.
+            # from the research output and the leads as persisted in
+            # 01-research-raw.json and 01b-leads.json.
             research_findings = deepcopy(findings)
 
             started = phase_start("Phase 2: Judge Research")
