@@ -15,7 +15,33 @@ from urllib.parse import urlsplit
 from . import runtime
 from .catalog import *
 from .contracts import *
+from .contracts import _same_event_evidence_keys
 from .attention import normalize_editorial_significance, priority_sort_key
+
+# The editor and critic used to apply a 24-hour rule of their own on top of the code's
+# window: in the first two editions of the 36-hour window (2026-11-14/15) they rejected
+# all seven stories it had admitted, and the critic tried to remove a section's only
+# story. Dates are decided in code, before either model sees a candidate.
+DATES_ARE_SETTLED = (
+    "Publication dates are settled before you: code checked every candidate against "
+    f"this edition's window, which reaches {FRESH_DAYS_BACK} days back, and removed the "
+    "ones outside it. Never reject, remove, demote, or flag a candidate because of when "
+    "it was published. "
+)
+
+# Two candidates of one section are one story when an article Jev judged to report one's
+# event is the other's article or among its evidence, and their title/event wording
+# overlaps at least this much. Over the 10-31..11-16 runs that pairs the four real
+# duplicates (Anthropic's Fable/Mythos post and a report of it) and an election
+# takeaways piece with its results page. The earlier headline-word test used the
+# section's own candidates as its rarity corpus, so any shared word counted as rare: it
+# also paired 15 unrelated stories (two Show HN posts, layoffs at two studios).
+SAME_STORY_MIN_TOKEN_OVERLAP = 0.45
+
+def _story_keys(candidate: dict) -> set[str]:
+    """A candidate's own article plus every article Jev judged to report its event."""
+    own = coverage_key(candidate.get("url", ""))
+    return _same_event_evidence_keys(candidate) | ({own} if own else set())
 
 def editorial_candidate_id(candidate: dict) -> str:
     identity = normalize_url(candidate.get("url", "")) or candidate.get("title", "")
@@ -79,12 +105,17 @@ def validate_editorial_proposal(
     }
 
     # Lazy import: news_publish imports this package at module load.
-    from news_publish import _frequency_of, _same_event
+    from news_publish import _story_event_tokens
 
-    # Same-event matching needs token rarity; the section's candidate pool is
-    # the corpus, as the front page uses the day's editions when no history
-    # corpus is supplied.
-    event_frequency = _frequency_of([{"fresh": list(candidate_by_id.values())}])
+    def same_story(first: dict, second: dict) -> bool:
+        """Jev-judged shared coverage plus SAME_STORY_MIN_TOKEN_OVERLAP of wording."""
+        if not _story_keys(first) & _story_keys(second):
+            return False
+        left, right = _story_event_tokens(first), _story_event_tokens(second)
+        if not left or not right:
+            return False
+        return len(left & right) / min(len(left), len(right)) >= SAME_STORY_MIN_TOKEN_OVERLAP
+
     fresh: list[dict] = []
     selected_ids: set[str] = set()
     selected_sources: list[dict] = []
@@ -128,15 +159,15 @@ def validate_editorial_proposal(
             # candidate must not either (digest-quality audit 2026-08-14: a
             # 2026-10-15-dated story shipped). The candidate is treated as
             # unselected.
-            best = candidate_fresh_date(source, today) or parse_timestamp(source.get("published_at"))
-            kind = "future-dated" if best.date() > today else "stale"
+            stale_date = candidate_fresh_date(source, today)
+            kind = "future-dated" if stale_date.date() > today else "stale"
             warnings.append(
                 f"dropped {kind} fresh selection {candidate_id} "
-                f"(best date {best.date().isoformat()} is outside the fresh window)"
+                f"(best date {stale_date.date().isoformat()} is outside the fresh window)"
             )
             continue
         duplicate_of = next(
-            (kept for kept in selected_sources if _same_event(kept, source, event_frequency)),
+            (kept for kept in selected_sources if same_story(kept, source)),
             None,
         )
         if duplicate_of is not None:
@@ -460,8 +491,8 @@ def phase_6_curate(
         "interdependent. "
         "Treat the deterministic `priority_score` as the primary ranking signal; never "
         "alter or invent attention, confidence, or priority values. Do not write a "
-        "section standfirst.\n\n"
-        "Select 5-7 fresh stories when enough good candidates exist. "
+        f"section standfirst. {DATES_ARE_SETTLED}\n\n"
+        "Select 5-7 stories when enough good candidates exist. "
         "Every selection must use an exact candidate_id supplied. Write concise newspaper "
         "copy that leads with facts; never refer to a digest, edition, candidate list, "
         "ranking process, or the reader. Write all prose in English regardless of source "
@@ -516,15 +547,15 @@ def phase_6_curate(
                         # agentic-platform shipped deterministic raw fallback
                         # with no critic review).
                         freshness_hint = (
-                            "\n\n## Freshness window reminder\n"
+                            "\n\n## Fresh window reminder\n"
                             "Your previous proposal was rejected because it "
-                            "selected no valid fresh stories. A story is fresh "
-                            "when its best publication date (date_confirmed, "
-                            "else date_published) is yesterday or today (UTC), "
-                            "or when it carries a `published_at` time; never "
-                            "older or future-dated. Fresh-eligible "
-                            "candidates exist in the supplied list; re-select "
-                            "5-7 fresh stories from them."
+                            "selected no valid stories. Every candidate whose "
+                            "best publication date (date_confirmed, else "
+                            "date_published) falls from "
+                            f"{(issue_date - timedelta(days=FRESH_DAYS_BACK)).isoformat()} "
+                            f"to {today_str} is eligible, and such candidates "
+                            "exist in the supplied list; re-select 5-7 stories "
+                            "from them."
                         )
                         attempt -= 1
                         raise ValueError(
@@ -580,14 +611,20 @@ def phase_6_curate(
             "The deterministic `priority_score` owns ranking: move a story only to correct "
             "a clear ordering violation and never estimate or alter attention. "
             "Check for a missed higher-priority candidate, source concentration, and "
-            "stale material. "
+            f"pages that only recap older events. {DATES_ARE_SETTLED}"
             "Write all notes and reasoning in English.\n\n"
-            "Allowed operations: remove_fresh, add_fresh, replace_fresh, move_fresh. "
-            "add/replace operations put the proposed object in item. "
-            "remove/replace/move identify candidate_id. move_fresh also supplies "
-            "a one-based position. Output JSON: "
-            '{"verdict":"approve|approve_with_changes|reject","changes":[],'
-            '"notes":"..."}'
+            # The change schema is spelled out: when it was not, the critic wrote the
+            # operation under "op" and all 17 changes it proposed in the 10-31..11-16
+            # runs (6 of them adding a missed candidate) were ignored as invalid.
+            "Each change is an object with these keys: `operation` (remove_fresh, "
+            "add_fresh, replace_fresh, or move_fresh); `candidate_id` (the selection a "
+            "remove, replace, or move acts on); `position` (one-based, move_fresh only); "
+            "`item` (add_fresh and replace_fresh only: "
+            '{"candidate_id":"...","editorial_summary":"2-3 factual sentences",'
+            '"selection_reason":"..."}). Leave `changes` empty when none is needed. '
+            "Output JSON: "
+            '{"verdict":"approve|approve_with_changes|reject","changes":'
+            '[{"operation":"...","candidate_id":"..."}],"notes":"..."}'
         )
         critic_user = (
             f"## Candidates\n{json.dumps(candidates, indent=2)}\n\n"

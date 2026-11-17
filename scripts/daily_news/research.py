@@ -100,25 +100,6 @@ def refetch_article_date(url: str, title: str) -> str | None:
     except Exception:
         return None
 
-def _confirm_late_window(item: dict, issue_date: date) -> bool:
-    """True when the article's own metadata times it inside the fresh window.
-
-    Records that instant as ``published_at``: the one field that keeps a story
-    dated before yesterday eligible in every later phase.
-    """
-    published = published_time(item.get("url", ""))
-    if published is None or published < fresh_cutoff(issue_date) or published.date() > issue_date:
-        item.pop("published_at", None)
-        return False
-    item["published_at"] = published.isoformat()
-    return True
-
-def _warm_published_times(urls: list[str]) -> None:
-    """Look up several articles' publication times at once (``published_time`` memoizes)."""
-    if urls:
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            list(pool.map(published_time, urls))
-
 def batch(items: list[Any], size: int = BATCH_SIZE) -> list[list[Any]]:
     """Split items into batches of at most `size`."""
     return [items[i:i + size] for i in range(0, len(items), size)]
@@ -543,10 +524,9 @@ def phase_1b_leads(topic: dict, findings: list[dict], run_dir: Path) -> list[dic
 def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> list[dict]:
     """Phase 2: Python date pre-tagging + batched LLM judge.
 
-    1. Python parses date_published; findings published before yesterday are
-       dropped as stale without touching the LLM, except one dated the day
-       before whose page metadata times it inside the FRESH_WINDOW_HOURS
-       before press time (``published_at``). Findings without a full
+    1. Python parses date_published; findings published before the fresh
+       window (FRESH_DAYS_BACK days before the issue date) are dropped as
+       stale without touching the LLM. Findings without a full
        date (empty, month-only "2026-10", unparseable) go on to the judge
        marked ``date_unverified``; Phase 5 keeps them only when the fetched
        page confirms a publication date in the freshness window. The artifact's
@@ -580,7 +560,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         },
         policy={
             "issue_date": today.isoformat(),
-            "fresh_window_hours": FRESH_WINDOW_HOURS,
+            "fresh_days_back": FRESH_DAYS_BACK,
             "judgment_rules": topic.get("judgment_rules", ""),
             "model": runtime._effective_model(runtime.MODEL),
         },
@@ -596,12 +576,6 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
     t0 = time.time()
 
     # ── Step 1: Python date pre-tagging ──
-    def research_day(finding: dict) -> date | None:
-        published = str(finding.get("date_published") or "").strip()
-        # A month-only date names no day, so it never proves staleness either.
-        parsed = None if _MONTH_ONLY_DATE.match(published) else parse_date(published)
-        return parsed.date() if parsed else None
-
     for finding in findings:
         normalize_editorial_significance(finding)
         if finding.get("url"):
@@ -612,29 +586,20 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         "too_old": 0,
         "undated_forwarded": 0,
         "partial_date_forwarded": 0,
-        "late_window_forwarded": 0,
         "already_covered_previous_day": 0,
     }
     pre_filter_dropped: list[dict] = []
     ledger_rejected: list[dict] = []
 
-    uncovered = [
-        f for f in findings
-        if not recent_coverage_match(f.get("url", ""), recent_coverage, recent_dateless)
-    ]
-    _warm_published_times([
-        f.get("url", "") for f in uncovered
-        if research_day(f) and date_freshness(research_day(f), today) == "late"
-    ])
     for f in findings:
         if recent_coverage_match(f.get("url", ""), recent_coverage, recent_dateless):
             ledger_rejected.append({"finding": f, "reason": "already_covered_previous_day"})
             pre_filter["already_covered_previous_day"] += 1
             continue
         published = str(f.get("date_published") or "").strip()
-        pub_day = research_day(f)
-        placement = date_freshness(pub_day, today) if pub_day else ""
-        if pub_day is None:
+        # A month-only date names no day, so it never proves staleness either.
+        pub_date = None if _MONTH_ONLY_DATE.match(published) else parse_date(published)
+        if pub_date is None:
             # 10-18 gaming: 11 of 18 raw findings (VALORANT Champions final,
             # the official Steam Next Fest page) carried empty or month-only
             # dates and were silently dropped, leaving the section empty.
@@ -642,14 +607,8 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
             f["date_unverified"] = True
             pre_filter["partial_date_forwarded" if published else "undated_forwarded"] += 1
             pre_tagged.append(f)
-        elif placement in ("fresh", "future"):
+        elif date_freshness(pub_date.date(), today) != "stale":
             f["date_tag"] = "fresh"
-            pre_tagged.append(f)
-        elif placement == "late" and _confirm_late_window(f, today):
-            # Dated the day before yesterday, but the page's own timestamp is
-            # inside the FRESH_WINDOW_HOURS before press time.
-            f["date_tag"] = "fresh"
-            pre_filter["late_window_forwarded"] += 1
             pre_tagged.append(f)
         else:
             pre_filter["too_old"] += 1
@@ -659,9 +618,7 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
             })
 
     unverified = pre_filter["undated_forwarded"] + pre_filter["partial_date_forwarded"]
-    print(f"  Date pre-tag: {len(pre_tagged) - unverified} fresh "
-          f"({pre_filter['late_window_forwarded']} by a publication time inside the "
-          f"{FRESH_WINDOW_HOURS}h window), {unverified} date-unverified "
+    print(f"  Date pre-tag: {len(pre_tagged) - unverified} fresh, {unverified} date-unverified "
           f"(forwarded for fetch confirmation), {pre_filter['too_old']} too_old, "
           f"{len(ledger_rejected)} covered by a section in the previous "
           f"{CROSS_DAY_DEDUP_DAYS} days (dropped)")
@@ -715,7 +672,9 @@ def phase_2_judge_research(topic: dict, findings: list[dict], run_dir: Path) -> 
         "research, and is judged by the same rules. For each lead you approve, set "
         "`category` to one of the section categories, `event` to a concise statement of "
         "what happened, and `event_terms` to 2-4 distinctive names or phrases that "
-        "identify the event.\n\n"
+        "identify the event. A lead's summary may only restate its headline, because "
+        "its article is fetched and checked later: never reject a lead for a thin "
+        "summary.\n\n"
         "Output a JSON object with two arrays wrapped in ```json fences:\n"
         '  {\n'
         '    "approved": [<findings that pass all quality checks>],\n'
@@ -1161,11 +1120,7 @@ def _with_alternate(item: dict, best: dict, marker: str) -> dict:
     if best["origin"] == "research":
         replacement["date_published"] = best.get("date_published") or item.get("date_published", "")
         replacement["summary"] = best.get("summary") or item.get("summary", "")
-    # ``published_at`` timed the replaced URL; Phase 5 re-times the new one.
-    return {
-        **{key: value for key, value in item.items() if key != "published_at"},
-        **replacement, marker: item.get("url", ""),
-    }
+    return {**item, **replacement, marker: item.get("url", "")}
 
 def resolve_hard_paywalls(
     candidates: list[dict],
@@ -1433,8 +1388,8 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     date gap within the caller's dedup window; the token-overlap and figures
     matches also require the two to be dated at most
     CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS apart. An undated
-    candidate counts as published at the start of the freshness window
-    (yesterday); an undated story as published on its edition date.
+    candidate counts as published the day before the issue date; an undated
+    story as published on its edition date.
     When news_publish._same_event fails only on its rare-headline-word gate, a
     candidate whose event terms all appear in the story and name a rare entity
     outside its own headline still counts, within the same date gap.
@@ -1536,6 +1491,7 @@ def phase_3_rank(
             "established_outlets": sorted(ESTABLISHED_OUTLETS),
             "original_source_max_for_swap": ORIGINAL_SOURCE_MAX_FOR_SWAP,
             "source_domain_cap": SOURCE_DOMAIN_CAP,
+            "fresh_days_back": FRESH_DAYS_BACK,
         },
     )
     state, cached = runtime.begin_or_load_phase(
@@ -1546,6 +1502,19 @@ def phase_3_rank(
         return cached.get("phase_4_queue", [])
 
     fresh = [normalize_editorial_significance(item) for item in fresh]
+
+    # An alternate dated outside the fresh window would be dropped at Phase 5 and take
+    # its story with it (2026-11-15 AI & Tech: the outlet swap re-pointed a fresh
+    # ChatGPT Wallet report at CNBC's article from two days earlier, then outside the
+    # window). A finding with a stale date is never an alternate.
+    def _stale_dated(finding: dict) -> bool:
+        parsed = parse_date(str(finding.get("date_published") or "").strip())
+        return parsed is not None and date_freshness(parsed.date(), issue_date) == "stale"
+
+    alternate_findings = [
+        finding for finding in research_findings
+        if isinstance(finding, dict) and not _stale_dated(finding)
+    ]
 
     # Tag each finding with source_verdict for downstream phases
     for f in fresh:
@@ -1660,7 +1629,7 @@ def phase_3_rank(
     # (September 2026: 11 of 12 washingtonpost.com fetches failed).
     eligible_fresh, paywall_substituted, paywall_dropped = resolve_hard_paywalls(
         eligible_fresh,
-        research_findings,
+        alternate_findings,
         other_topic_urls | recent_coverage,
         _alternate_repeat,
     )
@@ -1679,7 +1648,7 @@ def phase_3_rank(
 
     # An unknown site's report of a story gives way to an established outlet's article on it.
     pool_a, outlet_substituted = prefer_established_outlets(
-        pool_a, research_findings, other_topic_urls | recent_coverage, _alternate_repeat,
+        pool_a, alternate_findings, other_topic_urls | recent_coverage, _alternate_repeat,
     )
     if outlet_substituted:
         print(f"  [Phase 3 outlet] {len(outlet_substituted)} story(s) moved to an established outlet")
@@ -1690,7 +1659,7 @@ def phase_3_rank(
     # Phase 4 falls back to these when a primary fetch fails; they clear the
     # same blocked keys as the paywall swap.
     assign_fetch_alternates(
-        phase_4_queue, research_findings, other_topic_urls | recent_coverage, _alternate_repeat,
+        phase_4_queue, alternate_findings, other_topic_urls | recent_coverage, _alternate_repeat,
     )
 
     output = {
@@ -1865,7 +1834,7 @@ def phase_4_fetch(topic: dict, findings: list[dict], run_dir: Path) -> list[dict
         if alternate.get("date_published"):
             replacement["date_published"] = alternate["date_published"]
         return {
-            **{key: value for key, value in finding.items() if key != "published_at"},
+            **finding,
             **replacement,
             **result,
             "url": url,
@@ -1982,11 +1951,8 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
     """Phase 5: Python date validation + batched LLM judge of summary accuracy.
 
     1. Python validates date_confirmed against the edition date (the run directory):
-       - date >= yesterday → ok (fresh, as expected)
-       - the day before yesterday → ok only when the page's own metadata times
-         the article inside the FRESH_WINDOW_HOURS before press time
-         (recorded as ``published_at``)
-       - otherwise 2-5 days old → drop (Phase 1/2 misclassified it as fresh)
+       - inside the fresh window (FRESH_DAYS_BACK days before the issue date) → ok
+       - older, up to 5 days → drop (Phase 1/2 misclassified it as fresh)
        - date >5 days old → auto-drop
        - date missing → targeted re-fetch for date extraction, then re-check
        - a ``date_unverified`` finding (no full research date) passes only
@@ -2005,7 +1971,7 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
             "ranking_schema": RANKING_SCHEMA_VERSION,
             "model": runtime._effective_model(runtime.MODEL),
             "issue_date": today.isoformat(),
-            "fresh_window_hours": FRESH_WINDOW_HOURS,
+            "fresh_days_back": FRESH_DAYS_BACK,
         },
     )
     state, cached = runtime.begin_or_load_phase(
@@ -2038,7 +2004,7 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
     # Uses date_confirmed from Phase 4's actual article fetch — an independent
     # source from Phase 1's date_published. Re-fetches only when
     # date_confirmed is missing.
-    yesterday = today - timedelta(days=1)
+    window_start = today - timedelta(days=FRESH_DAYS_BACK)
     stale_cutoff = today - timedelta(days=5)
 
     validated: list[dict] = []
@@ -2054,13 +2020,11 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
         if d > today and s.get("date_unverified"):
             # A future date is an event date, never the page's publication date.
             return None
-        if d >= yesterday:
-            return ""
-        if date_freshness(d, today) == "late" and _confirm_late_window(s, today):
+        if date_freshness(d, today) != "stale":
             return ""
         age = (today - d).days
         if d >= stale_cutoff:
-            # Phase 1/2 tagged as fresh but Phase 4's fetch shows it's 2-5d old
+            # Phase 1/2 tagged it fresh but Phase 4's fetch shows it is older than the window
             return f"date_mismatch: tagged fresh but confirmed {confirmed} is {age}d old"
         return f"date_stale: confirmed {confirmed} is {age}d old (>5d cutoff)"
 
@@ -2074,17 +2038,12 @@ def phase_5_judge_summaries(topic: dict, summaries: list[dict], run_dir: Path) -
         if s.get("date_unverified"):
             _drop(s, "date_unconfirmed: research had no full publication date "
                      f"({s.get('date_published') or 'empty'}) and the fetched page "
-                     f"confirmed none from {yesterday} to {today}")
+                     f"confirmed none from {window_start} to {today}")
             print(f"  [done] {label} → {outcome}, date-unverified finding dropped")
         else:
             validated.append(s)
             print(f"  [done] {label} → {outcome}, passing to LLM")
 
-    _warm_published_times([
-        s.get("url", "") for s in to_judge
-        if (parsed := parse_date((s.get("date_confirmed") or "").strip())) is not None
-        and date_freshness(parsed.date(), today) == "late"
-    ])
     for s in to_judge:
         issue = _date_check(s, (s.get("date_confirmed") or "").strip())
         if issue is None:

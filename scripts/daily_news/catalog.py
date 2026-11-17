@@ -12,14 +12,16 @@ BATCH_SIZE = 10  # findings/summaries per LLM call in phases 2 and 5
 
 FRESH_CAP = 12       # Pool A: max fresh findings passed to Phase 4
 CROSS_DAY_DEDUP_DAYS = 5
-# Press time of an edition (digests-daily.timer: 02:00 America/New_York) and how long
-# before it a story no section has run may have been published (Carter, 2026-11-13;
-# the calendar rule alone gave a story published on a US afternoon exactly one run).
-PRESS_HOUR = 2
-PRESS_TIMEZONE = "America/New_York"
-FRESH_WINDOW_HOURS = 36
-# Stories one publisher may hold in a section (Phase 6 drops the lower-ranked extras).
-SOURCE_DOMAIN_CAP = 2
+# A story no section has run may be dated up to this many days before the issue date,
+# so a Sunday edition takes Friday's stories (Carter, 2026-11-15). The earlier rules,
+# the day before only and then 36 hours by page timestamp, left weekend editions with
+# one story per section: every candidate was a Friday story the Saturday run had missed.
+FRESH_DAYS_BACK = 2
+# Stories one publisher may hold in a section; Phase 6 drops the lower-ranked extras.
+# Raised from 2 on 2026-11-15: in 16 days the cap of 2 had dropped 8 stories, among them
+# the ChatGPT Wallet launch (a third TechCrunch story) and Israel's president choosing
+# Eisenkot to form a government (a third Al Jazeera story).
+SOURCE_DOMAIN_CAP = 3
 
 REFERENCED_URLS_SCHEMA_VERSION = 1
 
@@ -179,11 +181,12 @@ TOPICS: dict[str, dict[str, Any]] = {
             "1. SOURCE CHECK (HARD RULE): buildfastwithai.com is a low-quality aggregator "
             "that repackages other outlets' reporting without original content. ANY finding "
             "from buildfastwithai.com or similar aggregators MUST be dropped with reason "
-            "'unreliable_source'. This takes precedence over all other rules. Only accept "
-            "stories from known reputable outlets: TechCrunch, The Verge, Ars Technica, "
-            "Wired, ZDNet, VentureBeat, Hacker News, official company blogs, GitHub repos "
-            "with significant activity, academic papers on arxiv. Personal blogs are OK if "
-            "they have substance.\n"
+            "'unreliable_source'. This takes precedence over all other rules. Accept "
+            "established news organizations and trade publications (TechCrunch, The Verge, "
+            "Ars Technica, Wired, ZDNet, VentureBeat, CNBC, Business Insider, Engadget and "
+            "their peers: these are examples, not a closed list), Hacker News, official "
+            "company blogs, GitHub repos with significant activity, and academic papers on "
+            "arxiv. Personal blogs are OK if they have substance.\n"
             "2. RELEVANCE CHECK: Is this about AI, tech, developer tools, or the tech industry? "
             "If it's general business news, politics, or non-tech topics, drop with reason 'not_relevant'.\n"
             "3. DUPLICATE CHECK: Is this the same underlying story as another finding? "

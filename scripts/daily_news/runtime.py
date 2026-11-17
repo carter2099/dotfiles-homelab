@@ -30,6 +30,7 @@ from workflow_state import (
     canonical_fingerprint,
     file_sha256,
 )
+from .catalog import FRESH_DAYS_BACK
 from .contracts import normalize_url as _normalize_url
 
 DIGESTS_DIR = Path.home() / "digests"
@@ -456,8 +457,8 @@ def _date_context() -> str:
         f"({now.strftime('%A')}). "
         f"The current time is {now.strftime('%H:%M')} UTC. "
         f"All date checks should use this as the reference point. "
-        f"'Last 24 hours' means stories published on or after "
-        f"{(now - timedelta(days=1)).strftime('%Y-%m-%d')}."
+        f"This edition takes stories published on or after "
+        f"{(now - timedelta(days=FRESH_DAYS_BACK)).strftime('%Y-%m-%d')}."
     )
 
 PROXY_5XX_RETRIES = 2

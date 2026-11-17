@@ -509,7 +509,7 @@ def test_phase_two_forwards_undated_findings_for_confirmation() -> None:
         artifact = json.loads((run_dir / "02-research-judged.json").read_text())
         check(artifact["pre_filter"] == {
             "too_old": 1, "undated_forwarded": 1, "partial_date_forwarded": 1,
-            "late_window_forwarded": 0, "already_covered_previous_day": 0,
+            "already_covered_previous_day": 0,
         }, artifact["pre_filter"])
         check([(entry["url"], entry["reason"]) for entry in artifact["pre_filter_dropped"]]
               == [(older["url"], "too_old")], artifact["pre_filter_dropped"])
@@ -2284,7 +2284,7 @@ def test_third_party_report_gives_way_to_an_established_outlet() -> None:
             "title": "Jensen Huang Resigns as Nvidia CEO, With CFO Colette Kress Named Interim Chief",
             "url": url, "source_domain": contracts.normalize_url(url).split("/")[0],
             "priority_score": 91.7, "editorial_significance": "high",
-            "date_published": "2026-11-12", "published_at": "2026-11-12T15:00:00+00:00",
+            "date_published": "2026-11-12",
             "event": "Jensen Huang resigned as Nvidia CEO; Colette Kress was named interim CEO.",
             "event_terms": ["Jensen Huang resigns", "Colette Kress interim CEO"],
             **fields,
@@ -2303,7 +2303,7 @@ def test_third_party_report_gives_way_to_an_established_outlet() -> None:
         "event_terms": ["Jensen Huang resigns", "Nvidia interim CEO"],
     }
 
-    def rank(fresh: list[dict]) -> tuple[list[dict], dict]:
+    def rank(fresh: list[dict], alternate: dict = techcrunch) -> tuple[list[dict], dict]:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             run_dir = root / "ai-tech" / "2026-11-13"
@@ -2311,7 +2311,7 @@ def test_third_party_report_gives_way_to_an_established_outlet() -> None:
             with patch.object(runtime, "DIGESTS_DIR", root):
                 queue = research.phase_3_rank(
                     catalog.TOPICS["ai-tech"], copy.deepcopy(fresh), run_dir,
-                    [copy.deepcopy(fresh[0]), techcrunch],
+                    [copy.deepcopy(fresh[0]), alternate],
                 )
             return queue, json.loads((run_dir / "03-urls-ranked.json").read_text())
 
@@ -2319,9 +2319,13 @@ def test_third_party_report_gives_way_to_an_established_outlet() -> None:
     moved = queue[0]
     check(moved["url"] == techcrunch["url"] and moved["source_domain"] == "techcrunch.com", moved)
     check(moved["outlet_substituted_from"] == decrypt and moved["priority_score"] == 91.7, moved)
-    check("published_at" not in moved, "the replaced URL's publication time must not follow the story")
     check([(entry["original_url"], entry["alternate_url"]) for entry in artifact["outlet_substituted"]]
           == [(decrypt, techcrunch["url"])], artifact["outlet_substituted"])
+    # An alternate dated outside the fresh window would fail Phase 5 and take the
+    # story with it (2026-11-15: ChatGPT Wallet, moved from a fresh report to CNBC's
+    # older article, then outside the window), so it is never chosen.
+    queue, artifact = rank([story(decrypt, 0.04)], {**techcrunch, "date_published": "2026-11-09"})
+    check(queue[0]["url"] == decrypt and artifact["outlet_substituted"] == [], queue[0])
 
     for kept_as_is in (
         story(newsroom, 0.96),  # the company's own announcement is the better link
@@ -2979,7 +2983,7 @@ def test_freshness_gate_rejects_future_dates() -> None:
     2026-08-14: a 2026-10-15-dated story rendered under "Fresh — Last 24 Hours"
     in the 2026-08-12 ai-tech digest)."""
     today = datetime(2026, 8, 14, tzinfo=timezone.utc).date()
-    future = {"date_confirmed": "2026-10-15", "date_published": "2026-08-12"}
+    future = {"date_confirmed": "2026-10-15", "date_published": "2026-10-15"}
     check(not contracts.is_fresh_eligible(future, today),
           "future-dated candidate passed the freshness gate")
     fresh = {"date_confirmed": "2026-08-13"}
@@ -2996,57 +3000,16 @@ def test_freshness_gate_rejects_future_dates() -> None:
           "undated candidate must pass through")
 
 
-def test_fresh_window_reaches_36_hours_back_only_on_a_publication_time() -> None:
-    """A never-covered story stays eligible for 36 hours before press time
-    (02:00 America/New_York). A date alone proves that only for the issue date
-    and the day before; the day before that needs the article's own timestamp
-    (Carter, 2026-11-13: a story published on a US afternoon had one run to be
-    found in, and Agents averaged 2.6 stories a day)."""
-    issue = date(2026, 11, 13)  # press 07:00 UTC, cutoff 2026-11-11 19:00 UTC
-    check(contracts.fresh_cutoff(issue) == datetime(2026, 11, 11, 19, tzinfo=timezone.utc),
-          contracts.fresh_cutoff(issue))
-    # Daylight time moves press time, and the cutoff with it, an hour earlier in UTC.
-    check(contracts.fresh_cutoff(date(2026, 7, 13)) == datetime(2026, 7, 11, 18, tzinfo=timezone.utc),
-          contracts.fresh_cutoff(date(2026, 7, 13)))
-
-    def story(published_at: str = "") -> dict:
-        return {"date_published": "2026-11-11", "date_confirmed": "2026-11-11",
-                **({"published_at": published_at} if published_at else {})}
-
-    check(not contracts.is_fresh_eligible(story(), issue), "a bare date two days back is not fresh")
-    check(contracts.is_fresh_eligible(story("2026-11-11T16:30:00-05:00"), issue), "33.5 hours before press")
-    check(not contracts.is_fresh_eligible(story("2026-11-11T09:00:00-05:00"), issue), "41 hours before press")
-    check(not contracts.is_fresh_eligible(story("2026-11-11T21:30:00"), issue),
-          "a time without a UTC offset cannot be placed")
-    check(not contracts.is_fresh_eligible({"published_at": "2026-11-20T09:00:00+00:00"}, issue),
-          "a future instant is not fresh")
-    check([contracts.date_freshness(date(2026, 11, day), issue) for day in (14, 13, 12, 11, 10)]
-          == ["future", "fresh", "fresh", "late", "stale"], "date placement")
-
-    page = (
-        '<meta property="article:published_time" content="2026-11-11T16:30:00-05:00">'
-        '<meta name="date" content="2026-11-13">'
-        '<script type="application/ld+json">{"datePublished": "2026-11-11T22:00:00Z",'
-        ' "dateModified": "2026-11-12T10:00:00Z"}</script>'
-    )
-    check(contracts.extract_published_time(page) == datetime(2026, 11, 11, 21, 30, tzinfo=timezone.utc),
-          contracts.extract_published_time(page))
-    check(contracts.extract_published_time('<meta name="citation_date" content="2026/11/11">') is None,
-          "a date-only stamp gives no time")
-
-
-def test_late_window_story_needs_its_page_timestamp_in_phases_two_and_five() -> None:
-    """Phase 2 forwards, and Phase 5 keeps, a story dated the day before
-    yesterday only when its page metadata times it inside the 36-hour window."""
-    times = {
-        "https://example.com/late-inside": datetime(2026, 11, 11, 21, 30, tzinfo=timezone.utc),
-        "https://example.com/late-outside": datetime(2026, 11, 11, 14, 0, tzinfo=timezone.utc),
-    }
-    looked_up: list[str] = []
-
-    def published_time(url: str):
-        looked_up.append(url)
-        return times.get(url)
+def test_fresh_window_reaches_two_days_back_in_every_phase() -> None:
+    """A story no section has run may be dated up to two days before the issue
+    date; Phase 2, Phase 5 and the Phase 6 and publisher gate apply one rule
+    (Carter, 2026-11-15: that Sunday's AI & Tech and Agents candidates were
+    Friday stories Saturday's run had missed, and each section ran one story)."""
+    issue = date(2026, 11, 15)
+    check([contracts.date_freshness(date(2026, 11, day), issue) for day in (16, 15, 14, 13, 12)]
+          == ["future", "fresh", "fresh", "fresh", "stale"], "date placement")
+    check(contracts.is_fresh_eligible({"date_confirmed": "2026-11-13"}, issue), "Friday in a Sunday edition")
+    check(not contracts.is_fresh_eligible({"date_confirmed": "2026-11-12"}, issue), "Thursday is too old")
 
     def finding(slug: str, day: str) -> dict:
         return {"title": f"{slug} story", "url": f"https://example.com/{slug}",
@@ -3060,41 +3023,33 @@ def test_late_window_story_needs_its_page_timestamp_in_phases_two_and_five() -> 
         return json.dumps({"approved": items, "rejected": []})
 
     with tempfile.TemporaryDirectory() as temporary:
-        run_dir = Path(temporary) / "agentic-platform" / "2026-11-13"
+        run_dir = Path(temporary) / "agentic-platform" / "2026-11-15"
         run_dir.mkdir(parents=True)
-        findings = [finding("late-inside", "2026-11-11"), finding("late-outside", "2026-11-11"),
-                    finding("late-untimed", "2026-11-11"), finding("older", "2026-11-10")]
-        with patch("daily_news.research.published_time", side_effect=published_time), \
-             patch("daily_news.runtime._call_llm_proxy", side_effect=approve_all):
+        with patch("daily_news.runtime._call_llm_proxy", side_effect=approve_all):
             fresh = research.phase_2_judge_research(
-                catalog.TOPICS["agentic-platform"], copy.deepcopy(findings), run_dir)
-        check([item["url"] for item in fresh] == ["https://example.com/late-inside"], fresh)
-        check(fresh[0]["published_at"] == "2026-11-11T21:30:00+00:00" and fresh[0]["date_tag"] == "fresh",
-              fresh[0])
-        check("https://example.com/older" not in looked_up, "a stale date needs no lookup")
+                catalog.TOPICS["agentic-platform"],
+                [finding("friday", "2026-11-13"), finding("thursday", "2026-11-12")], run_dir)
+        check([item["url"] for item in fresh] == ["https://example.com/friday"], fresh)
         artifact = json.loads((run_dir / "02-research-judged.json").read_text())
-        check(artifact["pre_filter"]["late_window_forwarded"] == 1
-              and artifact["pre_filter"]["too_old"] == 3, artifact["pre_filter"])
+        check(artifact["pre_filter"]["too_old"] == 1, artifact["pre_filter"])
 
-        def summary(slug: str) -> dict:
-            return {**finding(slug, "2026-11-12"), "date_confirmed": "2026-11-11",
-                    "source_verdict": "fresh", "fetch_success": True}
-
-        summaries = [summary("late-inside"), summary("late-outside")]
+        # Research dated both Saturday; the fetched pages say Friday and Thursday.
+        summaries = [
+            {**finding(slug, "2026-11-14"), "date_confirmed": confirmed,
+             "source_verdict": "fresh", "fetch_success": True}
+            for slug, confirmed in (("friday", "2026-11-13"), ("thursday", "2026-11-12"))
+        ]
         judgments = json.dumps([
             {"url": item["url"], "verdict": "keep", "issues": [], "fixed_summary": ""}
             for item in summaries
         ])
-        with patch("daily_news.research.published_time", side_effect=published_time), \
-             patch("daily_news.runtime._call_llm_proxy", return_value=judgments):
+        with patch("daily_news.runtime._call_llm_proxy", return_value=judgments):
             judged = research.phase_5_judge_summaries(
                 catalog.TOPICS["agentic-platform"], summaries, run_dir)
         by_slug = {item["url"].rsplit("/", 1)[1]: item for item in judged}
-        check(by_slug["late-inside"]["judge_verdict"] == "keep"
-              and by_slug["late-inside"]["published_at"] == "2026-11-11T21:30:00+00:00", by_slug["late-inside"])
-        check(contracts.is_fresh_eligible(by_slug["late-inside"], date(2026, 11, 13)), by_slug["late-inside"])
-        check(by_slug["late-outside"]["judge_verdict"] == "drop"
-              and by_slug["late-outside"]["judge_issues"][0].startswith("date_mismatch:"), by_slug["late-outside"])
+        check(by_slug["friday"]["judge_verdict"] == "keep", by_slug["friday"])
+        check(by_slug["thursday"]["judge_verdict"] == "drop"
+              and by_slug["thursday"]["judge_issues"][0].startswith("date_mismatch:"), by_slug["thursday"])
 
 
 def test_freshness_gate_ignores_future_event_date_confirmed() -> None:
@@ -3115,10 +3070,13 @@ def test_freshness_gate_ignores_future_event_date_confirmed() -> None:
 
 
 def test_editorial_caps_source_concentration() -> None:
-    """Fresh selection is capped at 2 stories per source domain: lower-ranked
-    same-source candidates are dropped with a warning instead of shipping a
-    single-source Fresh section (digest-quality audit 2026-08-14: ai-tech
-    shipped 5 TechCrunch stories, ai-hardware 4 Data Center Dynamics stories)."""
+    """A section takes at most SOURCE_DOMAIN_CAP stories from one publisher:
+    lower-ranked same-source candidates are dropped with a warning instead of
+    shipping a single-source section (digest-quality audit 2026-08-14: ai-tech
+    shipped 5 TechCrunch stories, ai-hardware 4 Data Center Dynamics stories).
+    The cap is 3 since 2026-11-15: at 2 it had dropped the ChatGPT Wallet
+    launch as a third TechCrunch story."""
+    cap = catalog.SOURCE_DOMAIN_CAP
     fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     candidates, _ = editorial.prepare_editorial_candidates([
         {
@@ -3132,7 +3090,7 @@ def test_editorial_caps_source_concentration() -> None:
             "source_verdict": "fresh",
             "judge_verdict": "keep",
         }
-        for index in range(3)
+        for index in range(cap + 1)
     ] + [
         {
             "title": "Other story",
@@ -3163,12 +3121,47 @@ def test_editorial_caps_source_concentration() -> None:
     techcrunch_count = sum(
         1 for item in selected if domains[item["candidate_id"]] == "techcrunch.com"
     )
-    check(len(selected) == 3, f"expected 3 fresh after cap, got {len(selected)}")
-    check(techcrunch_count == 2, f"techcrunch count after cap: {techcrunch_count}")
-    check(any("source concentration above 2" in warning for warning in warnings),
+    check(len(selected) == cap + 1, f"expected {cap + 1} fresh after cap, got {len(selected)}")
+    check(techcrunch_count == cap, f"techcrunch count after cap: {techcrunch_count}")
+    check(any(f"source concentration above {cap}" in warning for warning in warnings),
           warnings)
     check(any("source concentration cap" in warning for warning in warnings),
           warnings)
+
+
+def test_section_duplicates_need_shared_coverage_not_shared_words() -> None:
+    """Two selections are one story only when Jev-judged coverage links them and
+    their wording overlaps. The earlier headline-word test paired 15 unrelated
+    stories in 16 days (2026-11-14 Agents: two different Show HN posts), because
+    with a section's own candidates as corpus every shared word counted as rare."""
+    fresh_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    report = "https://www.cnbc.com/2026/11/10/anthropic-mythos-fable.html"
+
+    def story(title: str, url: str, same_event: list[str]) -> dict:
+        return {
+            "title": title, "url": url, "source_domain": contracts.normalize_url(url).split("/")[0],
+            "summary": "Verified summary.", "category": "Releases", "editorial_significance": "medium",
+            "date_published": fresh_day, "source_verdict": "fresh", "judge_verdict": "keep",
+            "attention": {"status": "ok", "evidence": {"same_event_keys": same_event}},
+        }
+
+    candidates, _ = editorial.prepare_editorial_candidates([
+        story("Introducing Claude Fable 5.2 and Claude Mythos 5.2",
+              "https://www.anthropic.com/news/claude-fable-5-2-mythos-5-2",
+              [contracts.coverage_key(report)]),
+        story("Anthropic releases new Mythos and Fable models amid RSI concerns", report, []),
+        story("Show HN: Webcrawl, an open-source web crawling API and MCP server for agents",
+              "https://news.ycombinator.com/item?id=50470001", []),
+        story("Show HN: Browser Hands, Claude in Chrome for Codex, Cursor and any MCP agents",
+              "https://news.ycombinator.com/item?id=50470002", []),
+    ], set())
+    proposal = {"selected_fresh": [{"candidate_id": candidate["candidate_id"]} for candidate in candidates]}
+    validated, warnings = editorial.validate_editorial_proposal(proposal, candidates)
+    kept = {candidate["candidate_id"]: candidate["title"] for candidate in candidates}
+    titles = [kept[item["candidate_id"]] for item in validated["selected_fresh"]]
+    check(sum("Show HN" in title for title in titles) == 2, titles)
+    check(sum("Mythos" in title for title in titles) == 1, titles)
+    check(sum("ignored same-event duplicate" in warning for warning in warnings) == 1, warnings)
 
 
 def test_editorial_proposal_retries_with_freshness_hint() -> None:
@@ -3273,13 +3266,13 @@ def test_editorial_proposal_retries_with_freshness_hint() -> None:
 def test_critic_fresh_removal_honored_when_all_candidates_stale() -> None:
     """A critic that removes the last stale fresh story must be honored, not
     converted to review=unavailable with the invalid placement retained
-    (digest-quality audit 2026-08-12: ai-hardware shipped a 2d-old RTX story
+    (digest-quality audit 2026-08-12: ai-hardware shipped a stale RTX story
     under Fresh because the 'removed every valid fresh story' guard fired)."""
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         run_dir = root / "ai-hardware" / "2026-08-12"
         run_dir.mkdir(parents=True)
-        stale_day = "2026-08-10"
+        stale_day = "2026-08-08"
         summary = {
             "title": "RTX 50-series price spike",
             "url": "https://example.com/rtx-prices",
@@ -4209,8 +4202,8 @@ def main() -> None:
         test_editorial_critic_patch_contract,
         test_editorial_drops_stale_fresh_selection,
         test_freshness_gate_rejects_future_dates,
-        test_fresh_window_reaches_36_hours_back_only_on_a_publication_time,
-        test_late_window_story_needs_its_page_timestamp_in_phases_two_and_five,
+        test_fresh_window_reaches_two_days_back_in_every_phase,
+        test_section_duplicates_need_shared_coverage_not_shared_words,
         test_freshness_gate_ignores_future_event_date_confirmed,
         test_editorial_caps_source_concentration,
         test_editorial_proposal_retries_with_freshness_hint,

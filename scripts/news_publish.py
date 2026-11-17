@@ -171,8 +171,8 @@ def _public_story(story: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_editorial_significance(dict(story))
     result: dict[str, Any] = {}
     for key in (
-        "title", "source_domain", "date_published", "date_confirmed", "published_at",
-        "summary", "category", "editorial_significance", "author", "event",
+        "title", "source_domain", "date_published", "date_confirmed", "summary",
+        "category", "editorial_significance", "author", "event",
         "priority_explanation",
     ):
         value = _clean_text(normalized.get(key))
