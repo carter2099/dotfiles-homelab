@@ -158,12 +158,47 @@ IMPORTANCE_QUESTIONS: dict[str, dict[str, Any]] = {
                      "summarizing what someone else announced, released, or found.",
         },
     },
+    # Not part of the importance score either: editorial_points reads both to discount a
+    # `high` story that only continues an ongoing situation (CONTINUATION_SECTIONS). Asked
+    # in every section so the answers are recorded for later evaluation there too.
+    "continuing": {
+        "type": "noul",
+        "instructions": "Does `story` report the latest step in a situation that was already under way before "
+                        "this report?",
+        "criteria": {
+            "true": "The situation existed before: an ongoing war, campaign, election count, trial, "
+                    "investigation, outage, negotiation, or crisis, and `story` reports its next development.",
+            "false": "`story` reports something that was not happening before: a sudden disaster, attack, or "
+                     "incident; a launch, release, or announcement; or the first report of a new situation.",
+        },
+    },
+    "decisive": {
+        "type": "noul",
+        "instructions": "Does `story` report that a situation ended, was decided, or changed course?",
+        "criteria": {
+            "true": "For example a war or conflict ending, a ceasefire, a final election result, a final court "
+                    "ruling, a leader resigning or removed, a deal completed or collapsed, or a new party "
+                    "entering a conflict.",
+            "false": "The situation goes on as before: more fighting or strikes, interim results, threats, "
+                     "warnings, statements, hearings, or talks that continue.",
+        },
+    },
 }
 IMPORTANCE_WORKERS = 6
 IMPORTANCE_EDITORIAL_WEIGHT = 0.65
 IMPORTANCE_JEV_WEIGHT = 0.35
 PRIORITY_IMPORTANCE_WEIGHT = 0.60
 PRIORITY_ATTENTION_WEIGHT = 0.40
+# A `high` story in these sections that Jev judges the next step in a situation already under
+# way (`continuing` >= 0.7) and not an end, decision, or change of course (`decisive` <= 0.3)
+# counts CONTINUATION_HIGH_POINTS instead of 100 (Carter, 2026-11-18), so another day of a war
+# or a campaign ranks below new and decisive news. In a labelled evaluation of 437 high stories
+# (notes journal/2026-11-18-daily-news-turning-point-eval.md) 73 of 80 such World penalties hit
+# a continuation, but only 10 of 22 in the other sections, so it applies to World alone.
+CONTINUATION_SECTIONS = frozenset({"world"})
+CONTINUATION_HIGH_POINTS = 80.0
+CONTINUING_MIN_PROBABILITY = 0.7
+DECISIVE_MAX_PROBABILITY = 0.3
 
 _STOPWORDS = {
     "about", "after", "again", "against", "amid", "among", "and", "are",
@@ -560,8 +595,8 @@ def importance_from_answers(answers: dict[str, dict[str, Any]]) -> dict[str, Any
             "consequence": round(float(answers["consequence"]["score"]), 2),
             "scope": round(float(answers["scope"]["score"]), 2),
             **{key: round(value, 2) for key, value in nouls.items()},
-            **({"original_source": round(float(answers["original_source"]["noul"]), 2)}
-               if "original_source" in answers else {}),
+            **{key: round(float(answers[key]["noul"]), 2)
+               for key in ("original_source", "continuing", "decisive") if key in answers},
         },
     }
 
@@ -600,8 +635,26 @@ def assess_importance(
 
 # ---------------------------------------------------------------- product priority
 
-def importance_score(significance: str, importance: dict[str, Any] | None) -> float:
-    editorial = EDITORIAL_POINTS.get(significance, EDITORIAL_POINTS["medium"])
+def continues_situation(significance: str, importance: dict[str, Any] | None, section: str) -> bool:
+    """True for a `high` story Jev judged only the next step of an ongoing situation."""
+    if significance != "high" or section not in CONTINUATION_SECTIONS:
+        return False
+    answers = (importance or {}).get("answers") or {}
+    continuing, decisive = answers.get("continuing"), answers.get("decisive")
+    return (
+        isinstance(continuing, (int, float)) and isinstance(decisive, (int, float))
+        and continuing >= CONTINUING_MIN_PROBABILITY and decisive <= DECISIVE_MAX_PROBABILITY
+    )
+
+
+def editorial_points(significance: str, importance: dict[str, Any] | None, section: str) -> float:
+    if continues_situation(significance, importance, section):
+        return CONTINUATION_HIGH_POINTS
+    return EDITORIAL_POINTS.get(significance, EDITORIAL_POINTS["medium"])
+
+
+def importance_score(significance: str, importance: dict[str, Any] | None, *, section: str) -> float:
+    editorial = editorial_points(significance, importance, section)
     if not importance:
         return editorial
     weight = IMPORTANCE_JEV_WEIGHT * float(importance["confidence"])
@@ -612,9 +665,11 @@ def importance_score(significance: str, importance: dict[str, Any] | None) -> fl
     )
 
 
-def blended_priority(significance: str, importance: dict[str, Any] | None, attention: dict[str, Any]) -> float:
+def blended_priority(
+    significance: str, importance: dict[str, Any] | None, attention: dict[str, Any], *, section: str,
+) -> float:
     """Confidence-weighted blend of importance (editorial + Jev) and observed attention."""
-    base = importance_score(significance, importance)
+    base = importance_score(significance, importance, section=section)
     weight = PRIORITY_ATTENTION_WEIGHT * float(attention.get("confidence") or 0.0)
     return round(
         (PRIORITY_IMPORTANCE_WEIGHT * base + weight * float(attention.get("digest_prominence") or 0.0))
@@ -623,8 +678,15 @@ def blended_priority(significance: str, importance: dict[str, Any] | None, atten
     )
 
 
-def _explain(significance: str, importance: dict[str, Any] | None, attention: dict[str, Any]) -> str:
+def _explain(
+    significance: str, importance: dict[str, Any] | None, attention: dict[str, Any], section: str,
+) -> str:
     parts = [f"{significance.title()} editorial significance"]
+    if continues_situation(significance, importance, section):
+        parts[0] += (
+            f", counted as {CONTINUATION_HIGH_POINTS:.0f} points because Jev judged it the next step in an "
+            "ongoing situation"
+        )
     if importance:
         parts.append(f"Jev importance {importance['score']:.0f} (confidence {importance['confidence']:.2f})")
     status = attention.get("status")
@@ -649,14 +711,15 @@ def apply_priority(
     *,
     measurement: dict[str, Any],
     importance: dict[str, Any] | None,
+    section: str,
 ) -> dict[str, Any]:
     """Attach attention, Jev importance, and the blended product priority."""
     significance = item["editorial_significance"]
     if importance:
         item["jev_importance"] = importance
     item["attention"] = measurement
-    item["priority_score"] = blended_priority(significance, importance, measurement)
-    item["priority_explanation"] = _explain(significance, importance, measurement)
+    item["priority_score"] = blended_priority(significance, importance, measurement, section=section)
+    item["priority_explanation"] = _explain(significance, importance, measurement, section)
     return item
 
 
@@ -691,7 +754,7 @@ def score_attention(
                 found, section=section, measured_sources=measured_sources, references=references,
                 window_end=window_end, first_seen=found.get("first_seen"),
             )
-        apply_priority(item, measurement=attention, importance=judged)
+        apply_priority(item, measurement=attention, importance=judged, section=section)
         observations.append({
             "title": item.get("title", ""),
             "url": item.get("url", ""),

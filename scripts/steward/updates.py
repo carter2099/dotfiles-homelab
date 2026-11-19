@@ -140,29 +140,36 @@ def _p1_locked(step, lock, operation, *, skipped=None, **fields):
 # Registries throttle bursts with `toomanyrequests` (GHCR: a shared per-namespace
 # limit, retry-after in microseconds) right after a popular release.  One such
 # Open WebUI pull failed the whole 2026-10-11 run although nothing had changed
-# and the next night's pull succeeded.  Retry a rate limit a few times; if it
-# persists the caller reports a warning (degraded) and retries next night.
-PULL_RATE_LIMIT_DELAYS = (30, 120)
+# and the next night's pull succeeded.  A registry can also stop answering for a
+# moment: on 2026-11-18 ghcr.io's token endpoint missed dockerd's client timeout
+# once and failed that run, while other HTTPS from the host succeeded in the same
+# second and the endpoint answered in 0.14 s minutes later.  Retry both a few
+# times; if it persists the caller reports a warning (degraded) and retries next night.
+PULL_RETRY_DELAYS = (30, 120)
+_PULL_RETRYABLE_MARKERS = (
+    "toomanyrequests", "429 too many requests",  # registry rate limit
+    "client.timeout exceeded", "tls handshake timeout",  # registry did not answer
+)
 
 
-def _pull_rate_limited(exc):
-    """True when a failed `docker pull` was refused by a registry rate limit."""
+def _pull_retryable(exc):
+    """True when a failed `docker pull` hit a registry rate limit or timeout."""
     if not isinstance(exc, subprocess.CalledProcessError):
         return False
     text = f"{_p1_output_text(exc.stderr)}\n{_p1_output_text(exc.stdout)}".lower()
-    return "toomanyrequests" in text or "429 too many requests" in text
+    return any(marker in text for marker in _PULL_RETRYABLE_MARKERS)
 
 
 def _docker_pull(ref, *, timeout):
-    """`docker pull ref`, retrying registry rate limits; raises like run()."""
-    delays = (0, *PULL_RATE_LIMIT_DELAYS)
+    """`docker pull ref`, retrying registry rate limits and timeouts; raises like run()."""
+    delays = (0, *PULL_RETRY_DELAYS)
     for attempt, delay in enumerate(delays):
         if delay:
             time.sleep(delay)
         try:
             return run(["docker", "pull", ref], capture_output=True, text=True, timeout=timeout)
         except subprocess.CalledProcessError as exc:
-            if attempt == len(delays) - 1 or not _pull_rate_limited(exc):
+            if attempt == len(delays) - 1 or not _pull_retryable(exc):
                 raise
 
 
@@ -483,9 +490,9 @@ def _p1_freshrss_update(tags=None):
         msg = str(exc)
         if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
             msg += f" | stderr: {exc.stderr[-500:]}"
-        limited = _pull_rate_limited(exc)
-        return {"step": "freshrss", "status": "warning" if limited else "failed",
-                "reason": "pull rate-limited by the registry" if limited else "pull failed",
+        retryable = _pull_retryable(exc)
+        return {"step": "freshrss", "status": "warning" if retryable else "failed",
+                "reason": "registry rate limit or timeout" if retryable else "pull failed",
                 "current_tag": current_tag, "latest_tag": latest_tag, "error": msg}
     try:
         FRESHRSS_COMPOSE.write_text(compose_text.replace(old_ref, new_ref, 1))
@@ -826,7 +833,7 @@ def _owui_transaction(current_tag, target_tag, compose_text, common):
         _docker_pull(image_new, timeout=900)
     except Exception as exc:
         detail = exc.stderr if isinstance(exc, subprocess.CalledProcessError) else str(exc)
-        return {**common, "status": "warning" if _pull_rate_limited(exc) else "failed",
+        return {**common, "status": "warning" if _pull_retryable(exc) else "failed",
                 "error": f"image pull failed: {_p1_output_text(detail).strip()[-300:]}"}
     label, digest, image_id = _owui_image_identity(image_new)
     if label != target_tag or not digest:

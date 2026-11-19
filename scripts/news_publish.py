@@ -45,6 +45,14 @@ TOPIC_ORDER = tuple(TOPICS)
 PUBLICATION_SCHEMA_VERSION = 2
 FRONT_PAGE_MAX_STORIES = 10
 FRONT_PAGE_SECONDARY_THRESHOLD = 65.0
+# Front-page-only handicap in priority points, by section slug (Carter, 2026-11-18).
+# World stories score about 9 points above the other sections' (Jev's scope and harm
+# questions, general-news attention inventories) and led 36 of the 55 editions from
+# 2026-09-25; replayed with 8 points they would have led 19. The handicap fades to zero
+# across FRONT_PAGE_HANDICAP_FADE so exceptional news keeps its full score. Section
+# pages and the stored priority_score are unchanged.
+FRONT_PAGE_SECTION_HANDICAP = {"world": 8.0}
+FRONT_PAGE_HANDICAP_FADE = (88.0, 96.0)
 # Same-event matching on the front page (see _same_event).
 EVENT_CORPUS_DAYS = 30
 EVENT_MIN_TOKEN_OVERLAP = 0.25
@@ -997,16 +1005,29 @@ def _same_event(
     return any(counts[token] <= rare_limit for token in anchors)
 
 
+def _front_page_score(story: dict[str, Any]) -> float:
+    """Priority as the front page compares it across sections."""
+    priority = float(story.get("priority_score", 0.0) or 0.0)
+    handicap = FRONT_PAGE_SECTION_HANDICAP.get(story["_section_slug"], 0.0)
+    full, none = FRONT_PAGE_HANDICAP_FADE
+    return priority - handicap * min(1.0, max(0.0, (none - priority) / (none - full)))
+
+
+def _front_page_sort_key(story: dict[str, Any]) -> tuple[Any, ...]:
+    return (_front_page_score(story), *priority_sort_key(story))
+
+
 def _front_page_sections(
     date_editions: dict[str, dict[str, Any]],
     frequency: EventFrequency | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Remove same-event duplicates, then guarantee one lead per section.
 
-    Deduplication runs before any section lead is chosen: the highest-priority
+    Deduplication runs before any section lead is chosen: the highest-scoring
     copy of an event survives, and a section whose best story duplicates it
     falls back to its next story (2026-09-22: Googlebook led both AI Hardware
     and World). Remaining slots are filled globally above a priority floor.
+    Every cross-section comparison uses _front_page_score.
     """
     if frequency is None:
         frequency = _frequency_of(date_editions.values())
@@ -1043,7 +1064,7 @@ def _front_page_sections(
     candidates_by_slug: dict[str, list[dict[str, Any]]] = {
         section["slug"]: [] for section in sections
     }
-    for story in sorted(stories, key=priority_sort_key, reverse=True):
+    for story in sorted(stories, key=_front_page_sort_key, reverse=True):
         if any(duplicates(story, other) for other in kept):
             continue
         kept.append(story)
@@ -1057,7 +1078,7 @@ def _front_page_sections(
         # One already-curated story represents every section with coverage.
         section["stories"].append(candidates[0])
         for story in candidates[1:]:
-            if float(story.get("priority_score", 0.0) or 0.0) >= FRONT_PAGE_SECONDARY_THRESHOLD:
+            if _front_page_score(story) >= FRONT_PAGE_SECONDARY_THRESHOLD:
                 secondary_pool.append(story)
 
     section_by_slug = {section["slug"]: section for section in sections}
@@ -1065,7 +1086,7 @@ def _front_page_sections(
         0,
         FRONT_PAGE_MAX_STORIES - sum(len(section["stories"]) for section in sections),
     )
-    for story in sorted(secondary_pool, key=priority_sort_key, reverse=True):
+    for story in sorted(secondary_pool, key=_front_page_sort_key, reverse=True):
         if remaining_slots == 0:
             break
         if not _safe_url(story.get("url")):
@@ -1076,7 +1097,7 @@ def _front_page_sections(
     selected = [
         story for section in sections for story in section["stories"]
     ]
-    lead = max(selected, key=priority_sort_key, default=None)
+    lead = max(selected, key=_front_page_sort_key, default=None)
     return lead, sections
 
 

@@ -1966,38 +1966,46 @@ class OpenWebUIUpdateTests(unittest.TestCase):
         archive = next(args for args in calls["sudo"] if "-czpf" in args)
         self.assertIn("--exclude=./cache", archive)
 
-    def test_rate_limited_pull_is_a_warning_and_mutates_nothing(self):
-        limited = subprocess.CalledProcessError(
-            1, ["docker", "pull"], stderr="toomanyrequests: retry-after: 402.569µs, allowed: 44000/minute")
-        with tempfile.TemporaryDirectory() as tmp:
-            result, calls, compose = self._run(tmp, pull=limited)
-        self.assertEqual(result["status"], "warning")
-        self.assertIn("toomanyrequests", result["error"])
-        self.assertEqual(compose, self.OLD)
-        self.assertEqual(calls, {"compose": [], "sudo": [], "verify": []})
-        p1 = updates._finish_p1(None, {"steps": [result]}, progress=lambda data: None)
-        self.assertEqual(p1["phase_status"], "degraded")
+    GHCR_TIMEOUT = (
+        'Error response from daemon: Head "https://ghcr.io/v2/open-webui/open-webui/manifests/0.13.4": '
+        'Get "https://ghcr.io/token?scope=repository%3Aopen-webui%2Fopen-webui%3Apull&service=ghcr.io": '
+        "net/http: request canceled (Client.Timeout exceeded while awaiting headers)")
+
+    def test_rate_limited_or_timed_out_pull_is_a_warning_and_mutates_nothing(self):
+        for stderr in ("toomanyrequests: retry-after: 402.569µs, allowed: 44000/minute",
+                       self.GHCR_TIMEOUT):
+            with self.subTest(stderr=stderr[:40]), tempfile.TemporaryDirectory() as tmp:
+                result, calls, compose = self._run(tmp, pull=subprocess.CalledProcessError(
+                    1, ["docker", "pull"], stderr=stderr))
+                self.assertEqual(result["status"], "warning")
+                self.assertIn(stderr[-60:], result["error"])
+                self.assertEqual(compose, self.OLD)
+                self.assertEqual(calls, {"compose": [], "sudo": [], "verify": []})
+                p1 = updates._finish_p1(None, {"steps": [result]}, progress=lambda data: None)
+                self.assertEqual(p1["phase_status"], "degraded")
         with tempfile.TemporaryDirectory() as tmp:
             result, _, _ = self._run(tmp, pull=subprocess.CalledProcessError(
                 1, ["docker", "pull"], stderr="manifest unknown"))
         self.assertEqual(result["status"], "failed")
 
-    def test_docker_pull_retries_only_registry_rate_limits(self):
-        limited = subprocess.CalledProcessError(1, ["docker", "pull"], stderr="toomanyrequests")
+    def test_docker_pull_retries_only_registry_rate_limits_and_timeouts(self):
         other = subprocess.CalledProcessError(1, ["docker", "pull"], stderr="manifest unknown")
-        with patch.object(updates.time, "sleep") as sleep:
-            with patch.object(updates, "run", side_effect=[limited, "pulled"]) as run:
-                self.assertEqual(updates._docker_pull("img:1", timeout=5), "pulled")
-            self.assertEqual(run.call_count, 2)
-            sleep.assert_called_once_with(updates.PULL_RATE_LIMIT_DELAYS[0])
+        for stderr in ("toomanyrequests", self.GHCR_TIMEOUT):
+            retryable = subprocess.CalledProcessError(1, ["docker", "pull"], stderr=stderr)
+            with self.subTest(stderr=stderr[:40]), patch.object(updates.time, "sleep") as sleep:
+                with patch.object(updates, "run", side_effect=[retryable, "pulled"]) as run:
+                    self.assertEqual(updates._docker_pull("img:1", timeout=5), "pulled")
+                self.assertEqual(run.call_count, 2)
+                sleep.assert_called_once_with(updates.PULL_RETRY_DELAYS[0])
+                with patch.object(updates, "run", side_effect=retryable) as run:
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        updates._docker_pull("img:1", timeout=5)
+                self.assertEqual(run.call_count, 1 + len(updates.PULL_RETRY_DELAYS))
+        with patch.object(updates.time, "sleep"):
             with patch.object(updates, "run", side_effect=other) as run:
                 with self.assertRaises(subprocess.CalledProcessError):
                     updates._docker_pull("img:1", timeout=5)
-            self.assertEqual(run.call_count, 1)
-            with patch.object(updates, "run", side_effect=limited) as run:
-                with self.assertRaises(subprocess.CalledProcessError):
-                    updates._docker_pull("img:1", timeout=5)
-            self.assertEqual(run.call_count, 1 + len(updates.PULL_RATE_LIMIT_DELAYS))
+        self.assertEqual(run.call_count, 1)
 
     def test_failed_gate_restores_image_pin_and_data(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -422,7 +422,7 @@ def test_failed_jev_importance_leaves_only_that_story_at_editorial_points() -> N
             }
     judged, failures = assess_importance([{"title": "First"}, {"title": "Second"}], Flaky(), section_label="World")
     check(judged[0] is not None and judged[1] is None and failures == 1, judged)
-    check(importance_score("medium", judged[1]) == EDITORIAL_POINTS["medium"], judged)
+    check(importance_score("medium", judged[1], section="world") == EDITORIAL_POINTS["medium"], judged)
 
 
 def test_reference_scales_follow_history_once_it_is_deep_enough() -> None:
@@ -481,7 +481,7 @@ def test_priority_blends_importance_with_confident_attention_only() -> None:
     story = unadjudicated[0]
     check(story["attention"]["status"] == "unavailable" and story["attention"]["confidence"] == 0, story)
     check(story["attention"]["evidence"]["unavailable_reason"] == "adjudication_failed", story)
-    check(story["priority_score"] == importance_score("medium", story["jev_importance"]), story)
+    check(story["priority_score"] == importance_score("medium", story["jev_importance"], section="world"), story)
     check(rows[0]["magnitudes"] == {}, rows[0])
 
 
@@ -532,6 +532,36 @@ def test_high_significance_needs_structured_evidence_and_survives_only_non_routi
         weak = enforce_editorial_significance(story(**evidence), jev(0.01))
         check(weak["editorial_significance"] == "medium", weak)
         check(weak["significance_validation"]["status"] == "downgraded", weak)
+
+
+def test_continuing_world_high_ranks_below_new_and_decisive_world_news() -> None:
+    """Carter, 2026-11-18: another day of an ongoing war ranked with, and led over, decisive news."""
+    high = {**CANDIDATE, "editorial_significance": "high", "significance_evidence": {
+        "basis": "major_conflict_or_disaster", "affected_scope": "broad",
+        "impact": "Overnight strikes cut power to half a million people across the region.",
+    }}
+
+    def scored(section: str, answers: dict) -> dict:
+        stories, _ = score_attention(
+            [dict(high)], section=section, evidence=[_evidence(10)],
+            importance=[{"score": 70.0, "confidence": 0.7, "answers": answers}],
+            measured_sources=ALL_SOURCES, references=DEFAULT_REFERENCE, window_end=WINDOW_END)
+        return stories[0]
+
+    update = scored("world", {"continuing": 0.9, "decisive": 0.1})
+    decided = scored("world", {"continuing": 0.9, "decisive": 0.9})
+    new = scored("world", {"continuing": 0.2, "decisive": 0.1})
+    unanswered = scored("world", {})
+    check(update["editorial_significance"] == "high", update)
+    check(update["priority_score"] < decided["priority_score"], (update, decided))
+    check(decided["priority_score"] == new["priority_score"] == unanswered["priority_score"],
+          (decided, new, unanswered))
+    check("ongoing situation" in update["priority_explanation"], update["priority_explanation"])
+    check("ongoing situation" not in decided["priority_explanation"], decided["priority_explanation"])
+    # Outside World the same answers change nothing.
+    tech_update = scored("ai-tech", {"continuing": 0.9, "decisive": 0.1})
+    tech_decided = scored("ai-tech", {"continuing": 0.9, "decisive": 0.9})
+    check(tech_update["priority_score"] == tech_decided["priority_score"], (tech_update, tech_decided))
 
 
 def test_priority_ties_use_evidence_not_discovery_order() -> None:
@@ -617,6 +647,7 @@ def main() -> None:
         test_priority_blends_importance_with_confident_attention_only,
         test_attention_never_rewrites_editorial_significance,
         test_high_significance_needs_structured_evidence_and_survives_only_non_routine_news,
+        test_continuing_world_high_ranks_below_new_and_decisive_world_news,
         test_priority_ties_use_evidence_not_discovery_order,
         test_event_term_fallback_and_legacy_migration,
         test_canonicalize_publisher_url_maps_sample_hosts_only,

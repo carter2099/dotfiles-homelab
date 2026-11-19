@@ -1860,7 +1860,9 @@ def test_attention_phase_persists_durable_observations() -> None:
         check(story["attention"] == observation["attention"], (story, observation))
         check(
             story["priority_score"]
-            == attention.blended_priority("medium", story["jev_importance"], observation["attention"]),
+            == attention.blended_priority(
+                "medium", story["jev_importance"], observation["attention"], section="ai-tech",
+            ),
             (story, observation),
         )
         check(observation["attention"]["evidence"]["measures"]["gkg_domains"] == 3, observation)
@@ -1921,7 +1923,11 @@ def test_attention_phase_leaves_out_failed_sources_and_unadjudicated_stories() -
     quasar, nova = scored
     check(quasar["attention"]["status"] == "unavailable", quasar)
     check(quasar["attention"]["evidence"]["unavailable_reason"] == "adjudication_failed", quasar)
-    check(quasar["priority_score"] == attention.importance_score("medium", quasar["jev_importance"]), quasar)
+    check(
+        quasar["priority_score"]
+        == attention.importance_score("medium", quasar["jev_importance"], section="ai-tech"),
+        quasar,
+    )
     check(nova["attention"]["status"] == "no_matches", nova)
     check(durable["jev"]["status"] == "degraded" and durable["jev"]["unadjudicated_stories"] == 1, durable["jev"])
 

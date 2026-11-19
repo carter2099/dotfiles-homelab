@@ -662,6 +662,51 @@ def test_front_page_dedups_same_event_before_section_leads() -> None:
     )
 
 
+def test_front_page_handicaps_world_but_not_exceptional_news() -> None:
+    """World competes 8 points lower on the front page, fading out by priority 96.
+
+    2026-11-18: World led 36 of 55 editions, mostly with another day's development
+    in an ongoing war, while a war ending must still lead.
+    """
+    def story(slug: str, key: str, title: str, score: float) -> dict:
+        return {
+            "title": title,
+            "url": f"https://{slug}.example/{key}",
+            "summary": f"{title}.",
+            "editorial_significance": "high",
+            "priority_score": score,
+            "attention": {"digest_prominence": score, "confidence": 0.85},
+        }
+
+    def front_page(world: list[dict], tech: list[dict]):
+        return news._front_page_sections({"world": {"fresh": world}, "ai-tech": {"fresh": tech}})
+
+    lead, sections = front_page(
+        [story("world", "strike", "Drones strike a bridge overnight", 88.0),
+         story("world", "budget", "Parliament passes a budget", 70.0)],
+        [story("ai-tech", "model", "Lab releases a frontier model", 82.0),
+         story("ai-tech", "funding", "Startup raises a large round", 70.0)],
+    )
+    check(lead is not None and lead["url"] == "https://ai-tech.example/model", lead)
+    selected = {item["url"] for section in sections for item in section["stories"]}
+    check("https://ai-tech.example/funding" in selected, selected)
+    check("https://world.example/budget" not in selected, selected)
+    world = next(section for section in sections if section["slug"] == "world")["stories"][0]
+    check(world["priority_score"] == 88.0, f"stored priority changed: {world!r}")
+
+    lead, _ = front_page(
+        [story("world", "summit", "Leaders sign a trade pact", 92.0)],
+        [story("ai-tech", "chip", "Chipmaker unveils an accelerator", 89.0)],
+    )
+    check(lead is not None and lead["url"] == "https://ai-tech.example/chip", lead)
+
+    lead, _ = front_page(
+        [story("world", "peace", "Warring states sign a peace treaty", 96.0)],
+        [story("ai-tech", "chip", "Chipmaker unveils an accelerator", 95.0)],
+    )
+    check(lead is not None and lead["url"] == "https://world.example/peace", lead)
+
+
 def test_publisher_never_silently_uses_stale_or_out_of_window_content() -> None:
     """Invalid run state never falls back to old HTML; Fresh dates are rechecked."""
     issue_date = "2026-09-24"
@@ -881,6 +926,7 @@ def main() -> None:
         test_stateful_publication_requires_matching_archive_record,
         test_publications_frozen_after_mail_sent,
         test_front_page_dedups_same_event_before_section_leads,
+        test_front_page_handicaps_world_but_not_exceptional_news,
         test_tracked_assets_stay_within_byte_budgets,
         test_publisher_never_silently_uses_stale_or_out_of_window_content,
         test_legacy_ongoing_key_is_ignored,
