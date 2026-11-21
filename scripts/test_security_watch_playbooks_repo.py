@@ -16,8 +16,8 @@ from unittest import mock
 from security_watch import config, model, net, playbooks_repo
 from security_watch.model import Finding, Outcome, Package, Plan, Refusal
 from security_watch.playbooks_repo import (
-    RepoPrPlaybook, bump_go_toolchain, bump_golang_from, bump_pip_pin, escape_module_path,
-    is_go_pseudo_version, refresh_arg, resolve_go_tag,
+    RepoPrPlaybook, bump_base_digest, bump_go_toolchain, bump_golang_from, bump_pip_pin, escape_module_path,
+    is_go_pseudo_version, refresh_arg, resolve_go_tag, runtime_base,
 )
 
 NOW = datetime(2026, 11, 3, 12, 0, tzinfo=timezone.utc)
@@ -301,10 +301,10 @@ class PlanTests(TempHomeTestCase):
     def test_refuses_an_edit_the_component_does_not_allow(self):
         run = FakeRun()
         result = RepoPrPlaybook().plan(
-            [finding("beatz", "Debian:12", "brotli", "1.0.9-2", ["1.0.9-2+deb12u1"])], SPECS["beatz"], make_ctx(run))
+            [finding("beatz", "Go", "golang.org/x/net", "0.60.0", ["0.62.0"])], SPECS["beatz"], make_ctx(run))
         self.assertIsInstance(result, Refusal)
         self.assertTrue(result.alert)
-        self.assertIn("base-refresh", result.reason)
+        self.assertIn("needs edit go-module, not allowed for beatz", result.reason)
         self.assertEqual(run.calls, [])
 
     def test_plans_a_base_refresh_from_origin_main(self):
@@ -690,6 +690,134 @@ class SubsetAndDeployOnlyPlanTests(TempHomeTestCase):
         self.assertFalse(outcome.state["has_ci"])
         self.assertFalse(outcome.state["production_touched"])
         self.assertEqual(run.calls, [])
+
+
+DISTROLESS = "gcr.io/distroless/static-debian13:nonroot"
+PINNED_BEATZ_DOCKERFILE = BEATZ_DOCKERFILE.replace("FROM gcr.io/distroless/static-debian12:nonroot",
+                                                   f"FROM {DISTROLESS}@{OLD_DIGEST}")
+FIXED_TZDATA, OLD_TZDATA = "2026f-0+deb13u1", "2026b-0+deb12u1"
+
+
+class BaseDigestTests(TempHomeTestCase):
+    """beatz: distroless runtime, OS findings fixed by moving the pinned base digest."""
+
+    def plan(self, tzdata_by_digest, latest=NEW_DIGEST):
+        created = {}
+
+        def responder(argv, kw):
+            if "show" in argv:
+                return 0, PINNED_BEATZ_DOCKERFILE
+            if "rev-parse" in argv:
+                return 0, "mainsha1\n"
+            if "ls-tree" in argv:
+                return 0, ".github/workflows/ci.yml\n"
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return 0, "sha256:local\n"
+            if argv[:2] == ["docker", "create"]:
+                cid = f"cid{len(created)}"
+                created[cid] = argv[2].rsplit("@", 1)[1]
+                return 0, cid + "\n"
+            if argv[:2] == ["docker", "cp"]:
+                dest = Path(argv[-1])
+                dest.mkdir()
+                version = tzdata_by_digest[created[argv[3].split(":", 1)[0]]]
+                (dest / "tzdata").write_text(f"Package: tzdata\nVersion: {version}\n")
+                (dest / "tzdata.md5sums").write_text("x  /usr/share/zoneinfo/UTC\n")
+                return 0, ""
+            if "imagetools" in argv:
+                return 0, json.dumps(latest) + "\n"
+            return None
+
+        def querybatch(packages, *, fetch):
+            return {p: [("OSV-DLA-4867-1", None)] for p in packages if p.version == OLD_TZDATA}
+
+        self.run = FakeRun(responder)
+        group = [finding("beatz", "Debian:12", "tzdata", OLD_TZDATA, ["2026f-0+deb12u1"], group="DLA-4867-1")]
+        return RepoPrPlaybook(querybatch=querybatch).plan(group, SPECS["beatz"], make_ctx(self.run))
+
+    def test_runtime_base_reads_only_the_final_stage(self):
+        base = runtime_base(PINNED_BEATZ_DOCKERFILE)
+        self.assertEqual((base["image"], base["tag"], base["digest"]),
+                         ("gcr.io/distroless/static-debian13", "nonroot", OLD_DIGEST))
+        self.assertIsNone(runtime_base(BLOG_DOCKERFILE))              # final stage is `FROM base`
+        self.assertEqual(runtime_base(BEATZ_DOCKERFILE)["digest"], "")
+
+    def test_bump_rewrites_only_the_final_stage_digest(self):
+        out = bump_base_digest(PINNED_BEATZ_DOCKERFILE, NEW_DIGEST)
+        self.assertEqual(out, PINNED_BEATZ_DOCKERFILE.replace(OLD_DIGEST, NEW_DIGEST))
+        self.assertIsNone(bump_base_digest(PINNED_BEATZ_DOCKERFILE, OLD_DIGEST))
+        self.assertIsNone(bump_base_digest(BEATZ_DOCKERFILE, NEW_DIGEST))     # unpinned: never adds a pin
+        self.assertIsNone(bump_base_digest(PINNED_BEATZ_DOCKERFILE, "sha256:short"))
+
+    def test_newer_digest_that_clears_the_findings_plans_a_pr(self):
+        result = self.plan({OLD_DIGEST: OLD_TZDATA, NEW_DIGEST: FIXED_TZDATA})
+        self.assertIsInstance(result, Plan)
+        self.assertEqual(result.state["edit"], "base-digest")
+        self.assertEqual(result.state["params"], {"digest": NEW_DIGEST})
+        self.assertEqual(result.finding_keys, ["beatz|DLA-4867-1"])
+        self.assertIsNone(result.release_published)
+        self.assertEqual(len(self.run.find("docker", "rm")), 2)       # both checked images cleaned up
+
+    def test_pinned_digest_that_already_clears_is_deploy_only(self):
+        result = self.plan({OLD_DIGEST: FIXED_TZDATA})
+        self.assertIsInstance(result, Plan)
+        self.assertTrue(result.state["deploy_only"])
+        self.assertTrue(result.target.startswith("beatz: redeploy origin/main mainsha"))
+        self.assertFalse(self.run.find("imagetools"))
+
+    def test_no_newer_digest_is_an_alert_refusal(self):
+        result = self.plan({OLD_DIGEST: OLD_TZDATA}, latest=OLD_DIGEST)
+        self.assertIsInstance(result, Refusal)
+        self.assertTrue(result.alert)
+        self.assertIn(f"no newer {DISTROLESS} than the pinned digest", result.reason)
+        self.assertIn(f"tzdata {OLD_TZDATA}", result.reason)
+
+
+THRUST = "/usr/local/bundle/ruby/3.4.0/gems/thruster-0.1.27-x86_64-linux/exe/x86_64-linux/thrust"
+
+
+class GemGoModuleTests(TempHomeTestCase):
+    """blog: Go modules inside thrust move with the thruster gem (dependabot-webhook's pin)."""
+
+    def plan(self, compress_required):
+        lock = "GEM\n  remote: https://rubygems.org/\n  specs:\n    thruster (0.1.28)\n    thruster (0.1.28-x86_64-linux)\n"
+        go_mod = f"module github.com/basecamp/thruster\n\nrequire (\n\tgithub.com/klauspost/compress v{compress_required}\n)\n"
+
+        def responder(argv, kw):
+            if "show" in argv:
+                return (0, lock) if argv[-1] == "origin/main:Gemfile.lock" else (0, BLOG_DOCKERFILE)
+            if "rev-parse" in argv:
+                return 0, "mainsha1\n"
+            if "ls-tree" in argv:
+                return 0, ".github/workflows/ci.yml\n"
+            return None
+        self.fetched = []
+
+        def fetch(url, **kw):
+            self.fetched.append(url)
+            return net.Response(status=200, headers={}, body=go_mod.encode(), url=url)
+        compress = Finding(
+            key="blog|CVE-2026-116591", component_id="blog", group="CVE-2026-116591",
+            package=Package("Go", "github.com/klauspost/compress", "1.20.0", location=f"blog-web-1:{THRUST}"),
+            advisory_ids=["GO-2026-6865"], cves=["CVE-2026-116591"], fixed_versions=["1.20.2"], fix_available=True)
+        return RepoPrPlaybook().plan([compress], SPECS["blog"], make_ctx(FakeRun(responder), fetch))
+
+    def test_gem_version_on_main_that_requires_the_fix_is_deploy_only(self):
+        result = self.plan("1.20.4")
+        self.assertIsInstance(result, Plan)
+        self.assertTrue(result.state["deploy_only"])
+        self.assertEqual(result.target, "blog: redeploy origin/main mainsha (Gemfile.lock resolves thruster 0.1.28, "
+                                        "whose go.mod requires github.com/klauspost/compress v1.20.4)")
+        self.assertEqual(self.fetched, ["https://proxy.golang.org/github.com/basecamp/thruster/@v/v0.1.28.mod"])
+
+    def test_gem_version_still_requiring_the_affected_module_names_the_owner(self):
+        result = self.plan("1.20.0")
+        self.assertIsInstance(result, Refusal)
+        self.assertTrue(result.alert)
+        self.assertIn("comes from the thruster gem's go.mod (dependabot-webhook owns blog bundler updates)",
+                      result.reason)
+        self.assertIn("origin/main resolves thruster 0.1.28, whose go.mod requires "
+                      "github.com/klauspost/compress v1.20.0 (fixed in 1.20.2)", result.reason)
 
 
 class CommitCiVerdictTests(unittest.TestCase):

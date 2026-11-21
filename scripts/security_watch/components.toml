@@ -13,11 +13,16 @@
 #   repo       ~/dev/<repo> checkout for repo-backed components
 #   deploy     how repo-pr deploys after merge: "steward-app:<service>" (steward P1
 #              app_deploy) or "release:<script>" (run in ~/dev/<repo>)
-#   edits      deterministic repo edits repo-pr may make: base-refresh | go-builder |
-#              go-toolchain | go-module | pip-pin
+#   edits      deterministic repo edits repo-pr may make: base-refresh | base-digest |
+#              go-builder | go-toolchain | go-module | pip-pin
+#   distroless the container has no package manager: OS packages come from status.d, and
+#              repo-pr fixes them by moving the final stage's pinned base digest (base-digest)
 #   pin_owner  ecosystems another automation owns: never edited here; on a repo-pr component
 #              the fix is deployed (deploy-only) once origin/main's lockfile resolves it
 #              (RubyGems: Gemfile.lock), else refused with this reason
+#   gem_go_modules  gem -> Go module of a binary the image builds from that gem (the blog's
+#              thrust): its Go module findings are fixed by the gem bump (RubyGems pin owner),
+#              deployed once origin/main's gem version's go.mod requires the fixed version
 #   revision_cmd  argv printing the binary's 40-hex source commit, for Go binaries built
 #              without VCS stamping (-buildvcs=false); inventory uses it as vcs_revision
 #   name       what Carter calls the service (plus its public hostname), used in emails
@@ -111,6 +116,9 @@ untrusted_input = "Public web traffic to Rails/Puma behind Thruster; session coo
 reach_host_paths = ["~/blog/blog/app", "~/blog/blog/config", "~/blog/blog/Gemfile.lock", "~/blog/blog/Dockerfile"]
 [component.pin_owner]
 RubyGems = "dependabot-webhook owns blog bundler updates"
+# The Dockerfile rebuilds thrust at the Gemfile.lock thruster version: its Go modules move with the gem.
+[component.gem_go_modules]
+thruster = "github.com/basecamp/thruster"
 
 [[component]]
 id = "beatz"
@@ -126,9 +134,9 @@ lock = "app-beatz"
 repo = "beatz"
 deploy = "release:release.sh"
 dockerfile = "Dockerfile"
-edits = ["go-builder"]
+edits = ["go-builder", "base-digest"]
 health = ["http://127.0.0.1:30142/healthz"]
-description = "Beats music player (Go static binary on distroless)"
+description = "Beats music player (Go static binary on digest-pinned distroless Debian)"
 untrusted_input = "Public GET/HEAD and Range requests for audio; POST /api/plays JSON"
 reach_host_paths = ["~/dev/beatz"]
 
@@ -178,7 +186,8 @@ lock = "news"
 compose = "~/news/docker-compose.yml"
 up = ["bash", "~/news/up.sh"]
 health = ["http://127.0.0.1:30144/healthz"]
-description = "Daily News static site (upstream nginx alpine image pinned by tag@digest)"
+description = "Daily News static site (local derived image: digest-pinned upstream nginx alpine plus an Alpine security-update layer)"
+note = "deployed image is carter-news-local:current, built by ~/news/up.sh from ~/news/Dockerfile: the upstream nginx:<tag>@sha256 pinned as compose build arg NGINX_BASE plus `apk upgrade` keyed by SECURITY_REFRESH; compose-digest bumps the pin to a newer same-minor patch tag past the release age limit and otherwise rebuilds that layer"
 untrusted_input = "Public GET of static files only"
 
 [[component]]

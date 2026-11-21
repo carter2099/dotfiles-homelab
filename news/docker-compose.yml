@@ -2,7 +2,15 @@ name: carter-news
 
 services:
   web:
-    image: nginx:1.31.8-alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11
+    # Local derived build (Dockerfile): the pinned upstream nginx image below, which
+    # security-watch compose-digest bumps, plus an Alpine security-update layer.
+    # SECURITY_REFRESH is set by up.sh; a new value rebuilds that layer.
+    build:
+      context: .
+      args:
+        NGINX_BASE: nginx:1.31.8-alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11
+        SECURITY_REFRESH: ${SECURITY_REFRESH:-0}
+    image: carter-news-local:current
     container_name: carter-news
     restart: unless-stopped
     user: "1000:1000"

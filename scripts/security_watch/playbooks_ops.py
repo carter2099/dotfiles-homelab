@@ -10,7 +10,7 @@ Each playbook fixes one kind of component through its existing owner:
     steward-herdr       steward P1 herdr self-update
     steward-toolchain   steward P1 same-line toolchain update
     release-rebuild     repo release script for host Go binaries (Go stdlib fixes)
-    compose-digest      news compose image tag@digest bump (no other owner)
+    compose-digest      news: upstream base tag@digest bump plus an Alpine refresh of the derived image
 
 ``plan()`` never mutates production (metadata fetches and read-only git/dpkg/docker
 probes; apt-security may refresh the apt lists under the host lock when they are stale).
@@ -33,6 +33,7 @@ import re
 import shlex
 import shutil
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -302,14 +303,45 @@ def _listing_kind(ecosystem: str) -> str:
     return "pypi" if ecosystem == "PyPI" else ""
 
 
+def _status_d_listing(ctx, image: str) -> dict[str, list[str]] | None:
+    """Source packages of a distroless image, which has no dpkg-query: its
+    /var/lib/dpkg/status.d copied out of a created, never started container."""
+    from security_watch import inventory
+    created = _run(ctx, ["docker", "create", image, "/nonexistent"], timeout=120)
+    cid = (created.stdout or "").strip()
+    if created.returncode != 0 or not cid:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="security-watch-status-d-") as tmp:
+            status_d = inventory.extract_container_file(
+                cid, "/var/lib/dpkg/status.d", Path(tmp),
+                run=lambda argv, timeout=120: _run(ctx, argv, timeout=timeout))
+            if status_d is None or not status_d.is_dir():
+                return None
+            texts = [p.read_text(errors="replace") for p in sorted(status_d.iterdir())
+                     if p.is_file() and not p.name.endswith(".md5sums")]
+    finally:
+        _run(ctx, ["docker", "rm", cid], timeout=60)
+    found: dict[str, set[str]] = {}
+    for pkg in inventory.parse_status_d(texts, "Debian"):
+        found.setdefault(pkg.name, set()).add(pkg.version)
+    return {name: sorted(versions) for name, versions in found.items()} or None
+
+
 def candidate_listing(ctx, image: str, kind: str, spec: config.ComponentSpec,
                       cache: dict | None = None) -> dict[str, list[str]] | None:
     """``{package: [versions]}`` of one package manager inside ``image`` (dpkg/apk keyed by
     source/origin package, PyPI by normalized name), or None when it cannot be listed.
     ``cache`` keeps one listing per (image, kind), so a candidate costs one `docker run`
-    per ecosystem however many findings it is checked for."""
+    per ecosystem however many findings it is checked for.  A ``distroless`` component's
+    dpkg listing is read from status.d instead."""
     if cache is not None and (image, kind) in cache:
         return cache[(image, kind)]
+    if kind == "dpkg" and spec.get("distroless"):
+        listing = _status_d_listing(ctx, image)
+        if cache is not None:
+            cache[(image, kind)] = listing
+        return listing
     base = ["docker", "run", "--rm", "--network", "none", "--entrypoint"]
     if kind == "dpkg":
         argv = [*base, "dpkg-query", image, "-W", "-f", r"${source:Package}\t${source:Version}\n"]
@@ -542,6 +574,88 @@ _COMPOSE_IMAGE = re.compile(r"^[ \t]*image:[ \t]*(?P<ref>[A-Za-z0-9._/-]+:[A-Za-
 BUILD_TIMEOUT = 1800
 
 
+def _apply_derived_refresh(pb: _Base, plan: Plan, spec, ctx, track: _Track, *, base: str, base_arg: str,
+                           up: list[str], pin: tuple[str, str] | None = None) -> Outcome:
+    """Rebuild a local derived image (``base`` plus a package-upgrade layer keyed by
+    SECURITY_REFRESH) and switch the service to it.
+
+    The candidate ``plan.state['candidate']`` is built and verified against OSV before
+    anything changes.  Then the running image is tagged ``rollback``, the compose base pin
+    is rewritten when ``pin`` = (old line, new line), and ``up`` runs with the new stamp.
+    On failure the compose file is restored, the rollback image is retagged as ``local``
+    and the service is recreated without a build.
+    """
+    st = plan.state
+    compose = Path(st["compose"])
+    workdir = str(compose.parent)
+    findings = [ctx.findings[k] for k in plan.finding_keys if k in ctx.findings]
+    if not findings:
+        return _outcome("refused", "the plan's findings are no longer open", touched=False)
+    original = compose.read_text()
+    updated = original
+    if pin:
+        lines = original.splitlines(keepends=True)
+        index = next((i for i, line in enumerate(lines) if line.rstrip("\r\n") == pin[0]), None)
+        if index is None:
+            return _outcome("refused", f"{compose} changed since the plan; base pin line not found",
+                            touched=False)
+        lines[index] = pin[1] + lines[index][len(lines[index].rstrip("\r\n")):]
+        updated = "".join(lines)
+    stamp, candidate = st["refresh"], st["candidate"]
+    proc = _run_group(ctx, ["docker", "build", "--build-arg", f"{base_arg}={base}",
+                            "--build-arg", f"SECURITY_REFRESH={stamp}", "-t", candidate, workdir],
+                      timeout=BUILD_TIMEOUT)
+    if proc.returncode != 0:
+        return _outcome("refused", f"candidate build failed (exit {proc.returncode}): {_tail(proc, 300)}",
+                        touched=False)
+    try:
+        check = verify_candidate(ctx, candidate, findings, spec, querybatch=pb.querybatch)
+        refused = check.refused()
+        if refused:
+            return refused
+        proc = _run(ctx, ["docker", "inspect", "--format", "{{.Image}}", st["container"]], timeout=60)
+        running = (proc.stdout or "").strip()
+        if proc.returncode != 0 or not running:
+            return _outcome("refused", f"cannot find the running image of {st['container']}: {_tail(proc, 200)}",
+                            touched=False)
+        proc = _run(ctx, ["docker", "tag", running, st["rollback"]], timeout=60)
+        if proc.returncode != 0:
+            return _outcome("refused", f"cannot tag the rollback image {st['rollback']}: {_tail(proc, 200)}",
+                            touched=False)
+        track.touched, track.undo = True, plan.undo
+        if updated != original:
+            _write_text_atomic(compose, updated)
+        proc = _run_group(ctx, up, timeout=BUILD_TIMEOUT, cwd=workdir,
+                          env={**os.environ, "SECURITY_REFRESH": stamp})
+        if proc.returncode == 0:
+            healthy, health = pb.health(spec)
+            if healthy:
+                return check.stamp(_outcome(
+                    "done", f"rebuilt {st['local']} with SECURITY_REFRESH={stamp} on {base}; healthy ({health})",
+                    touched=True, undo=plan.undo))
+            reason = f"health failed: {health}"
+        else:
+            reason = f"{' '.join(up)} exited {proc.returncode}: {_tail(proc, 300)}"
+        if updated != original:
+            _write_text_atomic(compose, original)
+        tagged = _run(ctx, ["docker", "tag", st["rollback"], st["local"]], timeout=60)
+        again = _run_group(ctx, ["docker", "compose", "-f", str(compose), "up", "-d", "--no-build",
+                                 "--force-recreate"], timeout=600, cwd=workdir)
+        if tagged.returncode != 0 or again.returncode != 0:
+            healthy, health = False, (f"rollback retag exited {tagged.returncode}, "
+                                      f"up exited {again.returncode}: {_tail(again, 200)}")
+        else:
+            healthy, health = pb.health(spec)
+        restored = f"restored {st['rollback']}" + (" and the compose base pin" if updated != original else "")
+        if healthy:
+            return check.stamp(_outcome("rolled_back", f"{reason}; {restored}; healthy ({health})",
+                                        touched=True, undo=plan.undo))
+        return check.stamp(_outcome("failed", f"{reason}; {restored} but still unhealthy: {health}",
+                                    touched=True, undo=plan.undo))
+    finally:
+        _run(ctx, ["docker", "image", "rm", candidate], timeout=120)
+
+
 class StewardFreshRSS(_Base):
     """Upstream tag bump through the steward; without a newer tag, a Debian refresh.
 
@@ -632,63 +746,12 @@ class StewardFreshRSS(_Base):
             touched_on_failure=bool(packet.get("reverted_to") or packet.get("rollback_error"))))
 
     def _apply_refresh(self, plan, spec, ctx, track):
-        st = plan.state
-        compose = Path(st["compose"])
-        workdir = str(compose.parent)
-        findings = [ctx.findings[k] for k in plan.finding_keys if k in ctx.findings]
-        if not findings:
-            return _outcome("refused", "the plan's findings are no longer open", touched=False)
+        compose = Path(plan.state["compose"])
         match = self.updates()._FRESHRSS_PIN_RE.search(compose.read_text())
         if not match:
             return _outcome("refused", f"could not parse the freshrss/freshrss pin in {compose}", touched=False)
-        stamp, candidate = st["refresh"], st["candidate"]
-        proc = _run_group(ctx, ["docker", "build", "--build-arg", f"FRESHRSS_BASE={match.group(0)}",
-                                "--build-arg", f"SECURITY_REFRESH={stamp}", "-t", candidate, workdir],
-                          timeout=BUILD_TIMEOUT)
-        if proc.returncode != 0:
-            return _outcome("refused", f"candidate build failed (exit {proc.returncode}): {_tail(proc, 300)}",
-                            touched=False)
-        try:
-            check = verify_candidate(ctx, candidate, findings, spec, querybatch=self.querybatch)
-            refused = check.refused()
-            if refused:
-                return refused
-            proc = _run(ctx, ["docker", "inspect", "--format", "{{.Image}}", st["container"]], timeout=60)
-            running = (proc.stdout or "").strip()
-            if proc.returncode != 0 or not running:
-                return _outcome("refused", f"cannot find the running image of {st['container']}: {_tail(proc, 200)}",
-                                touched=False)
-            proc = _run(ctx, ["docker", "tag", running, st["rollback"]], timeout=60)
-            if proc.returncode != 0:
-                return _outcome("refused", f"cannot tag the rollback image {st['rollback']}: {_tail(proc, 200)}",
-                                touched=False)
-            track.touched, track.undo = True, plan.undo
-            proc = _run_group(ctx, [st["up"]], timeout=BUILD_TIMEOUT, cwd=workdir,
-                              env={**os.environ, "SECURITY_REFRESH": stamp})
-            if proc.returncode == 0:
-                healthy, health = self.health(spec)
-                if healthy:
-                    return check.stamp(_outcome(
-                        "done", f"rebuilt {st['local']} with SECURITY_REFRESH={stamp} on "
-                                f"{match.group(0)}; healthy ({health})", touched=True, undo=plan.undo))
-                reason = f"health failed: {health}"
-            else:
-                reason = f"{st['up']} exited {proc.returncode}: {_tail(proc, 300)}"
-            tagged = _run(ctx, ["docker", "tag", st["rollback"], st["local"]], timeout=60)
-            again = _run_group(ctx, ["docker", "compose", "-f", str(compose), "up", "-d", "--no-build",
-                                     "--force-recreate"], timeout=600, cwd=workdir)
-            if tagged.returncode != 0 or again.returncode != 0:
-                healthy, health = False, (f"rollback retag exited {tagged.returncode}, "
-                                          f"up exited {again.returncode}: {_tail(again, 200)}")
-            else:
-                healthy, health = self.health(spec)
-            if healthy:
-                return check.stamp(_outcome("rolled_back", f"{reason}; restored {st['rollback']}; "
-                                                           f"healthy ({health})", touched=True, undo=plan.undo))
-            return check.stamp(_outcome("failed", f"{reason}; restored {st['rollback']} but still unhealthy: "
-                                                  f"{health}", touched=True, undo=plan.undo))
-        finally:
-            _run(ctx, ["docker", "image", "rm", candidate], timeout=120)
+        return _apply_derived_refresh(self, plan, spec, ctx, track, base=match.group(0),
+                                      base_arg="FRESHRSS_BASE", up=[plan.state["up"]])
 
 
 class StewardOpenWebUI(_Base):
@@ -1586,7 +1649,53 @@ def _write_text_atomic(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+_BASE_PIN = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<arg>[A-Z][A-Z0-9_]*_BASE):[ \t]*"
+    r"(?P<ref>(?P<repo>[A-Za-z0-9._/-]+):(?P<tag>[A-Za-z0-9._-]+)@(?P<digest>sha256:[0-9a-f]{64}))[ \t]*$",
+    re.M,
+)
+
+
+def _newer_upstream(ctx, hub: str, tag: str, digest: str) -> dict | None:
+    """Docker Hub tag item to move to: the newest same-minor patch tag above ``tag``
+    (1.31.9-alpine over 1.31.8-alpine), else ``tag`` itself when its digest moved, else None.
+
+    The patch tag wins over a rebuilt old tag: upstream stops rebuilding a patch tag once
+    the next one ships (2026-11-20: 1.31.8-alpine was rebuilt without the fixes 1.31.9 had)."""
+    base = f"https://hub.docker.com/v2/repositories/{hub}/tags"
+    version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(.*)", tag)
+    if version:
+        major, minor, patch, suffix = version.groups()
+        pattern = re.compile(rf"{major}\.{minor}\.(\d+){re.escape(suffix)}")
+        best: tuple[int, dict] | None = None
+        url: str | None = f"{base}?name={major}.{minor}.&page_size=100"
+        pages = 0
+        while url and pages < 5:
+            page = ctx.fetch(url, timeout=20).json()
+            pages += 1
+            for item in page.get("results", []):
+                hit = pattern.fullmatch(str(item.get("name", "")))
+                if hit and item.get("digest") and int(hit.group(1)) > int(patch):
+                    if best is None or int(hit.group(1)) > best[0]:
+                        best = (int(hit.group(1)), item)
+            url = page.get("next")
+        if best is not None:
+            return best[1]
+    info = ctx.fetch(f"{base}/{tag}", timeout=20).json()
+    if info.get("digest") and info["digest"] != digest:
+        return {"name": tag, "digest": info["digest"], "last_updated": info.get("last_updated")}
+    return None
+
+
 class ComposeDigest(_Base):
+    """A compose service on a pinned upstream Docker Hub image.
+
+    Plain: ``image: <repo>:<tag>@sha256:<digest>`` moves to the newest same-minor patch tag
+    (or the same tag's new digest).  Derived build (``<NAME>_BASE: <repo>:<tag>@sha256:..``
+    build arg plus one local ``image:`` tag, like ~/news): the local image is rebuilt with a
+    new SECURITY_REFRESH, which re-runs its package-upgrade layer, on the newer upstream
+    base when one is past the release age limit and otherwise on the current base.
+    """
     id = "compose-digest"
 
     def plan(self, findings, spec, ctx):
@@ -1595,49 +1704,28 @@ class ComposeDigest(_Base):
             text = compose.read_text()
         except OSError as exc:
             return self.refusal(spec.id, f"cannot read {compose}: {exc}")
-        matches = list(_IMAGE_LINE.finditer(text))
+        pins = list(_BASE_PIN.finditer(text))
+        derived = bool(pins)
+        matches = pins if derived else list(_IMAGE_LINE.finditer(text))
         if len(matches) != 1:
-            return self.refusal(spec.id, f"expected exactly one `image: <repo>:<tag>@sha256:<digest>` line in "
-                                         f"{compose}, found {len(matches)}")
+            what = ("`<NAME>_BASE: <repo>:<tag>@sha256:<digest>` build arg" if derived
+                    else "`image: <repo>:<tag>@sha256:<digest>` line")
+            return self.refusal(spec.id, f"expected exactly one {what} in {compose}, found {len(matches)}")
         match = matches[0]
         repo, tag, digest = match.group("repo"), match.group("tag"), match.group("digest")
         hub = _hub_repo(repo)
         if not hub:
             return self.refusal(spec.id, f"{repo} is not a Docker Hub image")
-        base = f"https://hub.docker.com/v2/repositories/{hub}/tags"
         try:
-            info = ctx.fetch(f"{base}/{tag}", timeout=20).json()
+            newer = _newer_upstream(ctx, hub, tag, digest)
         except Exception as exc:
             return self.refusal(spec.id, f"Docker Hub tag lookup failed: {exc}", alert=False)
-        new_tag, new_digest, published = "", "", None
-        if info.get("digest") and info["digest"] != digest:
-            new_tag, new_digest, published = tag, info["digest"], info.get("last_updated")
-        else:
-            version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(.*)", tag)
-            if not version:
-                return self.refusal(spec.id, f"{repo}:{tag} is unchanged and not a <major>.<minor>.<patch> tag")
-            major, minor, patch, suffix = version.groups()
-            pattern = re.compile(rf"{major}\.{minor}\.(\d+){re.escape(suffix)}")
-            best: tuple[int, dict] | None = None
-            url: str | None = f"{base}?name={major}.{minor}.&page_size=100"
-            pages = 0
-            try:
-                while url and pages < 5:
-                    page = ctx.fetch(url, timeout=20).json()
-                    pages += 1
-                    for item in page.get("results", []):
-                        hit = pattern.fullmatch(str(item.get("name", "")))
-                        if hit and item.get("digest") and int(hit.group(1)) > int(patch):
-                            if best is None or int(hit.group(1)) > best[0]:
-                                best = (int(hit.group(1)), item)
-                    url = page.get("next")
-            except Exception as exc:
-                return self.refusal(spec.id, f"Docker Hub tag list failed: {exc}", alert=False)
-            if best is None:
-                return self.refusal(spec.id, (
-                    f"no newer {repo} {major}.{minor}.x{suffix} image than {tag} (digest unchanged); "
-                    f"it still ships {_pkgs_text(findings)}"))
-            new_tag, new_digest, published = best[1]["name"], best[1]["digest"], best[1].get("last_updated")
+        if derived:
+            return self._derived_plan(findings, spec, ctx, compose, text, match, newer)
+        if newer is None:
+            return self.refusal(spec.id, (f"no newer {repo} image than {tag} (same-minor patch tag or new "
+                                          f"digest); it still ships {_pkgs_text(findings)}"))
+        new_tag, new_digest, published = newer["name"], newer["digest"], newer.get("last_updated")
         image = f"{repo}:{new_tag}@{new_digest}"
         old_line = match.group(0)
         new_line = f"{match.group('indent')}image: {image}"
@@ -1655,7 +1743,64 @@ class ComposeDigest(_Base):
             state={"image": image, "compose": str(compose), "old_line": old_line, "new_line": new_line},
         )
 
+    def _derived_plan(self, findings, spec, ctx, compose: Path, text: str, match, newer: dict | None):
+        images = [m.group("ref") for m in _COMPOSE_IMAGE.finditer(text)]
+        if len(images) != 1:
+            return self.refusal(spec.id, f"{compose} pins {match['arg']} but has {len(images)} local "
+                                         "`image:` tags; a derived build needs exactly one")
+        local, current = images[0], match.group("ref")
+        base, base_tag, published, keep = current, match["tag"], None, ""
+        if newer is not None:
+            candidate_base = f"{match['repo']}:{newer['name']}@{newer['digest']}"
+            age = _tag_age(newer, ctx.now)
+            if age is not None and age >= timedelta(hours=ctx.policy.release_min_age_hours):
+                base, base_tag, published = candidate_base, newer["name"], newer.get("last_updated")
+            else:
+                # The upstream bump waits out the release age rule; the package layer does not.
+                keep = (f"{match['repo']}:{newer['name']} is younger than "
+                        f"{ctx.policy.release_min_age_hours} h")
+        pin = (match.group(0), f"{match['indent']}{match['arg']}: {base}") if base != current else None
+        stamp = ctx.now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        workdir = compose.parent
+        local_repo = local.rsplit(":", 1)[0]
+        rollback, candidate = f"{local_repo}:rollback-{stamp}", f"{local_repo}:candidate-{stamp}"
+        up = _expand_argv(spec.get("up", []))
+        recreate = "docker compose up -d --no-build --force-recreate"
+        undo = f"docker tag {rollback} {local}"
+        if pin:
+            undo += f" && sed -i {shlex.quote('s|' + base + '|' + current + '|')} {shlex.quote(str(compose))}"
+        undo += f" && cd {shlex.quote(str(workdir))} && {recreate}"
+        distros = "/".join(sorted({f.package.ecosystem.split(":", 1)[0] for f in findings}))
+        pkgs = ", ".join(dict.fromkeys(f.package.name for f in findings))
+        base_step = (f"pin {match['arg']}: {base} in {compose}" if pin
+                     else f"keep {match['arg']}: {current}" + (f" ({keep})" if keep else ""))
+        return Plan(
+            playbook=self.id, component_id=spec.id, finding_keys=[f.key for f in findings],
+            target=f"{spec.id} derived image refresh on {match['repo']}:{base_tag} "
+                   f"({distros} security updates for {pkgs})",
+            lock_keys=[spec.lock],
+            steps=[f"docker build {candidate} from {base} with SECURITY_REFRESH={stamp}",
+                   _verify_step(findings, candidate),
+                   f"tag the running image as {rollback}",
+                   base_step,
+                   f"SECURITY_REFRESH={stamp} {' '.join(up)} under deploy lock {spec.lock}",
+                   "health check " + (", ".join(spec.health) or "(none)"),
+                   f"on failure restore the compose file, retag {rollback} as {local} and {recreate}",
+                   "rescan the component"],
+            # Without a base bump the fixes are distro archive packages (like repo-pr base-refresh),
+            # not a newly released upstream artifact: exempt from the 72 h / two-source rule.
+            undo=undo, release_published=_iso(published), fixed_version=_fix_hint(_most_urgent(findings)),
+            state={"refresh": stamp, "base": base, "base_arg": match["arg"], "current": current,
+                   "pin": list(pin) if pin else None, "local": local, "candidate": candidate,
+                   "rollback": rollback, "compose": str(compose), "up": up,
+                   "container": str(spec.get("container", "") or spec.id)},
+        )
+
     def _apply(self, plan, spec, ctx, track):
+        st = plan.state
+        if st.get("refresh"):
+            return _apply_derived_refresh(self, plan, spec, ctx, track, base=st["base"], base_arg=st["base_arg"],
+                                          up=list(st["up"]), pin=tuple(st["pin"]) if st.get("pin") else None)
         check = self.pull_and_verify(ctx, plan.state["image"], plan, spec)
         refused = check.refused()
         if refused:

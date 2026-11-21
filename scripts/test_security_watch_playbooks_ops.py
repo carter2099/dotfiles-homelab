@@ -883,6 +883,102 @@ class ComposeDigestTests(TempHomeCase):
         self.assertFalse(outcome.state.get("alert"))
         self.assertEqual(self.ups, [])
 
+    def test_newer_patch_tag_wins_over_a_rebuilt_old_tag(self):
+        # 2026-11-20: 1.31.8-alpine was rebuilt (new digest) without the fixes 1.31.9 shipped.
+        base = "https://hub.docker.com/v2/repositories/library/nginx/tags"
+        self.fetch.routes[f"{base}/1.31.7-alpine"] = {"name": "1.31.7-alpine", "digest": digest("c")}
+        _, _, plan = self.make()
+        self.assertEqual(plan.state["image"], "nginx:1.31.8-alpine@" + digest("b"))
+
+
+class DerivedComposeDigestTests(TempHomeCase):
+    """~/news as a local derived build: NGINX_BASE pin plus an apk upgrade layer."""
+    STAMP = "20261103T120000Z"
+
+    def setUp(self):
+        super().setUp()
+        self.compose = self.home / "news" / "docker-compose.yml"
+        self.compose.parent.mkdir()
+        self.current = f"nginx:1.31.8-alpine@{digest('a')}"
+        self.text = ("name: carter-news\n\nservices:\n  web:\n    build:\n      context: .\n      args:\n"
+                     f"        NGINX_BASE: {self.current}\n"
+                     "        SECURITY_REFRESH: ${SECURITY_REFRESH:-0}\n"
+                     "    image: carter-news-local:current\n    container_name: carter-news\n")
+        self.compose.write_text(self.text)
+        self.spec = spec(id="news", owner="compose-digest", lock="news", container="carter-news",
+                         compose="~/news/docker-compose.yml", up=["bash", "~/news/up.sh"],
+                         health=["http://127.0.0.1:30144/healthz"])
+        self.finding = finding("news", "Alpine:v3.24", "openssl", "3.5.9-r0", ["3.5.9-r1"],
+                               ids=("ALPINE-CVE-2026-107496",), group="CVE-2026-107496")
+        self.run = EnvRun()
+        self.run.on(["docker", "run"], (0, "libssl3-3.5.9-r1 x86_64 {openssl} (Apache-2.0) [installed]\n"))
+        self.run.on(["docker", "inspect"], (0, digest("e") + "\n"))
+        self.ups = []
+        self.run.on(["bash", str(self.home / "news/up.sh")],
+                    lambda argv: self.ups.append(self.compose.read_text()) or (0, "up"))
+
+    def make(self, patch_updated):
+        base = "https://hub.docker.com/v2/repositories/library/nginx/tags"
+        fetch = FakeFetch({f"{base}?name=1.31.&page_size=100": {"next": None, "results": [
+            {"name": "1.31.9-alpine", "digest": digest("b"), "last_updated": patch_updated},
+            {"name": "1.31.8-alpine", "digest": digest("c"), "last_updated": "2026-11-02T13:51:27Z"}]}})
+        pb = self.pb(playbooks_ops.ComposeDigest, querybatch=lambda packages, fetch: {})
+        ctx = make_ctx(run=self.run, fetch=fetch, specs={"news": self.spec}, findings=[self.finding])
+        plan = pb.plan([self.finding], self.spec, ctx)
+        self.assertIsInstance(plan, Plan)
+        return pb, ctx, plan
+
+    def test_young_upstream_patch_refreshes_the_layer_on_the_current_base(self):
+        pb, ctx, plan = self.make("2026-11-02T22:51:16Z")
+        self.assertEqual(plan.state["base"], self.current)
+        self.assertIsNone(plan.state["pin"])
+        self.assertIsNone(plan.release_published)
+        self.assertIn("nginx:1.31.9-alpine is younger than 72 h", " ".join(plan.steps))
+        pb.probe = lambda url, host: 200
+        outcome = pb.apply(plan, ctx)
+        self.assertEqual(outcome.status, "done", outcome.detail)
+        self.assertEqual(outcome.state["verified_keys"], [self.finding.key])
+        [build] = self.run.called(["docker", "build"])
+        self.assertEqual(build, ["docker", "build", "--build-arg", f"NGINX_BASE={self.current}",
+                                 "--build-arg", f"SECURITY_REFRESH={self.STAMP}",
+                                 "-t", f"carter-news-local:candidate-{self.STAMP}", str(self.compose.parent)])
+        self.assertEqual(self.run.called(["docker", "tag"]),
+                         [["docker", "tag", digest("e"), f"carter-news-local:rollback-{self.STAMP}"]])
+        self.assertEqual(self.run.envs["bash"]["SECURITY_REFRESH"], self.STAMP)
+        self.assertEqual(self.compose.read_text(), self.text)
+        self.assertTrue(self.run.called(["docker", "image", "rm", f"carter-news-local:candidate-{self.STAMP}"]))
+
+    def test_mature_upstream_patch_moves_the_pin_and_restores_it_on_failure(self):
+        new = f"nginx:1.31.9-alpine@{digest('b')}"
+        pb, ctx, plan = self.make("2026-10-30T22:51:16Z")
+        self.assertEqual(plan.state["base"], new)
+        self.assertEqual(plan.release_published, "2026-10-30T22:51:16+00:00")
+        pb.probe = lambda url, host: 200
+        outcome = pb.apply(plan, ctx)
+        self.assertEqual(outcome.status, "done", outcome.detail)
+        self.assertEqual(self.ups, [self.text.replace(self.current, new)])
+        self.assertEqual(self.compose.read_text(), self.text.replace(self.current, new))
+
+        self.compose.write_text(self.text)
+        self.ups.clear()
+        pb, ctx, plan = self.make("2026-10-30T22:51:16Z")
+        pb.probe = lambda url, host: 503 if new in self.compose.read_text() else 200
+        outcome = pb.apply(plan, ctx)
+        self.assertEqual(outcome.status, "rolled_back", outcome.detail)
+        self.assertEqual(self.compose.read_text(), self.text)
+        self.assertIn(["docker", "tag", f"carter-news-local:rollback-{self.STAMP}", "carter-news-local:current"],
+                      self.run.called(["docker", "tag"]))
+        self.assertTrue(self.run.called(["docker", "compose", "-f", str(self.compose), "up", "-d", "--no-build"]))
+
+    def test_candidate_that_clears_nothing_changes_nothing(self):
+        pb, ctx, plan = self.make("2026-10-30T22:51:16Z")
+        pb.querybatch = lambda packages, fetch: {p: [("ALPINE-CVE-2026-107496", None)] for p in packages}
+        outcome = pb.apply(plan, ctx)
+        self.assertEqual(outcome.status, "refused")
+        self.assertIs(outcome.state["production_touched"], False)
+        self.assertEqual((self.ups, self.compose.read_text()), ([], self.text))
+        self.assertFalse(self.run.called(["docker", "tag"]))
+
 
 class CandidateVerificationTests(unittest.TestCase):
     def test_candidate_listing_runs_once_per_ecosystem(self):
@@ -899,6 +995,24 @@ class CandidateVerificationTests(unittest.TestCase):
                                                querybatch=lambda packages, fetch: {})
         self.assertEqual(check.keys, [f.key for f in findings])
         self.assertEqual(len(run.called(["docker", "run"])), 2)
+
+    def test_distroless_dpkg_listing_reads_status_d(self):
+        run = FakeRun()
+        run.on(["docker", "create"], (0, "cid1\n"))
+
+        def copy(argv):
+            dest = Path(argv[-1])
+            dest.mkdir()
+            (dest / "tzdata").write_text("Package: tzdata\nVersion: 2026f-0+deb13u1\n")
+            (dest / "tzdata.md5sums").write_text("x  /usr/share/zoneinfo/UTC\n")
+            return 0, ""
+        run.on(["docker", "cp", "-L", "cid1:/var/lib/dpkg/status.d"], copy)
+        tzdata = finding("x", "Debian:12", "tzdata", "2026b-0+deb12u1", ["2026f-0+deb12u1"])
+        check = playbooks_ops.verify_candidate(make_ctx(run=run), "img@new", [tzdata], spec(distroless=True),
+                                               querybatch=lambda packages, fetch: {})
+        self.assertEqual(check.keys, [tzdata.key])
+        self.assertFalse(run.called(["docker", "run"]))
+        self.assertEqual(run.called(["docker", "rm"]), [["docker", "rm", "cid1"]])
 
 
 class RunGroupTests(unittest.TestCase):

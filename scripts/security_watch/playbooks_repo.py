@@ -6,6 +6,9 @@ version):
 
   base-refresh   Dockerfile ``ARG SECURITY_REFRESH=<stamp>`` before the stage's
                  package-upgrade RUN, so the next build re-runs the distro upgrade
+  base-digest    Dockerfile final-stage ``FROM <image>:<tag>@sha256:<digest>`` moved to the
+                 tag's current digest (distroless runtimes have no package manager to refresh);
+                 the pinned and the new image are both checked against OSV during planning
   go-builder     Dockerfile ``FROM golang:<X.Y.Z>-<variant>[@sha256:...]`` bump
   go-toolchain   go.mod ``toolchain go<X.Y.Z>`` bump
   go-module      ``go get <module>@v<fixed>`` + ``go mod tidy``
@@ -13,7 +16,10 @@ version):
 
 Ecosystems in a component's ``pin_owner`` (e.g. the blog's RubyGems, owned by the
 dependabot-webhook) are never edited: once origin/main's lockfile resolves a fixed version
-the plan is deploy-only, until then it refuses with the owner's reason.
+the plan is deploy-only, until then it refuses with the owner's reason.  The same holds for
+Go modules inside a binary a gem builds (``gem_go_modules``, e.g. the blog's thrust from
+the thruster gem): fixed once origin/main's Gemfile.lock resolves a gem version whose
+go.mod requires the fixed module version.
 
 apply() opens the PR from a throw-away worktree of origin/main (repos without CI run
 their own checks there first; refused while another security-watch PR is open);
@@ -329,6 +335,44 @@ def bump_golang_from(dockerfile_text: str, new_version: str, digest: str | None)
     return "".join(lines)
 
 
+_FROM_IMAGE = re.compile(
+    r"^(?P<lead>\s*FROM\s+(?:--platform=\S+\s+)?)"
+    r"(?P<image>[A-Za-z0-9][A-Za-z0-9._/-]*):(?P<tag>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"(?:@(?P<digest>sha256:[0-9a-f]{64}))?"
+    r"(?P<rest>(?:\s+AS\s+\S+)?\s*)$",
+    re.I,
+)
+
+
+def runtime_base(dockerfile_text: str) -> dict[str, Any] | None:
+    """The final stage's ``FROM <image>:<tag>[@sha256:..]``: {line, image, tag, digest}
+    (digest '' when unpinned), or None when the last FROM names a stage, ``scratch`` or
+    an ARG-built reference."""
+    lines = dockerfile_text.splitlines()
+    froms = [start for start, keyword, _ in _instructions(lines) if keyword == "FROM"]
+    if not froms:
+        return None
+    match = _FROM_IMAGE.match(lines[froms[-1]])
+    if not match:
+        return None
+    return {"line": froms[-1], "image": match["image"], "tag": match["tag"], "digest": match["digest"] or ""}
+
+
+def bump_base_digest(dockerfile_text: str, digest: str) -> str | None:
+    """Re-pin the final stage's ``FROM <image>:<tag>@sha256:<old>`` to ``digest`` (image, tag
+    and ``AS <stage>`` kept).  None when that line is not digest-pinned, ``digest`` is not
+    ``sha256:<64 hex>``, or nothing changes."""
+    base = runtime_base(dockerfile_text)
+    if base is None or not base["digest"] or not _DIGEST.fullmatch(digest) or base["digest"] == digest:
+        return None
+    lines = dockerfile_text.splitlines(keepends=True)
+    line = lines[base["line"]]
+    body = line.rstrip("\r\n")
+    match = _FROM_IMAGE.match(body)
+    lines[base["line"]] = f"{match['lead']}{match['image']}:{match['tag']}@{digest}{match['rest']}{line[len(body):]}"
+    return "".join(lines)
+
+
 _TOOLCHAIN = re.compile(r"^toolchain[ \t]+go(?P<version>\S+)", re.M)
 
 
@@ -439,7 +483,8 @@ def _edit_kind(finding: Finding, spec: ComponentSpec) -> tuple[str | None, str]:
     pkg = finding.package
     if _is_os_ecosystem(pkg.ecosystem):
         if spec.kind == "container":
-            return "base-refresh", ""
+            # A distroless runtime has no package manager to re-run: move its pinned base instead.
+            return ("base-digest" if spec.get("distroless") else "base-refresh"), ""
         return None, f"{pkg.ecosystem} packages on a {spec.kind} are not built from {spec.repo}"
     if _is_go_stdlib(pkg):
         if spec.kind == "container" or (spec.kind == "host-binary" and spec.get("dockerfile")):
@@ -490,6 +535,60 @@ def _owner_landed(finding: Finding, owner: str, read: Callable[[str], str | None
     if _vlt(have, need):
         return None, f"{head}; origin/main still resolves {pkg.name} {have} (fixed in {need})"
     return have, f"{path} resolves {pkg.name} {have}"
+
+
+_GEM_DIR = re.compile(r"/gems/(?P<name>[A-Za-z0-9_.-]+?)-(?P<version>\d[^/]*)/")
+GO_PROXY_MOD_URL = "https://proxy.golang.org/{module}/@v/v{version}.mod"
+
+
+def _gem_go_module(finding: Finding, spec: ComponentSpec) -> tuple[str, str] | None:
+    """(gem, its Go module) when ``finding`` is a Go module inside a binary that gem builds
+    (the component's ``gem_go_modules``, matched on the gem directory in the location)."""
+    pkg = finding.package
+    modules = spec.get("gem_go_modules") or {}
+    if pkg.ecosystem != "Go" or _is_go_stdlib(pkg) or not modules:
+        return None
+    match = _GEM_DIR.search(pkg.location or "")
+    if not match or match["name"] not in modules:
+        return None
+    return match["name"], str(modules[match["name"]])
+
+
+def _gem_go_landed(finding: Finding, gem: str, module: str, owner: str, read: Callable[[str], str | None],
+                   fetch, lockfiles: dict[str, dict[str, str] | None],
+                   mods: dict[str, str]) -> tuple[str | None, str]:
+    """(version the gem's go.mod requires, note) when origin/main's Gemfile.lock resolves a
+    ``gem`` whose ``module`` go.mod (proxy.golang.org) requires a fixed version of the
+    finding's module, else (None, why there is nothing to deploy yet).  RuntimeError when the
+    proxy cannot be read (transient).  ``lockfiles`` and ``mods`` cache across findings."""
+    pkg = finding.package
+    head = f"{pkg.name} comes from the {gem} gem's go.mod ({owner or 'needs a ' + gem + ' gem bump'})"
+    above = [_strip_prefix(v) for v in finding.fixed_versions if _semver_lt(pkg.version, v)]
+    if not above:
+        return None, f"{head}; no fixed version above {pkg.version} published yet"
+    need = min(above, key=_semver_key)
+    if "Gemfile.lock" not in lockfiles:
+        text = read("Gemfile.lock")
+        lockfiles["Gemfile.lock"] = (None if text is None
+                                     else {p.name: p.version for p in inventory.parse_gemfile_lock(text)})
+    gems = lockfiles["Gemfile.lock"]
+    version = gems.get(gem) if gems is not None else None
+    if version is None:
+        return None, f"{head}; origin/main:Gemfile.lock does not resolve {gem}"
+    key = f"{module}@v{version}"
+    if key not in mods:
+        url = GO_PROXY_MOD_URL.format(module=escape_module_path(module), version=version)
+        try:
+            mods[key] = fetch(url, timeout=20).text()
+        except net.FetchError as exc:
+            raise RuntimeError(f"cannot read the go.mod of {key} from the Go proxy: {exc.reason}") from None
+    have = _go_mod_required(mods[key], pkg.name)
+    if have is None:
+        return None, f"{head}; {gem} {version}'s go.mod does not require {pkg.name}"
+    if _semver_lt(have, need):
+        return None, (f"{head}; origin/main resolves {gem} {version}, whose go.mod requires "
+                      f"{pkg.name} v{have} (fixed in {need})")
+    return have, f"Gemfile.lock resolves {gem} {version}, whose go.mod requires {pkg.name} v{have}"
 
 
 def _group_slug(group: str) -> str:
@@ -581,13 +680,14 @@ class RepoPrPlaybook:
     def __init__(self, *, app_deploy: Callable[..., dict] | None = None,
                  deploy_registry: dict | None = None, auto_merge_repos: set[str] | None = None,
                  sleep: Callable[[float], None] = time.sleep,
-                 script_run: Callable[..., Any] | None = None):
+                 script_run: Callable[..., Any] | None = None, querybatch: Callable[..., Any] | None = None):
         self._app_deploy = app_deploy
         self._deploy_registry = deploy_registry
         self._auto_merge_repos = auto_merge_repos
         self._sleep = sleep
         # Release/deploy scripts and pre-push checks: own process group, killed whole on timeout.
         self._script_run = script_run if script_run is not None else inventory.run_group
+        self._querybatch = querybatch   # OSV batch for image checks (None: the production query)
 
     # steward integration (imported lazily: the steward package is heavy)
     def _steward_app_deploy(self) -> Callable[..., dict]:
@@ -638,12 +738,17 @@ class RepoPrPlaybook:
         refusals: list[Refusal] = []
         owner_fixed: dict[str, tuple[str, str]] = {}   # finding key -> (version on origin/main, note)
         lockfiles: dict[str, dict[str, str] | None] = {}
+        mods: dict[str, str] = {}
         for finding in ordered:
             pkg = finding.package
-            owner = _pin_owner(pkg, spec)
-            if owner:
+            gem_module = _gem_go_module(finding, spec)
+            owner = _pin_owner(model.Package("RubyGems", "", ""), spec) if gem_module else _pin_owner(pkg, spec)
+            if gem_module or owner:
                 try:
-                    landed, note = _owner_landed(finding, owner, read, lockfiles)
+                    if gem_module:
+                        landed, note = _gem_go_landed(finding, *gem_module, owner, read, ctx.fetch, lockfiles, mods)
+                    else:
+                        landed, note = _owner_landed(finding, owner, read, lockfiles)
                 except RuntimeError as exc:
                     refusals.append(refuse(str(exc)[:500], alert=False, finding=finding))
                     continue
@@ -779,6 +884,58 @@ class RepoPrPlaybook:
         return {"target": target, "path": path, "params": {"stamp": stamp}, "step": step,
                 "fixed_version": group[0].fixed_versions[0]}
 
+    def _check_image(self, ctx, image: str, findings: list[Finding], spec: ComponentSpec):
+        """playbooks_ops.CandidateCheck of ``image`` (pulled only when not present locally)."""
+        from security_watch import playbooks_ops
+        if ctx.run(["docker", "image", "inspect", "--format", "{{.Id}}", image], timeout=60).returncode != 0:
+            pulled = ctx.run(["docker", "pull", "--quiet", image], timeout=playbooks_ops.PULL_TIMEOUT)
+            if pulled.returncode != 0:
+                return playbooks_ops.CandidateCheck(image, error=f"docker pull {image} failed: {_tail(pulled, 200)}")
+        extra = {"querybatch": self._querybatch} if self._querybatch is not None else {}
+        return playbooks_ops.verify_candidate(ctx, image, findings, spec, **extra)
+
+    def _plan_base_digest(self, group, spec, ctx, read):
+        path = spec.get("dockerfile") or "Dockerfile"
+        text = read(path)
+        if text is None:
+            return Refusal(self.id, spec.id, f"cannot read origin/main:{path} in {spec.repo}")
+        base = runtime_base(text)
+        if base is None or not base["digest"]:
+            return Refusal(self.id, spec.id, f"{spec.repo}/{path}: the final stage's base is not pinned as "
+                                             "<image>:<tag>@sha256:<digest>")
+        ref = f"{base['image']}:{base['tag']}"
+        pinned = f"{ref}@{base['digest']}"
+        check = self._check_image(ctx, pinned, group, spec)
+        if check.error:
+            return Refusal(self.id, spec.id, check.error, alert=False)
+        if check.cleared:
+            # Production still ships the affected versions, so it was not built from this pin:
+            # origin/main is ahead of the deployed image.
+            return {"deploy_only": True, "findings": check.cleared, "skipped": check.still,
+                    "fixed_version": check.cleared[0].fixed_versions[0],
+                    "stale": f"{path} already pins {pinned}, which clears them"}
+        result = ctx.run(["docker", "buildx", "imagetools", "inspect", "--format", "{{json .Manifest.Digest}}", ref],
+                         timeout=60)
+        latest = _json(result) if result.returncode == 0 else None
+        if not (isinstance(latest, str) and _DIGEST.fullmatch(latest)):
+            return Refusal(self.id, spec.id, f"cannot resolve the current digest of {ref}: {_tail(result, 200)}",
+                           alert=False)
+        if latest == base["digest"]:
+            return Refusal(self.id, spec.id, f"no newer {ref} than the pinned digest: " + "; ".join(check.still))
+        candidate = f"{ref}@{latest}"
+        check = self._check_image(ctx, candidate, group, spec)
+        if check.error:
+            return Refusal(self.id, spec.id, check.error, alert=False)
+        if not check.cleared:
+            return Refusal(self.id, spec.id, f"{candidate} clears none of the {len(check.still)} finding(s): "
+                                             + "; ".join(check.still))
+        # No release date: the image's packages come from the distro archive (like base-refresh)
+        # and were checked against OSV above -- exempt from the age rule.
+        return {"target": f"{spec.id}: {path} {ref} {base['digest'][7:19]} -> {latest[7:19]}", "path": path,
+                "params": {"digest": latest}, "step": f"pin the final stage FROM {candidate} in {path}",
+                "fixed_version": check.cleared[0].fixed_versions[0], "findings": check.cleared,
+                "skipped": check.still}
+
     def _plan_go_builder(self, group, spec, ctx, read):
         path = spec.get("dockerfile") or "Dockerfile"
         text = read(path)
@@ -887,7 +1044,7 @@ class RepoPrPlaybook:
         if not bumped:
             return {"deploy_only": True, "findings": findings, "skipped": skipped,
                     "fixed_version": stale[0][2],
-                    "stale": "go.mod already requires " + ", ".join(d for _, d, _ in stale)}
+                    "stale": "go.mod already requires " + ", ".join(dict.fromkeys(d for _, d, _ in stale))}
         pairs = sorted(modules.items())
         published = max((proxy_release_time(
             GO_PROXY_INFO_URL.format(module=escape_module_path(m), version=v), ctx.fetch) for m, v in pairs),
@@ -931,7 +1088,7 @@ class RepoPrPlaybook:
         if not bumped:
             return {"deploy_only": True, "findings": findings, "skipped": skipped,
                     "fixed_version": stale[0][2],
-                    "stale": "requirements.txt already pins " + ", ".join(d for _, d, _ in stale)}
+                    "stale": "requirements.txt already pins " + ", ".join(dict.fromkeys(d for _, d, _ in stale))}
         pairs = sorted(pins.items())
         # No release date: PyPI fixes are exempt from the age rule (pip-pin is gated by CI
         # or the repo's own checks plus the release script's verify).
@@ -1086,6 +1243,8 @@ class RepoPrPlaybook:
             return [], f"cannot read {path}: {exc}"
         if edit == "base-refresh":
             new = refresh_arg(text, params["stamp"])
+        elif edit == "base-digest":
+            new = bump_base_digest(text, params["digest"])
         elif edit == "go-builder":
             new = bump_golang_from(text, params["version"], params.get("digest"))
         elif edit == "go-toolchain":
