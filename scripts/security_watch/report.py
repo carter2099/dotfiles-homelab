@@ -15,6 +15,7 @@ SCHEMA = 1
 _URGENCY_RANK = {model.URGENCY_URGENT: 0, model.URGENCY_NORMAL: 1, model.URGENCY_LOW: 2}
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "": 4}
 _NOT_EXECUTED = ("proposed", "refused")
+_FAILED = ("failed", "rolled_back", "unverified")
 
 
 def _iso(value: Any) -> str | None:
@@ -80,9 +81,21 @@ def _sources(store, now: datetime) -> list[dict]:
     return rows
 
 
-def _actions(store, since: datetime) -> tuple[list[dict], list[dict]]:
+def _superseded_by(action: dict, actions: list[dict], open_keys: set[str]) -> int | None:
+    """Id of a later verified action on the same component when none of this failed action's
+    findings is still open: the component was fixed and health-checked since, so the failure
+    needs no attention (2026-11-21: #56 was escalated overnight after #58 had fixed it)."""
+    if action.get("status") not in _FAILED or any(k in open_keys for k in action.get("finding_keys") or ()):
+        return None
+    return next((later["id"] for later in actions
+                 if later["id"] > action["id"] and later.get("component_id") == action.get("component_id")
+                 and later.get("status") == "verified"), None)
+
+
+def _actions(store, since: datetime, open_keys: set[str]) -> tuple[list[dict], list[dict]]:
     executed, proposed = [], []
-    for a in store.actions_since(since):
+    actions = store.actions_since(since)
+    for a in actions:
         status = a.get("status") or ""
         if status == "proposed":
             plan = a.get("plan") or {}
@@ -106,15 +119,23 @@ def _actions(store, since: datetime) -> tuple[list[dict], list[dict]]:
                 "undo": a.get("undo") or "",
                 "started_at": _iso(a.get("started_at")),
                 "finished_at": _iso(a.get("finished_at")),
+                "superseded_by": _superseded_by(a, actions, open_keys),
             })
     return executed, proposed
 
 
-def _refused(store, since: datetime) -> list[dict]:
+def _refused(store, since: datetime, open_components: set[str], verified_at: dict[str, datetime]) -> list[dict]:
+    """Refusals still current: the component has open findings and no fix verified after the
+    refusal was last raised (a refusal row otherwise lingers for 24 h after the fix)."""
     rows = []
     for r in store.refusals_since(since):
+        component = r.get("component_id") or r.get("component") or ""
+        last_seen = model.parse_iso(r["last_seen"]) if r.get("last_seen") else None
+        fixed = verified_at.get(component)
+        if component not in open_components or (fixed and last_seen and last_seen <= fixed):
+            continue
         rows.append({
-            "component": r.get("component_id") or r.get("component") or "",
+            "component": component,
             "playbook": r.get("playbook") or "",
             "reason": r.get("reason") or "",
             "alert": bool(r.get("alert", True)),
@@ -231,7 +252,12 @@ def build_report(store, policy, specs, scan_result, act_result, tick: dict, now:
         unknown = list(scan_result.unknown)
     else:
         unknown = list(store.get_kv("last_unknown", []) or [])
-    executed, proposed = _actions(store, day)
+    executed, proposed = _actions(store, day, {f.key for f in findings})
+    verified_at: dict[str, datetime] = {}
+    for row in executed:
+        done = model.parse_iso(row["finished_at"]) if row["status"] == "verified" and row["finished_at"] else None
+        if done and (row["component"] not in verified_at or done > verified_at[row["component"]]):
+            verified_at[row["component"]] = done
     return {
         "schema": SCHEMA,
         "generated_at": model.iso(now),
@@ -243,7 +269,7 @@ def build_report(store, policy, specs, scan_result, act_result, tick: dict, now:
         "actions_24h": executed,
         # Proposals only describe shadow mode; once active they were never applied and would mislead.
         "proposed": proposed if policy.mode == "shadow" else [],
-        "refused": _refused(store, day),
+        "refused": _refused(store, day, {f.component_id for f in findings}, verified_at),
         "leads_24h": _leads(store, day),
         "resolved_24h": _resolved(store, day),
         "shadow": shadow_metrics(store, policy, sources, breaker, now),

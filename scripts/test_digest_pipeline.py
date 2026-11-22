@@ -4142,9 +4142,42 @@ def test_omp_login_models_never_post_to_proxy() -> None:
         check(len(omp_calls) == 2, f"declared endpoints went through omp: {omp_calls}")
 
 
+def test_coverage_key_canonicalizes_percent_encoded_paths() -> None:
+    """Encoded and literal forms of one URL share a coverage key.
+
+    Regression for 2026-11-17/19: the oag.ca.gov OpenAI lawsuit release ran in
+    AI & Tech with `%E2%80%99` and in Agents with a literal \u2019, so the
+    recent-coverage ledger missed the repeat.
+    """
+    encoded = ("https://oag.ca.gov/news/press-releases/attorney-general-bonta-sues-openai-"
+               "over-company%E2%80%99s-loss-of-control-incidents")
+    literal = ("https://oag.ca.gov/news/press-releases/attorney-general-bonta-sues-openai-"
+               "over-company\u2019s-loss-of-control-incidents")
+    lower = encoded.replace("%E2%80%99", "%e2%80%99")
+    check(contracts.coverage_key(encoded) == contracts.coverage_key(literal),
+          f"{contracts.coverage_key(encoded)!r} != {contracts.coverage_key(literal)!r}")
+    check(contracts.coverage_key(lower) == contracts.coverage_key(encoded), "hex case changed the key")
+    check(contracts.normalize_url("https://example.com/a%2Fb") != contracts.normalize_url("https://example.com/a/b"),
+          "encoded slash became a path separator")
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        prior = root / catalog.TOPICS["ai-tech"]["category"] / "2026-11-17"
+        prior.mkdir(parents=True)
+        # A key stored before canonicalization holds the literal character.
+        stored_key = literal.removeprefix("https://")
+        (prior / "06-curated.json").write_text(json.dumps({"fresh": [{
+            "url": "https://example.com/2026/11/17/california-sues-openai",
+            "attention": {"status": "ok", "evidence": {"same_event_keys": [stored_key]}},
+        }]}))
+        ledger = contracts.load_recent_coverage_ledger(root, date(2026, 11, 19), research.CROSS_DAY_DEDUP_DAYS)
+        index = contracts.dateless_coverage_index(ledger)
+        check(contracts.recent_coverage_match(encoded, ledger, index), sorted(ledger))
+
+
 def main() -> None:
     tests = [
         test_url_normalization,
+        test_coverage_key_canonicalizes_percent_encoded_paths,
         test_search_health_uses_fresh_news_path,
         test_referenced_url_collection_uses_catalog_filters,
         test_tool_omp_uses_digest_specific_config,

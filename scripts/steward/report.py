@@ -1881,9 +1881,10 @@ def _security_watch_events(data, now=None):
     """security-watch report.json as triage items.
 
     Needs You (extreme only): the breaker is open; a fix failed, rolled back or
-    went unverified in the last 24 h; an urgent finding with a fix available
-    still affected a day after it was first seen.  Watching: other open
-    findings (top 10), alerting refusals, shadow proposals, sources failing for
+    went unverified in the last 24 h and no later verified fix of the same
+    component closed its findings (``superseded_by``); an urgent finding with a
+    fix available still affected a day after it was first seen.  Watching: other
+    open findings (top 10), alerting refusals, shadow proposals, sources failing for
     over a day, a stale report.  What changed: verified fixes with their undo.
     """
     if not isinstance(data, dict) or not data:
@@ -1909,7 +1910,7 @@ def _security_watch_events(data, now=None):
         status = str(action.get("status") or "")
         component = action.get("component") or "?"
         playbook = action.get("playbook") or "playbook"
-        if status in _SW_FAILED_ACTIONS:
+        if status in _SW_FAILED_ACTIONS and not action.get("superseded_by"):
             items.append(_item(
                 "needs", f"Security fix for {component} ({playbook}) {_SW_FAILED_ACTIONS[status]}",
                 why=_clip(action.get("detail") or f"status {status}", 300),

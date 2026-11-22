@@ -422,6 +422,37 @@ class ReportTests(_StoreCase):
             data = report.build_report(self.store, policy, self.specs, None, None, self._tick(), NOW, stopgaps=[])
             self.assertEqual(len(data["proposed"]), expected, mode)
 
+    def test_fix_that_later_succeeded_is_superseded_and_its_refusals_drop(self):
+        # 2026-11-21: failed #56 was escalated overnight although #58 had fixed the same finding,
+        # and refusals of components fixed that afternoon were still listed as "cannot fix".
+        dash = _finding(component="homelab-dashboard", group="CVE-2026-86144")
+        other = _finding(component="homelab-dashboard", group="CVE-2026-2", name="zlib")
+        rig = _finding(component="rig", group="CVE-2026-123158")
+        for f in (dash, other, rig):
+            self.store.upsert_finding(f, NOW - timedelta(hours=6))
+        plan = model.Plan(playbook="repo-pr", component_id="homelab-dashboard", finding_keys=[dash.key],
+                          target="base-refresh", lock_keys=["app-homelab-dashboard"], steps=["pr"], undo="u")
+        failed = self.store.start_action(plan, mode="active", status="running", now=NOW - timedelta(hours=5))
+        self.store.update_action(failed, status="failed", detail="PR #6 checks failed",
+                                 now=NOW - timedelta(hours=5), finished=True)
+        refused = model.Refusal(playbook="repo-pr", component_id="homelab-dashboard", reason="cooldown")
+        self.store.record_refusal(refused, NOW - timedelta(hours=4))
+        self.store.record_refusal(model.Refusal(playbook="alert", component_id="rig", reason="no fix"),
+                                  NOW - timedelta(hours=4))
+        data = report.build_report(self.store, self.policy, self.specs, None, None, self._tick(), NOW, stopgaps=[])
+        self.assertIsNone(data["actions_24h"][0]["superseded_by"])           # finding still open
+        self.assertEqual({r["component"] for r in data["refused"]}, {"homelab-dashboard", "rig"})
+
+        fixed = self.store.start_action(plan, mode="manual", status="running", now=NOW - timedelta(hours=3))
+        self.store.update_action(fixed, status="verified", detail="released", now=NOW - timedelta(hours=3),
+                                 finished=True)
+        # `other` stays open: the refusal still drops, because it was last raised before the fix.
+        self.store.close_missing_findings("homelab-dashboard", {other.key}, NOW - timedelta(hours=3))
+        data = report.build_report(self.store, self.policy, self.specs, None, None, self._tick(), NOW, stopgaps=[])
+        self.assertEqual([(a["id"], a["superseded_by"]) for a in data["actions_24h"]],
+                         [(failed, fixed), (fixed, None)])
+        self.assertEqual([r["component"] for r in data["refused"]], ["rig"])
+
 
 class UnitFileTests(unittest.TestCase):
     def test_hard_stop_outlasts_the_longest_playbook(self):

@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit
 
 import requests
 from workflow_state import atomic_write_json
@@ -29,6 +29,25 @@ from .catalog import (
 _TRACKING_QUERY_KEYS = {
     "fbclid", "gclid", "mc_cid", "mc_eid", "ref_src",
 }
+
+# Characters a canonical path keeps literal. Everything else, including
+# non-ASCII, is percent-encoded with uppercase hex.
+_PATH_SAFE_CHARS = "/:@!$&'()*+,;=~"
+_ENCODED_SLASH = re.compile(r"%2f", re.IGNORECASE)
+
+def _canonical_path(path: str) -> str:
+    """Return ``path`` with one percent-encoding per character.
+
+    Publishers' links reach the pipeline both percent-encoded and with literal
+    characters (steward digest-quality finding 2026-11-20: the oag.ca.gov
+    OpenAI press release appeared as `%E2%80%99` in AI & Tech 11-17 and as a
+    literal \u2019 in Agents 11-19, so the cross-section repeat was missed).
+    An encoded `/` stays encoded so it never becomes a path separator.
+    """
+    return "%2F".join(
+        quote(unquote(segment), safe=_PATH_SAFE_CHARS)
+        for segment in _ENCODED_SLASH.split(path)
+    )
 
 def normalize_url(url: str) -> str:
     """Return a stable dedup/cache key while preserving case-sensitive URL paths."""
@@ -52,7 +71,7 @@ def normalize_url(url: str) -> str:
     if port and not ((parts.scheme == "http" and port == 80)
                      or (parts.scheme == "https" and port == 443)):
         host = f"{host}:{port}"
-    path = parts.path.rstrip("/")
+    path = _canonical_path(parts.path).rstrip("/")
     query = [
         (key, value)
         for key, value in parse_qsl(parts.query, keep_blank_values=True)
@@ -286,7 +305,11 @@ def _same_event_evidence_keys(story: dict) -> set[str]:
         for entry in evidence.get("same_event_urls") or []
         if isinstance(entry, dict)
     }
-    keys.update(key for key in evidence.get("same_event_keys") or [] if isinstance(key, str))
+    keys.update(
+        coverage_key(key)
+        for key in evidence.get("same_event_keys") or []
+        if isinstance(key, str)
+    )
     return {key for key in keys if key and is_event_url(key)}
 
 def load_cross_topic_urls(

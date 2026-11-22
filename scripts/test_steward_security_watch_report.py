@@ -99,6 +99,18 @@ class SecurityWatchReportTests(unittest.TestCase):
         self.assertIn("Security fix for freshrss (steward-freshrss) was rolled back", texts)
         self.assertTrue(any(t.startswith("Unpatched urgent vulnerability — freshrss") for t in texts))
 
+    def test_failure_superseded_by_a_later_verified_fix_is_not_escalated(self):
+        failed = {"id": 56, "playbook": "repo-pr", "component": "homelab-dashboard", "mode": "active",
+                  "status": "failed", "target": "base-refresh", "detail": "PR #6 checks failed", "undo": "",
+                  "started_at": iso(timedelta(hours=18)), "finished_at": iso(timedelta(hours=18)),
+                  "superseded_by": 58}
+        fixed = {**failed, "id": 58, "status": "verified", "detail": "release.sh ok", "superseded_by": None,
+                 "started_at": iso(timedelta(hours=14)), "finished_at": iso(timedelta(hours=14))}
+        triaged = triage(sample(mode="active", findings=[], actions_24h=[failed, fixed]))
+        self.assertEqual(triaged["needs"], [])
+        self.assertEqual([c["text"] for c in triaged["changes"]], ["Security fix: homelab-dashboard — base-refresh"])
+        self.assertNotEqual(triaged["verdict"][0], "problem")
+
     def test_verified_action_is_a_change_with_undo(self):
         data = sample(mode="active", actions_24h=[{
             "id": 8, "playbook": "apt-security", "component": "host", "mode": "active",
