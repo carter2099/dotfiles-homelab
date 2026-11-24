@@ -1,6 +1,7 @@
 """Daily News workflow orchestration and executable-facing preflight."""
 from __future__ import annotations
 
+import json
 import math
 import os
 import signal
@@ -174,7 +175,7 @@ def validate_model_credentials() -> None:
         raise RuntimeError(
             "Daily News preflight failed: no research model has a usable omp credential ("
             + "; ".join(f"{provider}: {unusable[provider]}" for provider in research)
-            + "); run `omp login "
+            + "); sign in at https://login.carter2099.com or run `omp login "
             + research[0]
             + "` interactively before the next run"
         )

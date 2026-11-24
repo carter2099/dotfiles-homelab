@@ -503,6 +503,39 @@ class SchedulingTests(AgentBase):
         self.assertEqual(result[finding.key].summary, "deferred")
         self.assertEqual(store.puts, [])
 
+    def test_no_code_finding_does_not_spend_agent_calls(self):
+        rig = make_spec("rig")
+        no_code = make_finding(cid="rig", group="CVE-2026-123158", cves=("CVE-2026-123158",), kev=True)
+        code = [make_finding(group=f"CVE-2026-400{i}", cves=(f"CVE-2026-400{i}",)) for i in range(2)]
+        store = FakeStore()
+        store.kv["reach_agent_calls"] = {"date": "2026-11-03", "count": 5}
+        result = reach.assess([no_code] + code, {"web": self.inv}, {"web": self.spec, "rig": rig}, store=store,
+                              policy=self.policy, now=NOW, omp_call=self.omp(self.good_evidence()),
+                              jev_client=FakeJev(0.9, 0.9))
+        self.assertEqual(len(self.prompts), 2)
+        self.assertTrue(result[no_code.key].summary.startswith("no code available"))
+        self.assertEqual([result[f.key].verdict for f in code], ["reachable", "reachable"])
+        self.assertEqual(store.kv["reach_agent_calls"], {"date": "2026-11-03", "count": 7})
+
+    def test_secret_scan_refusal_does_not_spend_agent_calls(self):
+        finding = make_finding()
+        store = FakeStore()
+        with mock.patch("steward.resolver.secret_reason", return_value="token"):
+            result = reach.assess([finding], {"web": self.inv}, {"web": self.spec}, store=store,
+                                  policy=self.policy, now=NOW, omp_call=lambda p: self.fail("no agent"),
+                                  load_jev=False)
+        self.assertEqual(result[finding.key].summary, "prompt failed secret scan (token)")
+        self.assertNotIn("reach_agent_calls", store.kv)
+
+    def test_tick_cap_still_defers_third_code_finding(self):
+        findings = [make_finding(group=f"CVE-2026-500{i}", cves=(f"CVE-2026-500{i}",)) for i in range(3)]
+        store = FakeStore()
+        result = self.assess_batch(findings, store, self.policy)
+        self.assertEqual(len(self.prompts), 2)
+        self.assertEqual([result[f.key].summary for f in findings][2], "deferred")
+        self.assertEqual(store.kv["reach_agent_calls"], {"date": "2026-11-03", "count": 2})
+        self.assertNotIn(reach.cache_key(self.inv, findings[2]), store.reach)
+
 
 if __name__ == "__main__":
     unittest.main()

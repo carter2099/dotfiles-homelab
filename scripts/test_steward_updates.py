@@ -3409,6 +3409,8 @@ class EmailTriageTests(unittest.TestCase):
         self.assertEqual(needs["command"], "omp login anthropic")
         self.assertEqual(triaged["verdict"], ("problem", "Problem: omp login expired"))
         self.assertIn("omp login anthropic", report._html_needs_you([needs]))
+        self.assertIn("https://login.carter2099.com", needs["todo"])
+        self.assertIn("https://login.carter2099.com", report._html_needs_you([needs]))
 
     def test_healthy_unprobed_or_inconclusive_omp_login_never_reaches_needs_you(self):
         for login in (None, {}, {"provider": "anthropic", "status": "ok"},
@@ -3425,6 +3427,8 @@ class EmailTriageTests(unittest.TestCase):
         def inputs(recheck, setup_data):
             with tempfile.TemporaryDirectory() as tmp, \
                     patch.object(report, "_omp_login_probe", return_value=recheck) as probe, \
+                    patch.object(report.omp_login_state, "login_state",
+                                 return_value={"provider": "anthropic", "status": "none"}), \
                     patch.object(report, "_dotfiles_untracked_paths", return_value=[]):
                 run_dir = Path(tmp) / "2026-10-22"
                 run_dir.mkdir()
@@ -3441,6 +3445,81 @@ class EmailTriageTests(unittest.TestCase):
         t, p = inputs({"status": "dead"}, base)  # no P0 record → no probe
         self.assertEqual(t["needs"], [])
         p.assert_not_called()
+
+    OK = {"provider": "anthropic", "status": "ok", "login_command": "omp login anthropic"}
+
+    @staticmethod
+    def _login_state(days_left):
+        return {"provider": "anthropic", "status": "ok", "accounts": [],
+                "authorized_at": "2026-10-25T13:22:00+00:00",
+                "expires_at": "2026-11-24T13:22:00+00:00", "days_left": days_left}
+
+    def test_omp_login_far_from_expiry_adds_nothing(self):
+        for state in (self._login_state(20), self._login_state(7.1), None,
+                      {"provider": "anthropic", "status": "none", "accounts": []},
+                      {"provider": "anthropic", "status": "unknown", "detail": "x"}):
+            with self.subTest(state=state):
+                t = report._triage({"steps": []}, {"sections": []}, {"routes": []},
+                                   omp_login=self.OK, omp_login_state=state)
+                self.assertEqual((t["needs"], t["watching"]), ([], []))
+
+    def test_omp_login_within_a_week_of_expiry_is_watching_with_date_and_url(self):
+        t = report._triage({"steps": []}, {"sections": []}, {"routes": []},
+                           omp_login=self.OK, omp_login_state=self._login_state(5))
+        self.assertEqual(t["needs"], [])
+        (watch,) = t["watching"]
+        self.assertIn("Claude login for omp expires about Nov 24 13:22 UTC", watch["text"])
+        self.assertIn("(5 days left)", watch["text"])
+        self.assertIn("https://login.carter2099.com", watch["text"])
+
+    def test_omp_login_within_two_days_of_expiry_is_needs_you(self):
+        t = report._triage({"steps": []}, {"sections": []}, {"routes": []},
+                           omp_login=self.OK, omp_login_state=self._login_state(1.5))
+        self.assertEqual(t["watching"], [])
+        (needs,) = t["needs"]
+        self.assertIn("Nov 24 13:22 UTC", needs["text"])
+        self.assertIn("1.5 days left", needs["text"])
+        self.assertIn("Every scheduled model job stops when it expires", needs["why"])
+        self.assertIn("https://login.carter2099.com", needs["todo"])
+        self.assertEqual(needs["command"], "omp login anthropic")
+        self.assertEqual(t["verdict"][0], "needs")  # still working: not a Problem yet
+
+    def test_expiry_warning_only_for_a_working_login(self):
+        t = report._triage({"steps": []}, {"sections": []}, {"routes": []},
+                           omp_login=self.DEAD, omp_login_state=self._login_state(1.5))
+        (needs,) = t["needs"]
+        self.assertIn("no longer valid", needs["text"])
+
+    def test_report_inputs_reads_login_state_and_survives_helper_failure(self):
+        def inputs(**login_state_patch):
+            with tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(report, "_omp_login_probe") as probe, \
+                    patch.object(report.omp_login_state, "login_state",
+                                 **login_state_patch) as helper, \
+                    patch.object(report, "_dotfiles_untracked_paths", return_value=[]):
+                run_dir = Path(tmp) / "2026-11-22"
+                run_dir.mkdir()
+                data = report._report_inputs(run_dir, {"date": "2026-11-22", "omp_login": self.OK})
+            probe.assert_not_called()
+            return data, helper
+        data, helper = inputs(return_value=self._login_state(5))
+        helper.assert_called_once()
+        self.assertEqual(helper.call_args.args, ("anthropic",))
+        self.assertEqual(data["omp_login_state"]["days_left"], 5)
+        self.assertEqual(len(data["triaged"]["watching"]), 1)
+        data, _ = inputs(return_value=self._login_state(1.5))
+        self.assertEqual(len(data["triaged"]["needs"]), 1)
+        data, helper = inputs(side_effect=RuntimeError("agent.db locked"))
+        helper.assert_called_once()
+        self.assertEqual(data["omp_login_state"]["status"], "unknown")
+        self.assertEqual((data["triaged"]["needs"], data["triaged"]["watching"]), ([], []))
+
+    def test_login_state_is_not_read_for_other_providers_or_a_dead_login(self):
+        with patch.object(report.omp_login_state, "login_state") as helper:
+            for login in ({"provider": "openai-codex", "status": "ok"}, self.DEAD,
+                          {"provider": "opencode-go", "status": "not_applicable"}, None):
+                self.assertIsNone(report._omp_login_state(login))
+        helper.assert_not_called()
 
 
 class RunTimingAndMemoryTests(unittest.TestCase):

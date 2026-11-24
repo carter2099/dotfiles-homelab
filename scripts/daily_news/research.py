@@ -53,6 +53,13 @@ CROSS_DAY_EVENT_MIN_TERMS = 2
 # headline word (10-26/27 AI Hardware: the RTX 20/30/40 tensor-throttle
 # unlock ran twice; both reports gave the RTX 4090 165.6 -> 331.6 TFLOPS).
 CROSS_DAY_EVENT_MIN_SHARED_FIGURES = 2
+# A re-report also matches at any date gap within the dedup window when its
+# title/event wording is largely restated by the published story's reported
+# text and the restated words include distinctive (corpus-rare) actors
+# (11-08/11-12 AI Hardware: the midterm data-center ballot results ran twice,
+# four days apart, from TechCrunch and then qz under different headlines).
+CROSS_DAY_EVENT_STRONG_COVERAGE = 0.6
+CROSS_DAY_EVENT_STRONG_MIN_RARE = 2
 _DISTINCTIVE_FIGURE = re.compile(r"(?<![\d.])\d+\.\d+(?!\.?\d)")
 
 
@@ -70,6 +77,83 @@ def _shares_distinctive_figures(story: dict, item: dict) -> bool:
     if len(_distinctive_figures(story) & _distinctive_figures(item)) < CROSS_DAY_EVENT_MIN_SHARED_FIGURES:
         return False
     return bool(_event_tokens(story.get("title")) & _event_tokens(item.get("title")))
+
+
+# Event terms and story text spell one quantity many ways ("457 megawatts",
+# "457 MW", "457MW"; "$1.5 billion", "$1.5bn"). The cross-day event-terms test
+# compares both after collapsing a number directly followed by a recognised
+# unit to "<number> <canonical unit>" (11-17/18: TensorWave's 457 MW OpenAI
+# deal re-ran in AI Hardware under the event term "457 megawatts" after AI &
+# Tech wrote "457 MW"/"457MW"). Bare numbers stay as written, so a year or an
+# unrelated figure never matches a quantity term on its own.
+_QUANTITY_UNITS = {
+    "gwh": r"gwh|gigawatt[\s-]?hours?",
+    "mwh": r"mwh|megawatt[\s-]?hours?",
+    "kwh": r"kwh|kilowatt[\s-]?hours?",
+    "gw": r"gw|gigawatts?",
+    "mw": r"mw|megawatts?",
+    "kw": r"kw|kilowatts?",
+    "trillion": r"trillions?|trn|tn",
+    "billion": r"billions?|bn",
+    "million": r"millions?|mln|mn",
+    "thousand": r"thousands?",
+    "percent": r"percent|per\s?cent|pct|%",
+}
+# One-letter abbreviations count only when written against the number ("$1.5B",
+# "$20m", "5k"); trillion's "T" only in upper case ("5t" is tonnes).
+_QUANTITY_LETTERS = {"b": "billion", "m": "million", "k": "thousand", "t": "trillion"}
+_QUANTITY = re.compile(
+    r"(?<![\w.,])(?P<number>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+    r"(?:[\s-]?(?:" + "|".join(f"(?P<{unit}>{spelling})" for unit, spelling in _QUANTITY_UNITS.items())
+    + r")|(?P<letter>[bmk]|(?-i:T)))(?![a-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _normalize_quantities(text: str) -> str:
+    """``text`` with each number-plus-unit spelling as "<number> <canonical unit>"."""
+    def canonical(match: re.Match) -> str:
+        number = match["number"].replace(",", "")
+        if match["letter"]:
+            return f"{number} {_QUANTITY_LETTERS[match['letter'].lower()]}"
+        return f"{number} {next(unit for unit in _QUANTITY_UNITS if match[unit])}"
+
+    return _QUANTITY.sub(canonical, text)
+
+
+def _event_terms_present(terms: Any, story_text: str) -> bool:
+    """attention_match.terms_all_present over quantity-normalized terms and text."""
+    if isinstance(terms, list):
+        terms = [_normalize_quantities(term) if isinstance(term, str) else term for term in terms]
+    return attention_match.terms_all_present(
+        terms, _normalize_quantities(story_text), CROSS_DAY_EVENT_MIN_TERMS)
+
+
+def _restates_published_event(story: dict, item: dict, frequency: Any, story_text: str) -> bool:
+    """``item``'s title/event wording is mostly in ``story_text``, including rare actors.
+
+    Requires news_publish's minimum shared title/event wording, then
+    CROSS_DAY_EVENT_STRONG_COVERAGE of ``item``'s title/event tokens present in
+    the story's reported text, with at least CROSS_DAY_EVENT_STRONG_MIN_RARE of
+    those tokens rare in the event corpus.
+    """
+    from news_publish import (EVENT_MIN_SHARED_TOKENS, EVENT_MIN_TOKEN_OVERLAP,
+                              _event_tokens, _story_event_tokens)
+
+    story_tokens = _story_event_tokens(story)
+    item_tokens = _story_event_tokens(item)
+    if not story_tokens or not item_tokens:
+        return False
+    shared = story_tokens & item_tokens
+    if (len(shared) < EVENT_MIN_SHARED_TOKENS
+            or len(shared) / min(len(story_tokens), len(item_tokens)) < EVENT_MIN_TOKEN_OVERLAP):
+        return False
+    covered = item_tokens & _event_tokens(story_text)
+    if len(covered) / len(item_tokens) < CROSS_DAY_EVENT_STRONG_COVERAGE:
+        return False
+    counts, documents = frequency
+    rare_limit = max(2, documents // 100)
+    return sum(1 for token in covered if counts[token] <= rare_limit) >= CROSS_DAY_EVENT_STRONG_MIN_RARE
 
 
 def refetch_article_date(url: str, title: str) -> str | None:
@@ -1364,7 +1448,7 @@ def _distinctive_event_terms_match(story: dict, item: dict, frequency: Any, stor
             or len(shared) / min(len(story_tokens), len(item_tokens)) < EVENT_MIN_TOKEN_OVERLAP):
         return False
     terms = item.get("event_terms")
-    if not attention_match.terms_all_present(terms, story_text, CROSS_DAY_EVENT_MIN_TERMS):
+    if not _event_terms_present(terms, story_text):
         return False
     counts, documents = frequency
     rare_limit = max(2, documents // 100)
@@ -1382,11 +1466,14 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
     Beyond news_publish._same_event, the two must share
     CROSS_DAY_EVENT_MIN_TOKEN_OVERLAP of the smaller title/event vocabulary,
     or every one of ``item``'s (at least CROSS_DAY_EVENT_MIN_TERMS) event terms
-    must appear in the story's title/event/summary. Independently of those
+    must appear in the story's title/event/summary (number-plus-unit spellings
+    compared via _normalize_quantities). Independently of those
     wording tests, sharing CROSS_DAY_EVENT_MIN_SHARED_FIGURES precise decimal
     figures plus a headline word also counts. The event-terms match holds at any
-    date gap within the caller's dedup window; the token-overlap and figures
-    matches also require the two to be dated at most
+    date gap within the caller's dedup window, as does a restatement:
+    CROSS_DAY_EVENT_STRONG_COVERAGE of ``item``'s title/event words appear in the
+    story's reported text, CROSS_DAY_EVENT_STRONG_MIN_RARE of them corpus-rare.
+    The token-overlap and figures matches also require the two to be dated at most
     CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS apart. An undated
     candidate counts as published the day before the issue date; an undated
     story as published on its edition date.
@@ -1417,11 +1504,12 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
         return False
     if not _shares_distinctive_figures(story, item):
         story_text = _reported_event_text(story, story_day)
+        if _restates_published_event(story, item, frequency, story_text):
+            return True
         if not _same_event(story, item, frequency):
             if not _distinctive_event_terms_match(story, item, frequency, story_text):
                 return False
-        elif attention_match.terms_all_present(
-                item.get("event_terms"), story_text, CROSS_DAY_EVENT_MIN_TERMS):
+        elif _event_terms_present(item.get("event_terms"), story_text):
             return True
         else:
             story_tokens = _story_event_tokens(story)
@@ -1492,6 +1580,8 @@ def phase_3_rank(
             "original_source_max_for_swap": ORIGINAL_SOURCE_MAX_FOR_SWAP,
             "source_domain_cap": SOURCE_DOMAIN_CAP,
             "fresh_days_back": FRESH_DAYS_BACK,
+            "cross_day_event_strong_coverage": CROSS_DAY_EVENT_STRONG_COVERAGE,
+            "cross_day_event_strong_min_rare": CROSS_DAY_EVENT_STRONG_MIN_RARE,
         },
     )
     state, cached = runtime.begin_or_load_phase(

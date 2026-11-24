@@ -593,7 +593,8 @@ def jev_verdict(untrusted: float, loaded: float, policy) -> str:
 
 
 def _assess_agent(finding: Finding, spec: config.ComponentSpec, *, store, policy, run, omp_call,
-                  jev_source: _JevSource, facts: str = "") -> Reach:
+                  jev_source: _JevSource, admit: Callable[[], bool], facts: str = "") -> Reach:
+    """``admit`` is asked right before omp is invoked; False means the call is deferred (caps/deadline)."""
     from steward import resolver
 
     method = "agent+jev"
@@ -610,6 +611,8 @@ def _assess_agent(finding: Finding, spec: config.ComponentSpec, *, store, policy
         hit = resolver.secret_reason(prompt)
         if hit:
             return Reach("unknown", method, summary=f"prompt failed secret scan ({hit})")
+        if not admit():
+            return Reach("unknown", method, summary=DEFERRED)
         try:
             reply = omp_call(prompt)
         except Exception as exc:
@@ -771,18 +774,28 @@ def assess(findings: list[Finding], inventories: dict[str, Inventory], specs: di
     agent_queue.sort(key=lambda item: _priority((item[0], item[1])))
     daily = _DailyCalls(store, now, policy.reach_max_agent_calls_per_day) if agent_queue else None
     calls = 0
+
+    def capped() -> bool:
+        return calls >= policy.reach_max_agent_calls_per_tick or _expired(deadline) or not daily.available()
+
+    def admit() -> bool:
+        """Spend one per-tick slot and one daily call, only when omp is about to run."""
+        nonlocal calls
+        if capped() or not daily.take():
+            return False
+        calls += 1
+        return True
+
     for finding, spec, key, facts in agent_queue:
         try:
             if key and key in memo:
                 settle(finding, dataclasses.replace(memo[key]), key)
                 continue
-            if (calls >= policy.reach_max_agent_calls_per_tick or _expired(deadline)
-                    or not daily.available() or not daily.take()):
+            if capped():
                 settle(finding, Reach("unknown", "agent+jev", summary=DEFERRED), key)
                 continue
-            calls += 1
-            reach = _assess_agent(finding, spec, store=store, policy=policy, run=run,
-                                  omp_call=omp_call, jev_source=jev_source, facts=facts)
+            reach = _assess_agent(finding, spec, store=store, policy=policy, run=run, omp_call=omp_call,
+                                  jev_source=jev_source, admit=admit, facts=facts)
         except Exception as exc:
             _log(f"{finding.key}: {type(exc).__name__}: {exc}")
             reach = Reach("unknown", "agent+jev", summary=_clip(f"reach error: {type(exc).__name__}", 200))

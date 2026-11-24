@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import omp_login_state
+
 from .config import (
     AUTO_PKGS,
     DEFAULT_TEMPLATE,
@@ -76,6 +78,7 @@ from .config import (
 )
 from .runtime import (
     NO_TOOLS,
+    OMP_LOGIN_URL,
     READ_ONLY_TOOLS,
     REBOOT_RECORD_NAME,
     atomic_write_text,
@@ -1359,8 +1362,61 @@ def _steward_code_events(steward_code):
     return items
 
 
-def _omp_login_events(omp_login):
-    """P0's omp login probe: a dead login silently fails every scheduled model job."""
+OMP_LOGIN_WARN_DAYS = 7   # Watching from a week before the estimated refresh-token expiry
+OMP_LOGIN_NEEDS_DAYS = 2  # Needs You from two days before
+
+
+def _omp_login_state(omp_login):
+    """Sign-in age of a working anthropic login (omp_login_state.login_state), or None.
+
+    Anthropic's refresh token dies a fixed ~30 days after sign-in whatever the refreshes,
+    so a login the probe calls ok can still be days from failing. Never raises: a helper
+    failure becomes status unknown, which reports nothing.
+    """
+    if not isinstance(omp_login, dict) or omp_login.get("status") != "ok":
+        return None
+    provider = omp_login.get("provider")
+    if provider != "anthropic":
+        return None
+    try:
+        return omp_login_state.login_state(provider, home=HOME)
+    except Exception as exc:  # noqa: BLE001 — a report must never fail on this estimate
+        return {"provider": provider, "status": "unknown",
+                "detail": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+def _omp_login_expiry_events(login_state):
+    """Watching a week before the estimated login expiry, Needs You two days before."""
+    if not isinstance(login_state, dict) or login_state.get("status") != "ok":
+        return []
+    try:
+        days = float(login_state["days_left"])
+    except (KeyError, TypeError, ValueError):
+        return []
+    expires = _parse_utc(login_state.get("expires_at"))
+    if expires is None or days > OMP_LOGIN_WARN_DAYS:
+        return []
+    left = max(days, 0.0)
+    facts = (f"Claude login for omp expires about {expires.strftime('%b %d %H:%M UTC')} "
+             f"({left:g} day{'' if left == 1 else 's'} left)")
+    provider = str(login_state.get("provider") or "anthropic")
+    if days <= OMP_LOGIN_NEEDS_DAYS:
+        return [_item(
+            "needs", facts,
+            why="Every scheduled model job stops when it expires: this report's audit and "
+                "summary, Daily News, Hyperliquid and Dependabot.",
+            todo=f"Renew it at {OMP_LOGIN_URL}, or run this in an interactive omp session "
+                 "on the ThinkPad:",
+            command=f"omp login {provider}",
+        )]
+    return [_item("watch", f"{facts}; renew at {OMP_LOGIN_URL}")]
+
+
+def _omp_login_events(omp_login, login_state=None):
+    """P0's omp login probe: a dead login silently fails every scheduled model job.
+
+    ``login_state`` (from `_omp_login_state`) warns ahead of a working login's expiry.
+    """
     if not isinstance(omp_login, dict):
         return []
     provider = str(omp_login.get("provider") or "anthropic")
@@ -1371,13 +1427,16 @@ def _omp_login_events(omp_login):
             why="omp's stored login was rejected and disabled, so every scheduled model job "
                 "fails until it is renewed: this report's audit and summary, Daily News, "
                 "Hyperliquid and Dependabot. Audit sections show as incomplete meanwhile.",
-            todo="Sign in again from an interactive omp session on the ThinkPad:",
+            todo=f"Sign in again at {OMP_LOGIN_URL}, or run this in an interactive omp "
+                 "session on the ThinkPad:",
             command=str(omp_login.get("login_command") or f"omp login {provider}"),
             problem="omp login expired",
         )]
     if status == "unknown":
         return [_item("watch", f"Could not check the {provider} model login: "
                       f"{_clip(omp_login.get('detail') or 'probe inconclusive', 160)}")]
+    if status == "ok":
+        return _omp_login_expiry_events(login_state)
     return []
 
 
@@ -2064,14 +2123,15 @@ def _html_security_watch(data, now=None):
 
 def _triage(applied, audit, fixes, *, steward_code=None, validation=None, heartbeat=None,
             troubleshoot=None, remediation=None, untracked_dotfiles=None, prev_dotfiles=None,
-            public=None, p0b=None, rig_last_ok=None, omp_login=None, security_watch=None,
-            now=None):
+            public=None, p0b=None, rig_last_ok=None, omp_login=None, omp_login_state=None,
+            security_watch=None, now=None):
     """Every report item, triaged once.
 
     Needs You is only for extreme items: a service still failing (P3 could not
     fix it, heartbeat failed, a check failing at report time); an unverified
     rollback, Docker daemon failure, unrepairable OMP DB or a rig unhealthy
-    after reboot; a dead omp model login; a steward-code pickup left unverified
+    after reboot; a dead omp model login or one within two days of its estimated
+    expiry; a steward-code pickup left unverified
     or a partly applied follow-up fix; a high-severity or security audit finding
     left for Carter; an open security-watch breaker, a failed security fix or an
     urgent fixable vulnerability left unpatched for a day;
@@ -2083,7 +2143,7 @@ def _triage(applied, audit, fixes, *, steward_code=None, validation=None, heartb
         + _p1_events(applied, rig_last_ok)
         + _route_events(audit, fixes)
         + _steward_code_events(steward_code)
-        + _omp_login_events(omp_login)
+        + _omp_login_events(omp_login, omp_login_state)
         + _public_mirror_events(public)
         + _host_drift_events(remediation, untracked_dotfiles, prev_dotfiles)
         + _session_memory_events(p0b)
@@ -2643,11 +2703,13 @@ def _report_inputs(run_dir, setup_data):
         recheck = _omp_login_probe()
         if recheck["status"] in ("ok", "dead"):
             omp_login = recheck
+    login_state = _omp_login_state(omp_login)
     security_watch = _load_security_watch_report()
     triaged = _triage(
         applied, audit, fixes,
         steward_code=setup_data.get("steward_code"),
         omp_login=omp_login,
+        omp_login_state=login_state,
         validation=validation,
         heartbeat=heartbeat,
         troubleshoot=troubleshoot,
@@ -2662,7 +2724,8 @@ def _report_inputs(run_dir, setup_data):
     return {
         "applied": applied, "validation": validation, "troubleshoot": troubleshoot,
         "heartbeat": heartbeat, "queue": queue, "audit": audit, "fixes": fixes,
-        "security_watch": security_watch, "triaged": triaged,
+        "security_watch": security_watch, "omp_login": omp_login,
+        "omp_login_state": login_state, "triaged": triaged,
     }
 
 

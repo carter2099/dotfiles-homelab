@@ -882,6 +882,145 @@ def test_cross_day_wording_dedup_keeps_later_event_matched_to_live_blog() -> Non
         check(artifact["recent_coverage_rejected"] == [], artifact["recent_coverage_rejected"])
 
 
+def test_cross_day_restatement_blocks_rerun_four_days_later() -> None:
+    """A re-report restating a published event is rejected beyond the two-day gap.
+
+    Regression for 2026-11-08/12 AI Hardware: TechCrunch's midterm data-center
+    ballot story ran on 11-08, then qz's "Data centers got crushed in the
+    midterms" re-ran the same results on 11-12. A new data-center development
+    four days later must still pass.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        published = root / "news" / "publications" / "2026-11-08"
+        published.mkdir(parents=True)
+        techcrunch = {
+            "title": "After the midterms, things are looking rocky for Elon Musk and data centers",
+            "event": "Midterm voters pass ballot measures restricting data centers and elect "
+                     "Gina Hinojosa Texas governor",
+            "summary": "Nearly all midterm ballot measures restricting data centers passed. Texas "
+                       "Governor-elect Gina Hinojosa won on a platform of data center restrictions.",
+            "url": "https://techcrunch.com/2026/11/07/after-the-midterms-musk-data-centers",
+            "editorial_significance": "high", "date_published": "2026-11-07",
+        }
+        (published / f"{catalog.TOPICS['ai-hardware']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [techcrunch],
+        }))
+        qz = {
+            "title": "Data centers got crushed in the midterms",
+            "event": "Midterm ballot measures restricting data centers passed and Texas "
+                     "Governor-elect Gina Hinojosa won on data center restrictions",
+            "summary": "Ballotpedia counts 46 of 47 measures passing; Cleanview puts the share at 41%.",
+            "url": "https://qz.com/data-centers-crushed-midterms",
+            "editorial_significance": "high", "date_published": "2026-11-11",
+        }
+        new_event = {
+            "title": "Arizona utility halts new data center hookups pending grid study",
+            "event": "Arizona Public Service pauses new data center grid connections for a "
+                     "transmission study",
+            "url": "https://wire.example/article/aps-data-center-hookup-pause",
+            "editorial_significance": "high", "date_published": "2026-11-11",
+        }
+        run_dir = root / catalog.TOPICS["ai-hardware"]["category"] / "2026-11-12"
+        run_dir.mkdir(parents=True)
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(
+                catalog.TOPICS["ai-hardware"], [copy.deepcopy(qz), copy.deepcopy(new_event)], run_dir)
+        check([item["url"] for item in queue] == [new_event["url"]], f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["url"] == qz["url"] and rejected["matched_story"]["url"] == techcrunch["url"],
+              rejected)
+
+
+def test_normalize_quantities_collapses_number_unit_spellings() -> None:
+    """Number-plus-unit spellings collapse to one form; bare numbers stay as written."""
+    normalize = research._normalize_quantities
+    for spellings, expected in (
+        (("457 megawatts", "457 MW", "457MW", "457-megawatt"), "457 mw"),
+        (("6GW", "6 gigawatts", "6-gigawatt"), "6 gw"),
+        (("1.5 billion", "1.5bn", "1.5B", "1.5 Bn"), "1.5 billion"),
+        (("7.6%", "7.6 percent", "7.6 per cent"), "7.6 percent"),
+        (("1,200 MW",), "1200 mw"),
+    ):
+        for spelling in spellings:
+            check(normalize(spelling) == expected, f"{spelling!r} -> {normalize(spelling)!r}")
+    check(normalize("$1.5 billion") == normalize("$1.5bn") == "$1.5 billion",
+          normalize("$1.5bn"))
+    for unchanged in ("in 2026", "MI455X GPUs", "Series B", "5 percentage points",
+                      "10 billionaires", "5t of steel"):
+        check(normalize(unchanged) == unchanged, f"{unchanged!r} -> {normalize(unchanged)!r}")
+
+
+def test_cross_day_event_terms_match_number_unit_spellings() -> None:
+    """An event term's quantity matches the published story however its unit is spelled.
+
+    Regression for 2026-11-17/18: TensorWave's 457 MW OpenAI deal ran in AI & Tech
+    ("457MW", "457 MW"), then again in AI Hardware with the event term
+    "457 megawatts", which never appeared literally in the earlier story. A
+    different deal between the same companies with another figure still passes.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        published = root / "news" / "publications" / "2026-11-17"
+        published.mkdir(parents=True)
+        tensorwave = {
+            "title": "TensorWave will supply OpenAI with 457MW of AMD-powered AI capacity",
+            "event": "TensorWave signed a six-year, 457 MW AMD-powered compute deal with OpenAI",
+            "event_terms": ["TensorWave", "OpenAI", "457 MW", "MI455X"],
+            "summary": "TensorWave signed a six-year deal to supply OpenAI with 457MW of dedicated "
+                       "capacity on AMD Instinct MI455X GPUs in Helios racks across several US "
+                       "sites. It is the first neocloud publicly named under the AMD–OpenAI "
+                       "partnership. The contract's value was not disclosed.",
+            "url": "https://thenextweb.com/news/tensorwave-openai-457mw-amd-helios",
+            "editorial_significance": "high", "date_published": "2026-11-16",
+            "date_confirmed": "2026-11-16",
+        }
+        # OpenAI and AMD are everyday names in the corpus, so the two headlines
+        # share no rare anchor and only the event-terms path can match them.
+        others = [
+            {"title": title, "event": title, "url": f"https://wire.example/article/corpus-{index}",
+             "editorial_significance": "high", "date_published": "2026-11-16"}
+            for index, title in enumerate((
+                "OpenAI launches ChatGPT voice mode for AMD laptops",
+                "AMD reports record data center revenue as OpenAI demand grows",
+                "OpenAI and AMD expand chip roadmap talks",
+            ))
+        ]
+        (published / f"{catalog.TOPICS['ai-tech']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [tensorwave, *others],
+        }))
+        repeat = {
+            "title": "OpenAI pushes forward with AMD partnership amid ongoing efforts to "
+                     "diversify from Nvidia",
+            "event": "OpenAI names TensorWave as first neocloud for AMD 6GW deal with 457MW capacity",
+            "event_terms": ["OpenAI", "TensorWave", "AMD", "457 megawatts"],
+            "summary": "OpenAI named TensorWave as the first neocloud provider under its 6-gigawatt "
+                       "compute deal with AMD. TensorWave will supply 457 MW, about 7.6% of the total.",
+            "url": "https://wire.example/article/openai-amd-tensorwave-neocloud",
+            "editorial_significance": "high", "date_published": "2026-11-17",
+        }
+        different = {
+            "title": "OpenAI signs 900 MW deal with AMD",
+            "event": "OpenAI names TensorWave to supply 900 MW of AMD capacity",
+            "event_terms": ["OpenAI", "TensorWave", "AMD", "900 megawatts"],
+            "url": "https://wire.example/article/openai-amd-900mw",
+            "editorial_significance": "high", "date_published": "2026-11-17",
+        }
+        run_dir = root / catalog.TOPICS["ai-hardware"]["category"] / "2026-11-18"
+        run_dir.mkdir(parents=True)
+        with patch.object(runtime, "DIGESTS_DIR", root):
+            queue = research.phase_3_rank(
+                catalog.TOPICS["ai-hardware"], [copy.deepcopy(repeat), copy.deepcopy(different)],
+                run_dir)
+        check([item["url"] for item in queue] == [different["url"]], f"queue={queue!r}")
+        artifact = json.loads((run_dir / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["url"] == repeat["url"]
+              and rejected["matched_story"]["url"] == tensorwave["url"], rejected)
+        check("headline/event wording" in rejected["rejection_reason"], rejected)
+
+
 def test_recent_coverage_blocks_redated_url_of_same_article() -> None:
     """A publisher re-dating a covered article's URL cannot re-run the story.
 
@@ -4196,6 +4335,9 @@ def main() -> None:
         test_recent_publication_blocks_same_event_without_shared_keys,
         test_cross_day_wording_dedup_keeps_new_events_in_continuing_topics,
         test_cross_day_wording_dedup_keeps_later_event_matched_to_live_blog,
+        test_cross_day_restatement_blocks_rerun_four_days_later,
+        test_normalize_quantities_collapses_number_unit_spellings,
+        test_cross_day_event_terms_match_number_unit_spellings,
         test_recent_coverage_blocks_redated_url_of_same_article,
         test_recent_publication_blocks_repeat_named_by_event_terms,
         test_recent_publication_blocks_event_terms_repeat_beyond_date_gap,

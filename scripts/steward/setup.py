@@ -308,6 +308,7 @@ MEMOIR_CHUNK_TIMEOUT = 180   # seconds per chunk/merge call
 MEMOIR_FINAL_TIMEOUT = 600   # seconds per summarize/extend call
 P0B_DEADLINE_SECONDS = 2400  # whole P0b budget; later sessions are skipped_deadline
 P0B_PROBLEM_ACTIONS = ("skipped_deadline", "error", "judge_error", "summarizer_failed")
+P0B_MAX_FAILED_RUNS = 3  # stop carrying a session forward after this many failed runs
 
 
 class _TranscriptTooLong(Exception):
@@ -782,9 +783,16 @@ def _commit_memoirs(date_str):
         return {"ok": False, "error": str(e)[:300]}
 
 
-def _prev_deadline_skips(run_dir):
-    """Session paths the latest earlier run recorded as skipped_deadline in its
-    00b-session-memory.json; only existing transcripts under SESSION_INTERACTIVE_DIR."""
+def _prev_p0b_history(run_dir):
+    """What the latest earlier (non-dry) run's 00b-session-memory.json says about
+    sessions it could not handle: {path: {"failed_runs": n, "carry": bool}} for existing
+    transcripts under SESSION_INTERACTIVE_DIR whose action was a P0B_PROBLEM_ACTION.
+
+    failed_runs counts consecutive failed P0b attempts (judge_error, error,
+    summarizer_failed) up to and including that run; artifacts written before the
+    counter existed count a failure as 1. skipped_deadline is not a failure: it keeps the
+    prior count and is always carried. Failed sessions are carried while failed_runs <
+    P0B_MAX_FAILED_RUNS. A malformed artifact yields {} (nothing carried), never raises."""
     earlier = sorted(d for d in RUN_DIR_BASE.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*")
                      if d.is_dir() and d.name < Path(run_dir).name)
     for prev in reversed(earlier):
@@ -794,30 +802,49 @@ def _prev_deadline_skips(run_dir):
         try:
             data = read_json(artifact)
         except (ValueError, OSError):
-            return []
+            return {}
+        if not isinstance(data, dict):
+            return {}
         if data.get("dry_run"):
             continue
-        paths = []
-        for s in data.get("sessions") or []:
-            if not isinstance(s, dict) or s.get("action") != "skipped_deadline":
+        sessions = data.get("sessions")
+        if not isinstance(sessions, list):
+            return {}
+        history = {}
+        for s in sessions:
+            if not isinstance(s, dict) or s.get("action") not in P0B_PROBLEM_ACTIONS:
                 continue
-            p = Path(s.get("path") or "")
-            if p.parent.parent == SESSION_INTERACTIVE_DIR and p.suffix == ".jsonl" \
-                    and p.is_file():
-                paths.append(p)
-        return paths
-    return []
+            path = s.get("path")
+            if not isinstance(path, str) or not path:
+                continue
+            p = Path(path)
+            if not (p.parent.parent == SESSION_INTERACTIVE_DIR and p.suffix == ".jsonl"
+                    and p.is_file()):
+                continue
+            failed = s.get("failed_runs")
+            if isinstance(failed, bool) or not isinstance(failed, int) or failed < 0:
+                failed = None
+            if s["action"] == "skipped_deadline":
+                history[p] = {"failed_runs": failed or 0, "carry": True}
+            else:
+                failed = failed or 1  # pre-counter artifacts: this failure is the first
+                history[p] = {"failed_runs": failed, "carry": failed < P0B_MAX_FAILED_RUNS}
+        return history
+    return {}
 
 
-def _sessions_to_scan(cutoff, run_dir):
+def _sessions_to_scan(cutoff, run_dir, history=None):
     """Sessions changed since cutoff, plus those the previous run skipped for its
-    deadline (deduped): (project, path, mtime, header)."""
+    deadline or failed on (bounded, see _prev_p0b_history), deduped:
+    (project, path, mtime, header)."""
+    if history is None:
+        history = _prev_p0b_history(run_dir)
     seen = set()
     for project, path, mtime, header in _iter_interactive_sessions(cutoff):
         seen.add(path)
         yield project, path, mtime, header
-    for path in _prev_deadline_skips(run_dir):
-        if path in seen:
+    for path, prev in history.items():
+        if path in seen or not prev["carry"]:
             continue
         seen.add(path)
         try:
@@ -831,7 +858,8 @@ def phase_0b_session_memory(run_dir, dry_run=False, setup=None):
     """Phase 0b: maintain the session memory bank (~/notes/logs/sessions/).
 
     Scans interactive omp sessions (~/.omp/agent/sessions/<project>/*.jsonl) newer than
-    the last steward run (plus those the previous run skipped at its deadline),
+    the last steward run (plus those the previous run skipped at its deadline or failed
+    on, for up to P0B_MAX_FAILED_RUNS consecutive failed runs),
     filter-skips test/dead-end sessions (LLM judge, fail-open),
     then writes compact memoirs with source pointers — or judges/updates memoirs the
     agent already wrote during the session. Commits the notes vault. Headless sessions
@@ -860,7 +888,8 @@ def phase_0b_session_memory(run_dir, dry_run=False, setup=None):
 
     now = datetime.now(timezone.utc)
     sessions = []
-    for project, path, mtime, header in _sessions_to_scan(cutoff, run_dir):
+    history = _prev_p0b_history(run_dir)
+    for project, path, mtime, header in _sessions_to_scan(cutoff, run_dir, history):
         stem = path.stem
         session_id = header.get("id") or (stem.split("_")[-1] if "_" in stem else stem)
         date_str = _session_date_str(header, mtime)
@@ -910,6 +939,14 @@ def phase_0b_session_memory(run_dir, dry_run=False, setup=None):
             s["action"] = "error"
             s["error"] = str(e)[:300]
             errors.append({"path": s["path"], "error": str(e)[:300]})
+        # Consecutive failed attempts, so _prev_p0b_history can stop carrying a session
+        # that keeps failing; a deadline skip keeps the count, success drops it.
+        prior = history.get(path, {}).get("failed_runs", 0)
+        if s["action"] == "skipped_deadline":
+            if prior:
+                s["failed_runs"] = prior
+        elif s["action"] in P0B_PROBLEM_ACTIONS:
+            s["failed_runs"] = prior + 1
         print(f"  {s['action']}: {s['path']}")
 
     commit = {}

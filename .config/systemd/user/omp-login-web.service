@@ -1,0 +1,34 @@
+[Unit]
+Description=omp login web (login.carter2099.com)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=1min
+StartLimitBurst=5
+OnFailure=notify-failure@%n.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+ExecStart=/usr/bin/python3 %h/scripts/omp_login_web.py
+Environment="PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+Restart=on-failure
+RestartSec=5s
+# omp login children run in their own sessions; stop them with the service.
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+# No ProtectHome/ProtectSystem: omp writes across ~/.omp, ~/.cache and bun caches.
+# AF_NETLINK: omp login's callback server calls getifaddrs, which fails without it.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=default.target

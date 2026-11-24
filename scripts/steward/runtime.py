@@ -131,6 +131,8 @@ def user_env():
 # Providers whose credential is omp's stored login (OAuth in ~/.omp/agent/agent.db).
 # Others (llm-proxy, opencode-go) authenticate per call instead, so `omp token` has nothing to find.
 OMP_LOGIN_PROVIDERS = frozenset({"anthropic", "openai-codex"})
+# Web page (Cloudflare Access gated) that renews omp's stored login without a terminal.
+OMP_LOGIN_URL = "https://login.carter2099.com"
 OMP_LOGIN_PROBE_TIMEOUT = 60
 _OMP_NO_CREDENTIAL = "No active credential found"
 

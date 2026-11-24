@@ -259,6 +259,7 @@ class PhaseStatusTests(unittest.TestCase):
         old = datetime.now(timezone.utc) - timedelta(days=1)
         scan = [("proj", session, old, {"id": "s1", "timestamp": old.isoformat()})]
         with patch.object(setup, "RUNS_LOG", root / "missing.jsonl"), \
+                patch.object(setup, "RUN_DIR_BASE", root / "runs"), \
                 patch.object(setup, "_sessions_to_scan", return_value=iter(scan)), \
                 patch.object(setup, "_existing_memoir_for", return_value=None), \
                 patch.object(setup, "P0B_DEADLINE_SECONDS", 0), \
@@ -326,6 +327,77 @@ class DeadlineCarryOverTests(unittest.TestCase):
         with patch.object(setup, "SESSION_INTERACTIVE_DIR", root / "sessions"), \
                 patch.object(setup, "RUN_DIR_BASE", root / "runs"):
             self.assertEqual(list(setup._sessions_to_scan(START, root / "runs" / "x")), [])
+
+    def _carry_setup(self, prev_entries=None, prev_text=None):
+        """sessions/proj/old.jsonl (mtime before START) plus a previous run artifact."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        sessions, runs = root / "sessions", root / "runs"
+        (sessions / "proj").mkdir(parents=True)
+        old = sessions / "proj" / "old.jsonl"
+        old.write_text(json.dumps({"type": "session", "id": "old"}) + "\n")
+        long_ago = (START - timedelta(days=3)).timestamp()
+        os.utime(old, (long_ago, long_ago))
+        prev = runs / "2026-09-24"
+        prev.mkdir(parents=True)
+        if prev_text is None:
+            prev_text = json.dumps({"sessions": [dict(e, path=str(old))
+                                                 for e in prev_entries]})
+        (prev / "00b-session-memory.json").write_text(prev_text)
+        tonight = runs / "2026-09-25"
+        tonight.mkdir()
+        return sessions, runs, tonight, old
+
+    def _scan(self, sessions, runs, tonight):
+        with patch.object(setup, "SESSION_INTERACTIVE_DIR", sessions), \
+                patch.object(setup, "RUN_DIR_BASE", runs):
+            return [p for _, p, _, _ in setup._sessions_to_scan(START, tonight)]
+
+    def test_previous_judge_error_older_than_cutoff_is_scanned_again(self):
+        sessions, runs, tonight, old = self._carry_setup([{"action": "judge_error"}])
+        self.assertEqual(self._scan(sessions, runs, tonight), [old])
+        with patch.object(setup, "SESSION_INTERACTIVE_DIR", sessions), \
+                patch.object(setup, "RUN_DIR_BASE", runs):
+            history = setup._prev_p0b_history(tonight)
+        self.assertEqual(history[old], {"failed_runs": 1, "carry": True})  # pre-counter
+
+    def test_session_failed_three_consecutive_runs_is_not_carried(self):
+        for action in ("judge_error", "error", "summarizer_failed"):
+            with self.subTest(action=action):
+                sessions, runs, tonight, old = self._carry_setup(
+                    [{"action": action, "failed_runs": 3}])
+                self.assertEqual(self._scan(sessions, runs, tonight), [])
+        sessions, runs, tonight, old = self._carry_setup(
+            [{"action": "judge_error", "failed_runs": 2}])
+        self.assertEqual(self._scan(sessions, runs, tonight), [old])
+
+    def test_deadline_skip_still_carried_even_after_failures(self):
+        sessions, runs, tonight, old = self._carry_setup(
+            [{"action": "skipped_deadline", "failed_runs": 3}])
+        self.assertEqual(self._scan(sessions, runs, tonight), [old])
+
+    def test_malformed_previous_artifact_carries_nothing(self):
+        for text in ("{not json", "[]", json.dumps({"sessions": "x"}),
+                     json.dumps({"sessions": [None, 3, {"action": "error", "path": 7},
+                                              {"action": "error", "path": ""}]})):
+            with self.subTest(text=text):
+                sessions, runs, tonight, _ = self._carry_setup(prev_text=text)
+                self.assertEqual(self._scan(sessions, runs, tonight), [])
+
+    def test_failed_attempt_increments_the_counter_in_the_artifact(self):
+        sessions, runs, tonight, old = self._carry_setup(
+            [{"action": "judge_error", "failed_runs": 2}])
+        with patch.object(setup, "SESSION_INTERACTIVE_DIR", sessions), \
+                patch.object(setup, "RUN_DIR_BASE", runs), \
+                patch.object(setup, "RUNS_LOG", runs / "missing.jsonl"), \
+                patch.object(setup, "_iter_interactive_sessions", return_value=iter([])), \
+                patch.object(setup, "_existing_memoir_for", return_value=None), \
+                patch.object(setup, "_document_session", side_effect=RuntimeError("no key")):
+            setup.phase_0b_session_memory(tonight)
+        data = json.loads((tonight / "00b-session-memory.json").read_text())
+        (entry,) = data["sessions"]
+        self.assertEqual((entry["action"], entry["failed_runs"]), ("error", 3))
 
 
 class OmpLoginProbeTests(unittest.TestCase):
