@@ -421,12 +421,16 @@ class GoModuleVersionTests(TempHomeTestCase):
         self.assertEqual(result.release_published, "2026-10-20T10:00:00+00:00")
         self.assertEqual(result.fixed_version, "0.59.0")
 
-    def test_no_newer_tag_is_an_alert_refusal(self):
-        result = self.plan_backup([PSEUDO], "v0.57.0\nv0.58.0\nv0.59.0-rc.1\n", [])
-        self.assertIsInstance(result, Refusal)
-        self.assertTrue(result.alert)
-        self.assertEqual(result.reason, f"fix for {CRYPTO} exists only at an untagged commit (v{PSEUDO}); "
-                                        "waiting for a tagged release")
+    def test_untagged_fix_pins_the_advisory_pseudo_version(self):
+        fetched = []
+        result = self.plan_backup([PSEUDO], "v0.57.0\nv0.58.0\nv0.59.0-rc.1\n", fetched)
+        self.assertIsInstance(result, Plan)
+        self.assertEqual(result.state["params"], {"modules": [[CRYPTO, PSEUDO]]})
+        self.assertEqual(result.target, f"homelab-backup: go.mod {CRYPTO} v0.57.0 -> v{PSEUDO}")
+        self.assertEqual(fetched, ["https://proxy.golang.org/golang.org/x/crypto/@v/list",
+                                   f"https://proxy.golang.org/golang.org/x/crypto/@v/v{PSEUDO}.info"])
+        self.assertEqual(result.release_published, "2026-10-20T10:00:00+00:00")
+        self.assertEqual(result.fixed_version, PSEUDO)
 
     def test_tagged_fixed_version_skips_the_proxy_listing(self):
         fetched = []
@@ -595,6 +599,14 @@ class ApplyTests(TempHomeTestCase):
         self.assertEqual([argv for argv, _ in scripts.calls], [["bash", "verify.sh"]])
         self.assertEqual(order, ["checks", "push"])
 
+    def test_untagged_fix_is_applied_with_go_get_of_the_pseudo_version(self):
+        plan = backup_plan()
+        plan.state["params"] = {"modules": [[CRYPTO, PSEUDO]]}
+        run = FakeRun(self.backup_responder())
+        outcome = RepoPrPlaybook(script_run=FakeRun()).apply(plan, make_ctx(run))
+        self.assertEqual(outcome.status, "pending", outcome.detail)
+        self.assertEqual([argv for argv, _ in run.find("go", "get")], [["go", "get", f"{CRYPTO}@v{PSEUDO}"]])
+
 
 def backup_plan():
     net_mod = "golang.org/x/net"
@@ -622,7 +634,8 @@ class SubsetAndDeployOnlyPlanTests(TempHomeTestCase):
         def responder(argv, kw):
             return (0, MIXED_GO_MOD) if "show" in argv else None
         fetched = []
-        group = [finding("homelab-backup", "Go", CRYPTO, "0.57.0", [PSEUDO], group="GO-2026-5000", urgency="urgent"),
+        group = [finding("homelab-backup", "Go", "golang.org/x/text", "0.20.0", ["0.21.0"],
+                         group="GO-2026-5000", urgency="urgent"),
                  finding("homelab-backup", "Go", "golang.org/x/net", "0.60.0", ["0.62.0"], group="GO-2026-5001")]
         ctx = make_ctx(FakeRun(responder), proxy_fetch("v0.57.0\nv0.58.0\n", fetched))
         playbook = RepoPrPlaybook()
@@ -634,10 +647,10 @@ class SubsetAndDeployOnlyPlanTests(TempHomeTestCase):
         self.assertEqual(result.release_published, "2026-10-20T10:00:00+00:00")
         self.assertIn("https://proxy.golang.org/golang.org/x/net/@v/v0.62.0.info", fetched)
         [note] = result.state["not_addressed"]
-        self.assertTrue(note.startswith(f"fix for {CRYPTO} exists only at an untagged commit"))
+        self.assertEqual(note, "golang.org/x/text is not required in homelab-backup/go.mod")
         body = playbook._pr_body(result, ctx, SPECS["homelab-backup"])
         self.assertIn("Not addressed by this PR", body)
-        self.assertIn(CRYPTO, body)
+        self.assertIn("golang.org/x/text", body)
 
     def test_go_module_without_a_proxy_release_date_is_a_transient_refusal(self):
         def responder(argv, kw):

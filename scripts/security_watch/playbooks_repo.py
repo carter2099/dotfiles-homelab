@@ -141,7 +141,7 @@ def _max_version(a: str | None, b: str) -> str:
     return b if a is None or _vlt(a, b) else a
 
 
-# --- Go module versions (semver; pseudo-versions are never pinned) ------------
+# --- Go module versions (semver; a tagged release wins over a pseudo-version) --
 
 GO_PROXY_LIST_URL = "https://proxy.golang.org/{module}/@v/list"
 _GO_PSEUDO = re.compile(
@@ -1024,12 +1024,10 @@ class RepoPrPlaybook:
                                f"(fixed: {', '.join(finding.fixed_versions)})")
                 continue
             if is_go_pseudo_version(fixed):
-                pseudo = fixed
-                fixed = resolve_go_tag(name, pseudo, ctx.fetch)
-                if fixed is None:
-                    skipped.append(f"fix for {name} exists only at an untagged commit (v{pseudo}); "
-                                   "waiting for a tagged release")
-                    continue
+                # Pin the smallest release that contains the fix; when upstream has
+                # tagged none, pin the advisory's own fix commit (pseudo-version).
+                # CI and the release-age rule gate it like a tag.
+                fixed = resolve_go_tag(name, fixed, ctx.fetch) or fixed
             if not _semver_lt(have, fixed):
                 stale.append((finding, f"{name} v{have}", fixed))
                 continue
@@ -1225,9 +1223,6 @@ class RepoPrPlaybook:
         """Apply the planned edit inside the worktree: (changed files, error)."""
         edit, params = st["edit"], st.get("params") or {}
         if edit == "go-module":
-            pseudo = [f"{m}@v{v}" for m, v in params.get("modules", []) if is_go_pseudo_version(v)]
-            if pseudo:
-                return [], f"refusing to pin pseudo-version(s) {', '.join(pseudo)}"
             argv = ["go", "get", *(f"{m}@v{v}" for m, v in params.get("modules", []))]
             for command in (argv, ["go", "mod", "tidy"]):
                 result = ctx.run(command, timeout=600, cwd=str(tmp), env=_go_env())
