@@ -1310,16 +1310,19 @@ def _p1_app_deploy(service, spec, dry_run=False, *, sleep=time.sleep):
 
 _DEPENDABOT_BUMP = re.compile(
     r"\b[Bb]ump (?P<dep>\S+) from (?P<old>\S+) to (?P<new>\S+?)\.?(?:\s|$)")
-# A version, not a commit SHA or digest: optional v, digits, then . - + or end.
-_DEPENDABOT_VERSION = re.compile(r"[vV]?(\d+)(?:[.+-]\S*)?")
+# A version, not a commit SHA or digest: optional v, digits, an optional .minor,
+# then . - + or end.
+_DEPENDABOT_VERSION = re.compile(r"[vV]?(\d+)(?:\.(\d+))?(?:[.+-]\S*)?")
 _DEPENDABOT_PR_FIELDS = (
     "number,title,url,headRefName,baseRefName,isDraft,mergeable,statusCheckRollup")
 
 
-def _dependabot_bump(title):
+def _dependabot_bump(title, *, zero_minor_is_major=False):
     """(dependency, old, new, major) from a "Bump X from A to B" title, or None.
 
-    Major means the leading (semver-major) version component changed.
+    Major means the leading (semver-major) version component changed.  With
+    zero_minor_is_major, a minor change of a 0.x version also counts (semver:
+    0.x minor bumps may break, and Bundler's `~> 0.y.z` pins reject them).
     """
     match = _DEPENDABOT_BUMP.search(str(title or ""))
     if not match:
@@ -1329,8 +1332,11 @@ def _dependabot_bump(title):
         version = _DEPENDABOT_VERSION.fullmatch(value.strip("`"))
         if not version:
             return None
-        parts.append(int(version[1]))
-    return match["dep"], match["old"], match["new"], parts[0] != parts[1]
+        parts.append((int(version[1]), int(version[2] or 0)))
+    (old_major, old_minor), (new_major, new_minor) = parts
+    major = old_major != new_major or (
+        zero_minor_is_major and old_major == 0 and old_minor != new_minor)
+    return match["dep"], match["old"], match["new"], major
 
 
 def _dependabot_checks_green(rollup):
@@ -1424,7 +1430,7 @@ def _p1_dependabot_merge(dry_run=False, *, ctx=None):
             if repo in DEPENDABOT_WEBHOOK_BUNDLER_REPOS and branch.startswith("dependabot/bundler/"):
                 # The webhook only closes PRs its batch lock already satisfies; a
                 # major it cannot resolve stays open forever unless Carter sees it.
-                bump = _dependabot_bump(pr.get("title"))
+                bump = _dependabot_bump(pr.get("title"), zero_minor_is_major=True)
                 if bump and bump[3]:
                     needs_carter.append({**item, "reason": f"major bump {bump[1]} -> {bump[2]} "
                                                            "(bundler; dependabot-webhook owned)"})

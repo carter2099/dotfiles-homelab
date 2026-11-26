@@ -3021,6 +3021,25 @@ class DependabotMergeTests(unittest.TestCase):
         self.assertTrue(updates._dependabot_bump("Bump x from 1.9.0 to 2.0.0")[3])
         self.assertFalse(updates._dependabot_bump("Bump x from v6.0.3 to v6.1.0")[3])
 
+    def test_zero_major_minor_bundler_bump_is_listed_for_carter(self):
+        self.assertTrue(updates._dependabot_bump(
+            "Bump rubocop-erb from 0.7.2 to 0.8.2", zero_minor_is_major=True)[3])
+        self.assertFalse(updates._dependabot_bump(
+            "Bump rubocop-erb from 0.7.1 to 0.7.2", zero_minor_is_major=True)[3])
+        self.assertFalse(updates._dependabot_bump(
+            "Bump x from 1.7.2 to 1.8.0", zero_minor_is_major=True)[3])
+        prs = {"blog": [self._pr(138, "Bump rubocop-erb from 0.7.2 to 0.8.2",
+                                 branch="dependabot/bundler/rubocop-erb-0.8.2"),
+                        self._pr(139, "Bump rack from 0.7.1 to 0.7.2",
+                                 branch="dependabot/bundler/rack-0.7.2")]}
+        result, calls = self._run(prs)
+        self.assertFalse([c for c in calls if c[:2] == ["pr", "merge"]])
+        self.assertEqual([(i["repo"], i["number"]) for i in result["needs_carter"]],
+                         [("blog", 138)])
+        self.assertIn("dependabot-webhook owned", result["needs_carter"][0]["reason"])
+        reasons = {(i["repo"], i.get("number")): i["reason"] for i in result["skipped"]}
+        self.assertIn("dependabot-webhook", reasons[("blog", 139)])
+
     def test_ineligible_repo_and_dry_run_merge_nothing(self):
         prs = {"herdr-web-client": [self._pr(10, "Bump a from 1.0.0 to 1.0.1")]}
         for kwargs, expected in (({"eligible": (False, "auto-merge is disabled")},
