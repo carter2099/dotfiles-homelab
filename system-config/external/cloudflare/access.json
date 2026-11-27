@@ -1,0 +1,406 @@
+{
+  "apps": [
+    {
+      "allowed_idps": [],
+      "app_launcher_visible": true,
+      "aud": "sha256:3d867d4b09d8",
+      "auto_redirect_to_identity": false,
+      "destinations": [
+        {
+          "type": "public",
+          "uri": "chat.carter2099.com"
+        }
+      ],
+      "domain": "chat.carter2099.com",
+      "enable_binding_cookie": false,
+      "http_only_cookie_attribute": false,
+      "name": "chat",
+      "options_preflight_bypass": false,
+      "policies": [
+        {
+          "connection_rules": {
+            "rdp": {}
+          },
+          "decision": "allow",
+          "exclude": [],
+          "include": [
+            {
+              "cloudflare_account_member": {
+                "account_id": "<account-id>"
+              }
+            }
+          ],
+          "name": "AllowCarter2099",
+          "precedence": 1,
+          "require": [
+            {
+              "email": {
+                "email": "Carter2099@pm.me"
+              }
+            }
+          ],
+          "reusable": true
+        }
+      ],
+      "self_hosted_domains": [
+        "chat.carter2099.com"
+      ],
+      "session_duration": "168h",
+      "tags": [],
+      "type": "self_hosted"
+    },
+    {
+      "allowed_idps": [],
+      "app_launcher_visible": true,
+      "aud": "sha256:66870d57d06b",
+      "auto_redirect_to_identity": false,
+      "destinations": [
+        {
+          "type": "public",
+          "uri": "comfy.carter2099.com"
+        }
+      ],
+      "domain": "comfy.carter2099.com",
+      "eager_redirect_cookie_setting": true,
+      "enable_binding_cookie": false,
+      "http_only_cookie_attribute": false,
+      "name": "comfy",
+      "options_preflight_bypass": false,
+      "policies": [
+        {
+          "connection_rules": {
+            "rdp": {}
+          },
+          "decision": "allow",
+          "exclude": [],
+          "include": [
+            {
+              "cloudflare_account_member": {
+                "account_id": "<account-id>"
+              }
+            }
+          ],
+          "name": "AllowCarter2099",
+          "precedence": 1,
+          "require": [
+            {
+              "email": {
+                "email": "Carter2099@pm.me"
+              }
+            }
+          ],
+          "reusable": true
+        }
+      ],
+      "self_hosted_domains": [
+        "comfy.carter2099.com"
+      ],
+      "session_duration": "24h",
+      "tags": [],
+      "type": "self_hosted"
+    },
+    {
+      "allowed_idps": [],
+      "app_launcher_visible": true,
+      "aud": "sha256:b2557c3aa12a",
+      "auto_redirect_to_identity": false,
+      "destinations": [
+        {
+          "type": "public",
+          "uri": "deltaneutral.carter2099.com"
+        }
+      ],
+      "domain": "deltaneutral.carter2099.com",
+      "eager_redirect_cookie_setting": true,
+      "enable_binding_cookie": false,
+      "http_only_cookie_attribute": false,
+      "name": "deltaneutral",
+      "options_preflight_bypass": false,
+      "policies": [
+        {
+          "connection_rules": {
+            "rdp": {}
+          },
+          "decision": "allow",
+          "exclude": [],
+          "include": [
+            {
+              "cloudflare_account_member": {
+                "account_id": "<account-id>"
+              }
+            }
+          ],
+          "name": "AllowCarter2099",
+          "precedence": 1,
+          "require": [
+            {
+              "email": {
+                "email": "Carter2099@pm.me"
+              }
+            }
+          ],
+          "reusable": true
+        }
+      ],
+      "self_hosted_domains": [
+        "deltaneutral.carter2099.com"
+      ],
+      "session_duration": "24h",
+      "tags": [],
+      "type": "self_hosted"
+    },
+    {
+      "allowed_idps": [],
+      "app_launcher_visible": true,
+      "aud": "sha256:6732e4f22d6c",
+      "auto_redirect_to_identity": false,
+      "destinations": [
+        {
+          "type": "public",
+          "uri": "login.carter2099.com"
+        }
+      ],
+      "domain": "login.carter2099.com",
+      "eager_redirect_cookie_setting": true,
+      "enable_binding_cookie": false,
+      "http_only_cookie_attribute": false,
+      "name": "login",
+      "options_preflight_bypass": false,
+      "policies": [
+        {
+          "connection_rules": {
+            "rdp": {}
+          },
+          "decision": "allow",
+          "exclude": [],
+          "include": [
+            {
+              "cloudflare_account_member": {
+                "account_id": "<account-id>"
+              }
+            }
+          ],
+          "name": "AllowCarter2099",
+          "precedence": 1,
+          "require": [
+            {
+              "email": {
+                "email": "Carter2099@pm.me"
+              }
+            }
+          ],
+          "reusable": true
+        }
+      ],
+      "self_hosted_domains": [
+        "login.carter2099.com"
+      ],
+      "session_duration": "30m",
+      "tags": [],
+      "type": "self_hosted"
+    },
+    {
+      "allowed_idps": [],
+      "app_launcher_visible": true,
+      "aud": "sha256:b8ffa36f2da9",
+      "auto_redirect_to_identity": false,
+      "destinations": [
+        {
+          "type": "public",
+          "uri": "omp.carter2099.com"
+        }
+      ],
+      "domain": "omp.carter2099.com",
+      "eager_redirect_cookie_setting": true,
+      "enable_binding_cookie": false,
+      "http_only_cookie_attribute": false,
+      "name": "omp",
+      "options_preflight_bypass": false,
+      "policies": [
+        {
+          "connection_rules": {
+            "rdp": {}
+          },
+          "decision": "allow",
+          "exclude": [],
+          "include": [
+            {
+              "cloudflare_account_member": {
+                "account_id": "<account-id>"
+              }
+            }
+          ],
+          "name": "AllowCarter2099",
+          "precedence": 1,
+          "require": [
+            {
+              "email": {
+                "email": "Carter2099@pm.me"
+              }
+            }
+          ],
+          "reusable": true
+        }
+      ],
+      "self_hosted_domains": [
+        "omp.carter2099.com"
+      ],
+      "session_duration": "168h",
+      "tags": [],
+      "type": "self_hosted"
+    },
+    {
+      "allowed_idps": [],
+      "app_launcher_visible": true,
+      "aud": "sha256:5a1532dc3310",
+      "auto_redirect_to_identity": false,
+      "destinations": [
+        {
+          "type": "public",
+          "uri": "remote.carter2099.com"
+        }
+      ],
+      "domain": "remote.carter2099.com",
+      "eager_redirect_cookie_setting": true,
+      "enable_binding_cookie": false,
+      "http_only_cookie_attribute": false,
+      "name": "remote",
+      "options_preflight_bypass": false,
+      "policies": [
+        {
+          "connection_rules": {
+            "rdp": {}
+          },
+          "decision": "allow",
+          "exclude": [],
+          "include": [
+            {
+              "cloudflare_account_member": {
+                "account_id": "<account-id>"
+              }
+            }
+          ],
+          "name": "AllowCarter2099",
+          "precedence": 1,
+          "require": [
+            {
+              "email": {
+                "email": "Carter2099@pm.me"
+              }
+            }
+          ],
+          "reusable": true
+        }
+      ],
+      "self_hosted_domains": [
+        "remote.carter2099.com"
+      ],
+      "session_duration": "24h",
+      "tags": [],
+      "type": "self_hosted"
+    },
+    {
+      "allowed_idps": [],
+      "app_launcher_visible": true,
+      "aud": "sha256:3c7dd7ad96a2",
+      "auto_redirect_to_identity": false,
+      "destinations": [
+        {
+          "type": "public",
+          "uri": "rig.carter2099.com"
+        }
+      ],
+      "domain": "rig.carter2099.com",
+      "eager_redirect_cookie_setting": true,
+      "enable_binding_cookie": false,
+      "http_only_cookie_attribute": false,
+      "name": "rig",
+      "options_preflight_bypass": false,
+      "policies": [
+        {
+          "connection_rules": {
+            "rdp": {}
+          },
+          "decision": "allow",
+          "exclude": [],
+          "include": [
+            {
+              "cloudflare_account_member": {
+                "account_id": "<account-id>"
+              }
+            }
+          ],
+          "name": "AllowCarter2099",
+          "precedence": 1,
+          "require": [
+            {
+              "email": {
+                "email": "Carter2099@pm.me"
+              }
+            }
+          ],
+          "reusable": true
+        }
+      ],
+      "self_hosted_domains": [
+        "rig.carter2099.com"
+      ],
+      "session_duration": "24h",
+      "tags": [],
+      "type": "self_hosted"
+    },
+    {
+      "allowed_idps": [],
+      "app_launcher_visible": true,
+      "aud": "sha256:df95ee1f0550",
+      "auto_redirect_to_identity": false,
+      "destinations": [
+        {
+          "type": "public",
+          "uri": "ssh.carter2099.com"
+        }
+      ],
+      "domain": "ssh.carter2099.com",
+      "eager_redirect_cookie_setting": true,
+      "enable_binding_cookie": false,
+      "http_only_cookie_attribute": false,
+      "name": "ssh",
+      "options_preflight_bypass": false,
+      "policies": [
+        {
+          "connection_rules": {
+            "rdp": {}
+          },
+          "decision": "allow",
+          "exclude": [],
+          "include": [
+            {
+              "cloudflare_account_member": {
+                "account_id": "<account-id>"
+              }
+            }
+          ],
+          "name": "AllowCarter2099",
+          "precedence": 1,
+          "require": [
+            {
+              "email": {
+                "email": "Carter2099@pm.me"
+              }
+            }
+          ],
+          "reusable": true
+        }
+      ],
+      "self_hosted_domains": [
+        "ssh.carter2099.com"
+      ],
+      "session_duration": "168h",
+      "tags": [],
+      "type": "self_hosted"
+    }
+  ],
+  "groups": {
+    "unreadable": "HTTP 403: Authentication error (token lacks Access: Organizations, Identity Providers, and Groups Read)"
+  }
+}

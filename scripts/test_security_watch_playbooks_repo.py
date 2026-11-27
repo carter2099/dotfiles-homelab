@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import contextlib
+import dataclasses
 import json
 import os
 import subprocess
@@ -109,6 +110,10 @@ certifi==2026.10.19
 """
 
 SPECS = {spec.id: spec for spec in config.load_components()}
+# The blog's gems were owned by the dependabot-webhook until 2026-11-26; the pin_owner
+# mechanism itself is exercised on a copy that still declares it.
+PINNED_BLOG = dataclasses.replace(
+    SPECS["blog"], extra={**SPECS["blog"].extra, "pin_owner": {"RubyGems": "dependabot-webhook owns blog bundler updates"}})
 
 
 def finding(component, ecosystem, name, version, fixed, group="CVE-2026-111497", urgency="normal"):
@@ -272,14 +277,14 @@ class PlanTests(TempHomeTestCase):
         rack = finding("blog", "RubyGems", "rack", "3.2.6", ["3.1.23", "3.2.8"], group="CVE-2026-125111",
                        urgency="urgent")
         run = FakeRun(self.gemfile_responder("3.2.6"))
-        result = RepoPrPlaybook().plan([rack], SPECS["blog"], make_ctx(run))
+        result = RepoPrPlaybook().plan([rack], PINNED_BLOG, make_ctx(run))
         self.assertIsInstance(result, Refusal)
         self.assertTrue(result.alert)
         self.assertIn("dependabot-webhook", result.reason)
         self.assertIn("origin/main still resolves rack 3.2.6 (fixed in 3.2.8)", result.reason)
         self.assertEqual(result.finding_keys, ["blog|CVE-2026-125111"])
         brotli = finding("blog", "Debian:12", "brotli", "1.0.9-2", ["1.0.9-2+deb12u1"])
-        result = RepoPrPlaybook().plan([rack, brotli], SPECS["blog"], make_ctx(FakeRun(self.gemfile_responder("3.2.6"))))
+        result = RepoPrPlaybook().plan([rack, brotli], PINNED_BLOG, make_ctx(FakeRun(self.gemfile_responder("3.2.6"))))
         self.assertIsInstance(result, Plan)
         self.assertEqual(result.state["edit"], "base-refresh")
         self.assertEqual(result.finding_keys, ["blog|CVE-2026-111497"])
@@ -287,7 +292,7 @@ class PlanTests(TempHomeTestCase):
     def test_pin_owner_fix_merged_on_main_plans_a_deploy_only_action(self):
         group = [finding("blog", "RubyGems", "rack", "3.2.6", ["2.2.25", "3.1.23", "3.2.8"], group=g, urgency=u)
                  for g, u in (("CVE-2026-125111", "urgent"), ("CVE-2026-125109", "normal"))]
-        result = RepoPrPlaybook().plan(group, SPECS["blog"], make_ctx(FakeRun(self.gemfile_responder("3.2.8"))))
+        result = RepoPrPlaybook().plan(group, PINNED_BLOG, make_ctx(FakeRun(self.gemfile_responder("3.2.8"))))
         self.assertIsInstance(result, Plan)
         self.assertTrue(result.state["deploy_only"])
         self.assertEqual(result.finding_keys, ["blog|CVE-2026-125111", "blog|CVE-2026-125109"])
@@ -790,7 +795,7 @@ THRUST = "/usr/local/bundle/ruby/3.4.0/gems/thruster-0.1.27-x86_64-linux/exe/x86
 
 
 class GemGoModuleTests(TempHomeTestCase):
-    """blog: Go modules inside thrust move with the thruster gem (dependabot-webhook's pin)."""
+    """blog: Go modules inside thrust move with the thruster gem."""
 
     def plan(self, compress_required):
         lock = "GEM\n  remote: https://rubygems.org/\n  specs:\n    thruster (0.1.28)\n    thruster (0.1.28-x86_64-linux)\n"
@@ -823,12 +828,11 @@ class GemGoModuleTests(TempHomeTestCase):
                                         "whose go.mod requires github.com/klauspost/compress v1.20.4)")
         self.assertEqual(self.fetched, ["https://proxy.golang.org/github.com/basecamp/thruster/@v/v0.1.28.mod"])
 
-    def test_gem_version_still_requiring_the_affected_module_names_the_owner(self):
+    def test_gem_version_still_requiring_the_affected_module_needs_a_gem_bump(self):
         result = self.plan("1.20.0")
         self.assertIsInstance(result, Refusal)
         self.assertTrue(result.alert)
-        self.assertIn("comes from the thruster gem's go.mod (dependabot-webhook owns blog bundler updates)",
-                      result.reason)
+        self.assertIn("comes from the thruster gem's go.mod (needs a thruster gem bump)", result.reason)
         self.assertIn("origin/main resolves thruster 0.1.28, whose go.mod requires "
                       "github.com/klauspost/compress v1.20.0 (fixed in 1.20.2)", result.reason)
 
@@ -881,9 +885,21 @@ class AdvanceTests(TempHomeTestCase):
         self.registry = {"blog": {"repo": "~/dev/blog", "github": "carter2099/blog"}}
         self.script_out = lambda argv, kw: (0, "deployed\n")
         self.scripts = FakeRun(lambda argv, kw: self.script_out(argv, kw))
+        # Health goes through the shared health.check_health with a fake probe and clock:
+        # no test may reach a live loopback service.
+        self.probe = lambda url, host: 200
+        self.probed = []
+        self.clock = [0.0]
+
+        def probe(url, host):
+            self.probed.append((url, host))
+            return self.probe(url, host)
+
+        def sleep(seconds):
+            self.clock[0] += seconds
         self.playbook = RepoPrPlaybook(app_deploy=app_deploy, deploy_registry=self.registry,
-                                       auto_merge_repos={"blog"}, sleep=lambda seconds: None,
-                                       script_run=self.scripts)
+                                       auto_merge_repos={"blog"}, sleep=sleep, clock=lambda: self.clock[0],
+                                       health_probe=probe, script_run=self.scripts)
 
     def release_run(self, check_runs=None, statuses=None, inspect=None, dirty=""):
         """ctx.run for a release deploy: main checkout, HEAD deployhead1, CI payloads, docker inspect."""
@@ -990,10 +1006,9 @@ class AdvanceTests(TempHomeTestCase):
     def test_deploy_runs_steward_app_deploy_under_the_lock(self):
         locks = []
         store = FakeStore()
-        fetch = lambda url, **kw: net.Response(status=200, headers={}, body=b"ok", url=url)
         outcome = self.playbook.advance(
             action(stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
-            make_ctx(FakeRun(), fetch, locks, store))
+            make_ctx(FakeRun(), None, locks, store))
         self.assertEqual(outcome.status, "done", outcome.detail)
         self.assertTrue(outcome.verify)
         self.assertTrue(outcome.state["production_touched"])
@@ -1004,6 +1019,26 @@ class AdvanceTests(TempHomeTestCase):
         self.assertEqual(action_id, 7)
         self.assertEqual(journal["state"]["stage"], "deploying")
         self.assertTrue(journal["state"]["production_touched"])
+
+    def test_deploy_health_sends_the_components_health_host(self):
+        # herdr-web-client routes by Host and answers 404 to bare 127.0.0.1: action #65 (2026-11-24)
+        # failed its health check after a good deploy and opened the breaker for two days.
+        self.registry["herdr-web-client"] = {"repo": "~/dev/herdr-web-client"}
+        self.probe = lambda url, host: 200 if host == "remote.carter2099.com" else 404
+        outcome = self.playbook.advance(
+            action("herdr-web-client", stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
+            make_ctx(FakeRun()))
+        self.assertEqual(outcome.status, "done", outcome.detail)
+        self.assertIn("health OK", outcome.detail)
+        self.assertEqual(self.probed, [("http://127.0.0.1:30145/", "remote.carter2099.com")])
+
+    def test_deploy_health_failure_gives_up_after_its_budget(self):
+        self.probe = lambda url, host: 502
+        outcome = self.playbook.advance(
+            action(stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)), make_ctx(FakeRun()))
+        self.assertEqual(outcome.status, "failed")
+        self.assertIn("health failed: http://127.0.0.1:33099/up answered 502 within 30s", outcome.detail)
+        self.assertGreaterEqual(self.clock[0], 30)
 
     def test_deploy_skipped_until_ci_is_green_stays_pending(self):
         self.deploy_row = {"status": "skipped", "reason": "origin/main abc1234 is not CI-green: pending"}
@@ -1022,11 +1057,10 @@ class AdvanceTests(TempHomeTestCase):
 
     def test_release_deploy_pulls_waits_for_green_ci_and_runs_the_script(self):
         run = self.release_run()
-        fetch = lambda url, **kw: net.Response(status=200, headers={}, body=b"ok", url=url)
         locks = []
         outcome = self.playbook.advance(
             action("beatz", stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
-            make_ctx(run, fetch, locks))
+            make_ctx(run, None, locks))
         self.assertEqual(outcome.status, "done", outcome.detail)
         self.assertTrue(outcome.state["production_touched"])
         self.assertEqual(locks, ["app-beatz"])
@@ -1070,10 +1104,9 @@ class AdvanceTests(TempHomeTestCase):
             seen.append([dict(update[1]) for update in store.updates])
             return 0, "deployed\n"
         self.script_out = script
-        fetch = lambda url, **kw: net.Response(status=200, headers={}, body=b"ok", url=url)
         outcome = self.playbook.advance(
             action("beatz", stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
-            make_ctx(self.release_run(), fetch, store=store))
+            make_ctx(self.release_run(), store=store))
         self.assertEqual(outcome.status, "done", outcome.detail)
         [[journal]] = seen
         self.assertEqual(journal["status"], "pending")
@@ -1090,12 +1123,11 @@ class AdvanceTests(TempHomeTestCase):
 
     def test_prompt_guard_deploy_runs_the_promoting_script(self):
         self.assertEqual(SPECS["prompt-guard"].get("deploy"), "release:deploy.sh")
-        fetch = lambda url, **kw: net.Response(status=200, headers={}, body=b"ok", url=url)
         run = self.release_run()
         outcome = self.playbook.advance(
             action("prompt-guard", stage="deploy", merge_sha="mergesha1", has_ci=False, edit="pip-pin",
                    merged_at=model.iso(NOW)),
-            make_ctx(run, fetch))
+            make_ctx(run))
         self.assertEqual(outcome.status, "done", outcome.detail)
         [(argv, kw)] = self.scripts.calls
         self.assertEqual(argv, ["bash", "deploy.sh"])
@@ -1120,11 +1152,10 @@ class AdvanceTests(TempHomeTestCase):
     def test_release_script_dying_in_its_preconditions_is_untouched(self):
         inspect = json.dumps({"image_id": "sha256:" + "cd" * 32, "image": "carter-monitor:x",
                               "running": True, "status": "running"}) + "\n"
-        fetch = lambda url, **kw: net.Response(status=200, headers={}, body=b"ok", url=url)
         self.script_out = lambda argv, kw: (1, "error: another release is in progress\n")
         outcome = self.playbook.advance(
             action("homelab-dashboard", stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
-            make_ctx(self.release_run(inspect=inspect), fetch))
+            make_ctx(self.release_run(inspect=inspect)))
         self.assertEqual(outcome.status, "failed")
         self.assertFalse(outcome.state["production_touched"])
         self.assertIn("before changing production", outcome.detail)
@@ -1132,7 +1163,7 @@ class AdvanceTests(TempHomeTestCase):
         self.script_out = lambda argv, kw: (1, "==> promoting deployhead1\n[release] rolled back to releases/a\n")
         outcome = self.playbook.advance(
             action("homelab-dashboard", stage="deploy", merge_sha="mergesha1", merged_at=model.iso(NOW)),
-            make_ctx(self.release_run(inspect=inspect), fetch))
+            make_ctx(self.release_run(inspect=inspect)))
         self.assertEqual(outcome.status, "rolled_back")
         self.assertTrue(outcome.state["production_touched"])
 

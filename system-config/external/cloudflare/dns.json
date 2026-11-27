@@ -1,0 +1,202 @@
+{
+  "records": [
+    {
+      "content": "\"v=DMARC1; p=quarantine\"",
+      "name": "_dmarc.carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "TXT"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "beatz.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "blog.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "0 issue \"letsencrypt.org\"",
+      "name": "carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "CAA"
+    },
+    {
+      "content": "0 issue \"pki.goog; cansignhttpexchanges=yes\"",
+      "name": "carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "CAA"
+    },
+    {
+      "content": "0 issue \"sectigo.com\"",
+      "name": "carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "CAA"
+    },
+    {
+      "content": "0 issue \"ssl.com\"",
+      "name": "carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "CAA"
+    },
+    {
+      "content": "0 issuewild \"letsencrypt.org\"",
+      "name": "carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "CAA"
+    },
+    {
+      "content": "0 issuewild \"pki.goog; cansignhttpexchanges=yes\"",
+      "name": "carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "CAA"
+    },
+    {
+      "content": "0 issuewild \"sectigo.com\"",
+      "name": "carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "CAA"
+    },
+    {
+      "content": "0 issuewild \"ssl.com\"",
+      "name": "carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "CAA"
+    },
+    {
+      "content": "mail.protonmail.ch",
+      "name": "carter2099.com",
+      "priority": 10,
+      "proxied": false,
+      "ttl": 1,
+      "type": "MX"
+    },
+    {
+      "content": "mailsec.protonmail.ch",
+      "name": "carter2099.com",
+      "priority": 20,
+      "proxied": false,
+      "ttl": 1,
+      "type": "MX"
+    },
+    {
+      "content": "\"protonmail-verification=00e8463d9233e6d173ca6083a2db98a60808a558\"",
+      "name": "carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "TXT"
+    },
+    {
+      "content": "\"v=spf1 include:_spf.protonmail.ch ~all\"",
+      "name": "carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "TXT"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "chat.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "comfy.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "freshrss.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "hooks.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "login.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "monitor.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "news.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "protonmail.domainkey.dzgfadrin3hr6lbg2k76few64c7y63xvdmg45r2bmeq3wmo4dhsrq.domains.proton.ch",
+      "name": "protonmail._domainkey.carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "protonmail2.domainkey.dzgfadrin3hr6lbg2k76few64c7y63xvdmg45r2bmeq3wmo4dhsrq.domains.proton.ch",
+      "name": "protonmail2._domainkey.carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "protonmail3.domainkey.dzgfadrin3hr6lbg2k76few64c7y63xvdmg45r2bmeq3wmo4dhsrq.domains.proton.ch",
+      "name": "protonmail3._domainkey.carter2099.com",
+      "proxied": false,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "remote.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "rig.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    },
+    {
+      "content": "<homelab-tunnel-id>.cfargotunnel.com",
+      "name": "ssh.carter2099.com",
+      "proxied": true,
+      "ttl": 1,
+      "type": "CNAME"
+    }
+  ]
+}

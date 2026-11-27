@@ -3,8 +3,10 @@
 # edit this file.  `~/` paths expand against $HOME at run time.
 #
 # Fields
-#   kind       host | container | host-binary | venv | runtime | rig
-#   collector  host-dpkg | container | go-binary | venv | runtime | go-toolchain | rig
+#   kind       host | container | host-binary | venv | runtime | rig | repo
+#   collector  host-dpkg | container | go-binary | venv | runtime | go-toolchain | rig | repo
+#              (repo: origin/main of ~/dev/<repo> for software released, not deployed, here:
+#              `gemfile_lock` gems and `repo_runtimes` name -> version file)
 #   exposure   public | access (Cloudflare Access) | lan | loopback | none
 #   owner      playbook id: alert | apt-security | steward-freshrss | steward-openwebui |
 #              steward-searxng | steward-omp | steward-herdr | steward-toolchain |
@@ -12,16 +14,26 @@
 #   lock       deploy_lock service key held while the fix is applied
 #   repo       ~/dev/<repo> checkout for repo-backed components
 #   deploy     how repo-pr deploys after merge: "steward-app:<service>" (steward P1
-#              app_deploy) or "release:<script>" (run in ~/dev/<repo>)
+#              app_deploy), "release:<script>" (run in ~/dev/<repo>) or "tag-release" (the PR
+#              also bumps `release_version_file` and `release_changelog`; the merge commit is
+#              tagged v<version> once its CI is green)
 #   edits      deterministic repo edits repo-pr may make: base-refresh | base-digest |
-#              go-builder | go-toolchain | go-module | pip-pin
+#              go-builder | go-toolchain | go-module | pip-pin | ruby-version | gem-update
+#   ruby_version_mentions  repo files whose Ruby version mentions ruby-version also moves
+#   ci_gated   the repo's CI fails on open gem/Ruby advisories (bundler-audit, brakeman): such
+#              findings with a fix are remediated even when unexposed or judged unreachable
+#   runtimes   container runtime name -> argv printing its version (inventoried as a runtime;
+#              matched by php.net/nodejs.org data or `advisory_repo`)
+#   runtime_waivers  runtime name -> reason it needs no advisory source; the hourly self-check
+#              reports every other interpreter (ruby/python3/node/php) a container ships outside
+#              an OS package without one (coverage_gaps in report.json)
 #   distroless the container has no package manager: OS packages come from status.d, and
 #              repo-pr fixes them by moving the final stage's pinned base digest (base-digest)
 #   pin_owner  ecosystems another automation owns: never edited here; on a repo-pr component
 #              the fix is deployed (deploy-only) once origin/main's lockfile resolves it
 #              (RubyGems: Gemfile.lock), else refused with this reason
 #   gem_go_modules  gem -> Go module of a binary the image builds from that gem (the blog's
-#              thrust): its Go module findings are fixed by the gem bump (RubyGems pin owner),
+#              thrust): its Go module findings are fixed by the gem bump,
 #              deployed once origin/main's gem version's go.mod requires the fixed version
 #   revision_cmd  argv printing the binary's 40-hex source commit, for Go binaries built
 #              without VCS stamping (-buildvcs=false); inventory uses it as vcs_revision
@@ -106,7 +118,11 @@ lock = "app-blog"
 repo = "blog"
 deploy = "steward-app:blog"
 dockerfile = "Dockerfile"
-edits = ["base-refresh", "go-builder"]
+# ruby-version and gem-update since 2026-11-26 (Carter): Dependabot never opened PRs for gem
+# advisories that only ruby-advisory-db carries (net-ssh 7.3.0 sat flagged for weeks).
+edits = ["base-refresh", "go-builder", "ruby-version", "gem-update"]
+ruby_version_mentions = ["AGENTS.md", "config/deploy.yml"]
+ci_gated = true
 health = ["http://127.0.0.1:33099/up"]
 health_host = "blog.carter2099.com"
 container_go_binaries_cmd = ["sh", "-c", "ls /usr/local/bundle/ruby/*/gems/thruster-*/exe/*/thrust"]
@@ -114,11 +130,36 @@ gemfile_lock = "/rails/Gemfile.lock"
 description = "Rails 8 blog (own image on ruby slim-bookworm, Thruster rebuilt with Go)"
 untrusted_input = "Public web traffic to Rails/Puma behind Thruster; session cookies; libvips on the owner's own uploads"
 reach_host_paths = ["~/blog/blog/app", "~/blog/blog/config", "~/blog/blog/Gemfile.lock", "~/blog/blog/Dockerfile"]
-[component.pin_owner]
-RubyGems = "dependabot-webhook owns blog bundler updates"
+# The official ruby image builds Ruby from source (no dpkg/OSV record): match the
+# interpreter against ruby/ruby's GitHub repository advisories.
+advisory_repo = "ruby/ruby"
+[component.runtimes]
+ruby = ["ruby", "-e", "print RUBY_VERSION"]
 # The Dockerfile rebuilds thrust at the Gemfile.lock thruster version: its Go modules move with the gem.
 [component.gem_go_modules]
 thruster = "github.com/basecamp/thruster"
+
+[[component]]
+id = "delta-neutral"
+name = "Delta Neutral (released for self-hosting; not deployed here)"
+kind = "repo"
+collector = "repo"
+exposure = "none"
+owner = "repo-pr"
+lock = "repo-delta-neutral"
+repo = "delta_neutral"
+deploy = "tag-release"
+release_version_file = "config/version.rb"
+release_changelog = "CHANGELOG.md"
+dockerfile = "Dockerfile"
+edits = ["ruby-version", "gem-update"]
+ruby_version_mentions = ["README.md", "config/deploy.yml"]
+ci_gated = true
+gemfile_lock = "Gemfile.lock"
+advisory_repo = "ruby/ruby"
+description = "Rails 8 Uniswap v3 dashboard and Hyperliquid hedge rebalancer that other people run from its Dockerfile"
+[component.repo_runtimes]
+ruby = ".ruby-version"
 
 [[component]]
 id = "beatz"

@@ -1,0 +1,108 @@
+{
+  "branch_protection": null,
+  "dependabot_security_updates": {
+    "enabled": true,
+    "paused": false
+  },
+  "labels": [
+    "bug",
+    "dependencies",
+    "documentation",
+    "duplicate",
+    "enhancement",
+    "github_actions",
+    "good first issue",
+    "help wanted",
+    "invalid",
+    "python",
+    "question",
+    "ruby",
+    "wontfix"
+  ],
+  "repo": "carter2099/hyperliquid",
+  "rulesets": [
+    {
+      "bypass_actors": [],
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "~DEFAULT_BRANCH"
+          ]
+        }
+      },
+      "enforcement": "active",
+      "name": "main",
+      "rules": [
+        {
+          "type": "deletion"
+        },
+        {
+          "type": "non_fast_forward"
+        }
+      ],
+      "target": "branch"
+    },
+    {
+      "bypass_actors": [
+        {
+          "actor_id": 5,
+          "actor_type": "RepositoryRole",
+          "bypass_mode": "always"
+        }
+      ],
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "~DEFAULT_BRANCH"
+          ]
+        }
+      },
+      "enforcement": "active",
+      "name": "steward-auto-merge-gate",
+      "rules": [
+        {
+          "parameters": {
+            "do_not_enforce_on_create": false,
+            "required_status_checks": [
+              {
+                "context": "Ruby 3.3",
+                "integration_id": 15368
+              },
+              {
+                "context": "Ruby 3.4",
+                "integration_id": 15368
+              }
+            ],
+            "strict_required_status_checks_policy": false
+          },
+          "type": "required_status_checks"
+        }
+      ],
+      "target": "branch"
+    }
+  ],
+  "settings": {
+    "allow_auto_merge": true,
+    "allow_merge_commit": true,
+    "allow_rebase_merge": true,
+    "allow_squash_merge": true,
+    "allow_update_branch": false,
+    "archived": false,
+    "default_branch": "main",
+    "delete_branch_on_merge": false,
+    "security_and_analysis": {
+      "dependabot_security_updates": "enabled",
+      "secret_scanning": "disabled",
+      "secret_scanning_non_provider_patterns": "disabled",
+      "secret_scanning_push_protection": "disabled",
+      "secret_scanning_validity_checks": "disabled"
+    },
+    "visibility": "public"
+  },
+  "vulnerability_alerts": {
+    "enabled": true
+  },
+  "webhooks": []
+}

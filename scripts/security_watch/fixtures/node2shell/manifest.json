@@ -22,6 +22,7 @@
     "https://api.github.com/repos/cloudflare/cloudflared/security-advisories?per_page=20&sort=updated&direction=desc&state=published": "http/github_empty.json",
     "https://api.github.com/repos/moby/moby/security-advisories?per_page=20&sort=updated&direction=desc&state=published": "http/github_empty.json",
     "https://api.github.com/repos/php/php-src/security-advisories?per_page=20&sort=updated&direction=desc&state=published": "http/github_empty.json",
+    "https://api.github.com/repos/ruby/ruby/security-advisories?per_page=20&sort=updated&direction=desc&state=published": "http/github_empty.json",
     "https://api.osv.dev/v1/vulns/DEBIAN-CVE-2026-111497": "http/osv_DEBIAN-CVE-2026-111497.json",
     "https://api.osv.dev/v1/vulns/ALPINE-CVE-2026-111497": "http/osv_ALPINE-CVE-2026-111497.json",
     "https://api.osv.dev/v1/vulns/UBUNTU-CVE-2026-111497": "http/osv_UBUNTU-CVE-2026-111497.json",

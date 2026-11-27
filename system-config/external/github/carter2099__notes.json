@@ -1,0 +1,39 @@
+{
+  "branch_protection": {
+    "unreadable": "HTTP 403: Upgrade to GitHub Pro or make this repository public to enable this feature."
+  },
+  "dependabot_security_updates": {
+    "enabled": false,
+    "paused": false
+  },
+  "labels": [
+    "bug",
+    "documentation",
+    "duplicate",
+    "enhancement",
+    "good first issue",
+    "help wanted",
+    "invalid",
+    "question",
+    "wontfix"
+  ],
+  "repo": "carter2099/notes",
+  "rulesets": {
+    "unreadable": "HTTP 403: Upgrade to GitHub Pro or make this repository public to enable this feature."
+  },
+  "settings": {
+    "allow_auto_merge": false,
+    "allow_merge_commit": true,
+    "allow_rebase_merge": true,
+    "allow_squash_merge": true,
+    "allow_update_branch": false,
+    "archived": false,
+    "default_branch": "main",
+    "delete_branch_on_merge": false,
+    "visibility": "private"
+  },
+  "vulnerability_alerts": {
+    "enabled": false
+  },
+  "webhooks": []
+}

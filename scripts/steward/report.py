@@ -146,6 +146,8 @@ from .fixes import (
 )
 from .dotfiles import DOTFILES_GIT
 from .dotfiles import untracked_in_scope as _dotfiles_untracked_in_scope
+from .external_settings import CHECK_COMMAND as EXTERNAL_CHECK_COMMAND
+from .external_settings import REFRESH_COMMAND as EXTERNAL_REFRESH_COMMAND
 from .setup import P0B_PROBLEM_ACTIONS
 from .updates import _dependabot_merge_undo
 
@@ -1464,6 +1466,73 @@ def _public_mirror_count(public):
                for key in ("added", "updated", "removed"))
 
 
+EXPECTED_UNITS_FILE = "~/system-config/expected-user-units.txt"
+
+
+def _unit_drift_events(drift):
+    """Expected user units not enabled, and enabled homelab units not listed."""
+    drift = drift if isinstance(drift, dict) else {}
+    status = drift.get("status")
+    items = []
+    if status == "drift":
+        for row in drift.get("not_enabled") or []:
+            if not isinstance(row, dict):
+                continue
+            unit, state = row.get("unit"), row.get("state") or "unknown"
+            command = (f"systemctl --user enable --now {unit}" if state == "disabled"
+                       else f"systemctl --user status {unit}")
+            items.append(_item("watch", f"User unit {unit} is {state}, expected enabled",
+                               command=command))
+        extra = [str(u) for u in drift.get("extra") or []]
+        if extra:
+            items.append(_item(
+                "watch", f"{_plural(len(extra), 'enabled user unit')} not in the expected "
+                f"unit list ({EXPECTED_UNITS_FILE}): add if intended",
+                command=", ".join(extra[:10]) + (f" (+{len(extra) - 10} more)"
+                                                  if len(extra) > 10 else "")))
+    elif status and status != "ok":
+        items.append(_item("watch", "User unit drift check did not run: "
+                           f"{_clip(drift.get('reason') or status, 160)}"))
+    return items
+
+
+def _external_settings_label(path):
+    """github/carter2099__blog.json -> GitHub carter2099/blog; cloudflare/dns.json -> Cloudflare dns."""
+    path = str(path or "?")
+    if path.startswith("github/"):
+        return "GitHub " + path.removeprefix("github/").removesuffix(".json").replace("__", "/")
+    if path.startswith("cloudflare/"):
+        return "Cloudflare " + path.removeprefix("cloudflare/").removesuffix(".json")
+    return path
+
+
+def _external_settings_events(result):
+    """One Watching line per drifted snapshot file; a failed check is never clean."""
+    result = result if isinstance(result, dict) else {}
+    status = result.get("status")
+    refresh = str(result.get("refresh") or EXTERNAL_REFRESH_COMMAND)
+    items = []
+    for row in result.get("files") or []:
+        if not isinstance(row, dict):
+            continue
+        changes = [c for c in row.get("changes") or [] if isinstance(c, dict)]
+        summary = ", ".join(f"{c.get('path')} {c.get('change')}" for c in changes[:5])
+        if len(changes) > 5:
+            summary += f" (+{len(changes) - 5} more)"
+        items.append(_item(
+            "watch", f"{_external_settings_label(row.get('path'))} settings differ from the "
+            f"tracked snapshot: {_clip(summary, 220)}; refresh if intended",
+            command=refresh))
+    if status and status not in ("ok", "drift"):
+        errors = [str(e) for e in result.get("errors") or []]
+        why = "; ".join(errors[:3]) or result.get("reason") or status
+        if len(errors) > 3:
+            why += f" (+{len(errors) - 3} more)"
+        items.append(_item("watch", f"External settings check did not finish: {_clip(why, 240)}",
+                           command=EXTERNAL_CHECK_COMMAND))
+    return items
+
+
 def _host_drift_events(remediation, untracked_dotfiles, prev_dotfiles=None):
     """Report-only host drift, untracked dotfiles, and last night's blocked dotfiles commit."""
     items = []
@@ -1478,6 +1547,8 @@ def _host_drift_events(remediation, untracked_dotfiles, prev_dotfiles=None):
     elif status and status != "ok":
         items.append(_item("watch", f"Firewall drift check did not run: "
                            f"{_clip(ufw.get('reason') or status, 160)}"))
+    items.extend(_unit_drift_events((remediation or {}).get("unit_drift")))
+    items.extend(_external_settings_events((remediation or {}).get("external_settings")))
     for row in (remediation or {}).get("docker_proxy") or []:
         if row.get("action") in {"attention_needed", "error"}:
             items.append(_item(
@@ -1858,6 +1929,7 @@ SECURITY_WATCH_SOURCE_FAILING = timedelta(hours=24)
 SECURITY_WATCH_WATCH_MAX = 10
 SECURITY_WATCH_JOURNAL = "journalctl --user -u security-watch.service --since -1d"
 SECURITY_WATCH_BREAKER_RESET = "python3 ~/scripts/security_watch_runner.py breaker-reset"
+SECURITY_WATCH_FIX_ONCE = "python3 ~/scripts/security_watch_runner.py fix <component> --wait 1800"
 _SW_FAILED_ACTIONS = {"failed": "failed", "rolled_back": "was rolled back",
                       "unverified": "could not be verified"}
 _SW_DEPLOY_PLAYBOOKS = frozenset({"release-rebuild"})
@@ -1944,7 +2016,9 @@ def _security_watch_events(data, now=None):
     component closed its findings (``superseded_by``); an urgent finding with a
     fix available still affected a day after it was first seen.  Watching: other
     open findings (top 10), alerting refusals, shadow proposals, sources failing for
-    over a day, a stale report.  What changed: verified fixes with their undo.
+    over a day, a stale report, failing health probes, coverage gaps, failing
+    tools and never-exercised fix paths (one line).  What changed: verified
+    fixes with their undo.
     """
     if not isinstance(data, dict) or not data:
         return []
@@ -2037,6 +2111,39 @@ def _security_watch_events(data, now=None):
             items.append(_item(
                 "watch", f"Stopgap {stopgap.get('id') or '?'} can be removed: {remove}",
                 todo=remove, command=remove))
+    for probe in _sw_rows(data, "health_probes"):
+        if probe.get("ok") is False:
+            where = probe.get("url") or probe.get("host") or ""
+            items.append(_item("watch", (
+                f"Security watch health probe failing: {probe.get('component') or '?'} "
+                f"{probe.get('name') or ''}".rstrip()
+                + f" — {_clip(probe.get('detail') or 'no detail', 200)}"),
+                command=_clip(where, 200)))
+    for gap in _sw_rows(data, "coverage_gaps"):
+        runtime = gap.get("runtime") or "an interpreter"
+        at = f" at {gap.get('path')}" if gap.get("path") else ""
+        detail = f": {_clip(gap.get('detail'), 160)}" if gap.get("detail") else ""
+        items.append(_item("watch", (
+            f"Security watch cannot see {runtime}{at} in {gap.get('component') or '?'}"
+            + (f" ({gap.get('name')})" if gap.get("name") else "")
+            + f" — no advisory source and no waiver{detail}")))
+    for tool in _sw_rows(data, "tooling"):
+        if tool.get("ok") is False:
+            have = tool.get("have") or "missing"
+            want = f" (want {tool.get('want')})" if tool.get("want") else ""
+            detail = f": {_clip(tool.get('detail'), 160)}" if tool.get("detail") else ""
+            items.append(_item("watch", (
+                f"Security watch tool {tool.get('tool') or '?'} is {have}{want}{detail}")))
+    unexercised = _sw_rows(data, "unexercised")
+    if unexercised:
+        pairs = ", ".join(f"{u.get('component') or '?'}/{u.get('playbook') or '?'}"
+                          for u in unexercised[:12])
+        if len(unexercised) > 12:
+            pairs += f" (+{len(unexercised) - 12} more)"
+        items.append(_item(
+            "watch", f"{_plural(len(unexercised), 'security fix path')} never completed "
+            f"successfully: {pairs}; run each once under supervision when it has a finding",
+            command=SECURITY_WATCH_FIX_ONCE))
     return items
 
 

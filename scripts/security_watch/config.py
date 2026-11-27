@@ -60,6 +60,7 @@ ALLOWED_HOSTS = frozenset({
     "hub.docker.com",
     "ghcr.io",
     "proxy.golang.org",
+    "rubygems.org",
     "127.0.0.1",
 })
 

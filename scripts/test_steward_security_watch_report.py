@@ -196,6 +196,43 @@ class SecurityWatchReportTests(unittest.TestCase):
         self.assertFalse(any(w["text"].startswith("Stopgap") for w in triage(data)["watching"]))
         self.assertNotIn("stopgaps", report._html_security_watch(data, now=NOW).lower())
 
+    def test_probes_gaps_tooling_and_unexercised_are_watching_only(self):
+        data = sample(
+            health_probes=[
+                {"component": "blog", "name": "health", "url": "http://127.0.0.1:33099/up",
+                 "host": "blog.carter2099.com", "ok": False, "detail": "HTTP 502",
+                 "checked_at": iso()},
+                {"component": "news", "name": "health", "url": "http://127.0.0.1:30144/healthz",
+                 "host": "", "ok": True, "detail": "200", "checked_at": iso()}],
+            coverage_gaps=[{"component": "searxng", "name": "searxng", "runtime": "python",
+                            "path": "/usr/bin/python3.12", "detail": "no OSV ecosystem"}],
+            tooling=[{"tool": "govulncheck", "want": "v1.1.4", "have": "", "ok": False,
+                      "detail": "not on PATH"},
+                     {"tool": "bundle-audit", "want": "0.9", "have": "0.9.2", "ok": True,
+                      "detail": ""}],
+            unexercised=[{"component": "beatz", "name": "beatz", "playbook": "repo-pr"},
+                         {"component": "blog", "name": "blog", "playbook": "repo-pr"}])
+        triaged = triage(data)
+        self.assertEqual(triaged["needs"], [])
+        rows = {w["text"]: w["command"] for w in triaged["watching"]}
+        self.assertEqual(rows["Security watch health probe failing: blog health — HTTP 502"],
+                         "http://127.0.0.1:33099/up")
+        self.assertIn("Security watch cannot see python at /usr/bin/python3.12 in searxng "
+                      "(searxng) — no advisory source and no waiver: no OSV ecosystem", rows)
+        self.assertIn("Security watch tool govulncheck is missing (want v1.1.4): not on PATH",
+                      rows)
+        self.assertEqual(rows["2 security fix paths never completed successfully: "
+                              "beatz/repo-pr, blog/repo-pr; run each once under supervision "
+                              "when it has a finding"],
+                         "python3 ~/scripts/security_watch_runner.py fix <component> --wait 1800")
+        self.assertFalse(any("news" in t or "bundle-audit" in t for t in rows))
+
+    def test_absent_new_keys_render_nothing(self):
+        texts = [w["text"] for w in triage(sample())["watching"]]
+        self.assertFalse(any(t.startswith(("Security watch health", "Security watch cannot see",
+                                           "Security watch tool")) or "fix path" in t
+                             for t in texts), texts)
+
 
 if __name__ == "__main__":
     unittest.main()

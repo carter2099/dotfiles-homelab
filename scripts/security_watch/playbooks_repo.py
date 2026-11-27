@@ -13,13 +13,18 @@ version):
   go-toolchain   go.mod ``toolchain go<X.Y.Z>`` bump
   go-module      ``go get <module>@v<fixed>`` + ``go mod tidy``
   pip-pin        requirements.txt ``name==<fixed>`` bump
+  ruby-version   ``.ruby-version``, Dockerfile ``ARG RUBY_VERSION`` and the component's
+                 ``ruby_version_mentions`` moved to the fixed Ruby on the same minor line, once
+                 its ``ruby:<version><suffix>`` image is on Docker Hub and ruby/setup-ruby can
+                 install it
+  gem-update     ``bundle lock --update <gem> --conservative --patch|--minor --strict`` (never
+                 a major upgrade); every gem must then resolve at least its fixed version
 
-Ecosystems in a component's ``pin_owner`` (e.g. the blog's RubyGems, owned by the
-dependabot-webhook) are never edited: once origin/main's lockfile resolves a fixed version
-the plan is deploy-only, until then it refuses with the owner's reason.  The same holds for
-Go modules inside a binary a gem builds (``gem_go_modules``, e.g. the blog's thrust from
-the thruster gem): fixed once origin/main's Gemfile.lock resolves a gem version whose
-go.mod requires the fixed module version.
+Ecosystems in a component's ``pin_owner`` are never edited: once origin/main's lockfile
+resolves a fixed version the plan is deploy-only, until then it refuses with the owner's
+reason.  The same holds for Go modules inside a binary a gem builds (``gem_go_modules``,
+e.g. the blog's thrust from the thruster gem): fixed once origin/main's Gemfile.lock
+resolves a gem version whose go.mod requires the fixed module version.
 
 apply() opens the PR from a throw-away worktree of origin/main (repos without CI run
 their own checks there first; refused while another security-watch PR is open);
@@ -29,10 +34,15 @@ deletes its branch.  When origin/main already carries the fix the plan is deploy
 and starts at ``deploy``.  The deploy runs under ``ctx.lock(spec.lock)`` through the
 component's existing owner: steward P1 app_deploy, or the repo's release script once
 CI on main's HEAD is green (stage ``deploying`` is journaled right before it starts).
+A repo released rather than deployed here (``deploy = "tag-release"``, scanned at
+origin/main by the ``repo`` collector) gets a patch version bump and a CHANGELOG release
+section in the same PR; its deploy tags the merge commit ``v<version>`` once CI on it is
+green and pushes the tag.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -46,7 +56,7 @@ from typing import Any, Callable
 
 from deploy_lock import LockTimeout
 
-from security_watch import config, inventory, model, net
+from security_watch import config, health, inventory, model, net
 from security_watch.config import ComponentSpec
 from security_watch.model import Finding, Outcome, Plan, Refusal
 
@@ -56,12 +66,15 @@ PR_LABEL = "security-watch"
 HOLD_LABEL = "hold"
 WAIT_LIMIT = timedelta(hours=24)        # CI, merge and deploy each give up after this
 RELEASE_TIMEOUT = 1800
-HEALTH_ATTEMPTS = 6
-HEALTH_RETRY_SECONDS = 5
+HEALTH_BUDGET_SECONDS = 30.0           # a deployed service must answer within this
 HUB_TAG_URL = "https://hub.docker.com/v2/repositories/library/golang/tags/{tag}"
 PR_VIEW_FIELDS = "state,mergeable,mergeStateStatus,headRefOid,labels,statusCheckRollup,mergeCommit"
 GO_PROXY_INFO_URL = "https://proxy.golang.org/{module}/@v/v{version}.info"
 GO_TOOLCHAIN_INFO_URL = "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go{version}.linux-amd64.info"
+RUBY_HUB_TAG_URL = "https://hub.docker.com/v2/repositories/library/ruby/tags/{tag}"
+RUBY_RELEASE_URL = "https://api.github.com/repos/ruby/ruby/releases/tags/v{tag}"
+SETUP_RUBY_VERSIONS_URL = "https://api.github.com/repos/ruby/setup-ruby/contents/ruby-builder-versions.json"
+RUBYGEMS_VERSIONS_URL = "https://rubygems.org/api/v1/versions/{gem}.json"
 TITLE_MAX = 100                        # GitHub rejects titles over 256; keep them readable
 PR_BODY_MAX = 60000                    # GitHub's PR body limit is 65536 characters
 CHECK_TIMEOUT = 1200                   # pre-push checks of a repo without CI, per command
@@ -437,6 +450,78 @@ def bump_pip_pin(requirements_text: str, name: str, new_version: str) -> str | N
     return "".join(lines) if changed else None
 
 
+_RUBY_ARG = re.compile(r"^(?P<lead>[ \t]*ARG[ \t]+RUBY_VERSION=)(?P<version>[^\s]+)", re.M)
+_RUBY_FROM = re.compile(r"^[ \t]*FROM[ \t]+(?:docker\.io/)?(?:library/)?ruby:\$\{?RUBY_VERSION\}?(?P<suffix>\S*)",
+                        re.M | re.I)
+
+
+def ruby_dockerfile(dockerfile_text: str) -> dict[str, str] | None:
+    """{"version": ARG RUBY_VERSION, "suffix": tag suffix of ``FROM ruby:$RUBY_VERSION<suffix>``};
+    None when the Dockerfile does not build on the official ruby image through that ARG."""
+    arg, base = _RUBY_ARG.search(dockerfile_text), _RUBY_FROM.search(dockerfile_text)
+    if not arg or not base:
+        return None
+    return {"version": arg["version"], "suffix": base["suffix"]}
+
+
+def bump_ruby_arg(dockerfile_text: str, old: str, new: str) -> str | None:
+    """``ARG RUBY_VERSION=<old>`` -> ``=<new>``; None when the ARG is missing or not ``old``."""
+    match = _RUBY_ARG.search(dockerfile_text)
+    if not match or match["version"] != old:
+        return None
+    return dockerfile_text[:match.start("version")] + new + dockerfile_text[match.end("version"):]
+
+
+def replace_ruby_mentions(text: str, old: str, new: str) -> str:
+    """Replace version ``old`` with ``new`` on lines that mention Ruby (docs, commented config)."""
+    pattern = re.compile(r"(?<![\d.])" + re.escape(old) + r"(?![\d])")
+    lines = text.splitlines(keepends=True)
+    return "".join(pattern.sub(new, line) if "ruby" in line.lower() else line for line in lines)
+
+
+_RELEASE_VERSION = re.compile(r"(?P<lead>VERSION\s*=\s*[\"'])(?P<version>\d+\.\d+\.\d+)(?P<trail>[\"'])")
+_CHANGELOG_RELEASE = re.compile(r"^## \[(?!Unreleased\])", re.M | re.I)
+
+
+def release_version(version_file_text: str) -> str | None:
+    match = _RELEASE_VERSION.search(version_file_text)
+    return match["version"] if match else None
+
+
+def bump_release_version(version_file_text: str) -> tuple[str, str] | None:
+    """``VERSION = "X.Y.Z"`` -> X.Y.(Z+1): (new text, new version); None without such a line."""
+    match = _RELEASE_VERSION.search(version_file_text)
+    if not match:
+        return None
+    major, minor, patch = (int(p) for p in match["version"].split("."))
+    version = f"{major}.{minor}.{patch + 1}"
+    return version_file_text[:match.start("version")] + version + version_file_text[match.end("version"):], version
+
+
+def changelog_release(changelog_text: str, version: str, date: str, lines: list[str]) -> str | None:
+    """Insert ``## [version] - date`` with a Security list above the newest released section
+    (below an [Unreleased] section); None when the changelog has no ``## [`` release heading."""
+    match = _CHANGELOG_RELEASE.search(changelog_text)
+    if not match:
+        return None
+    entry = f"## [{version}] - {date}\n\n### Security\n" + "".join(f"- {line}\n" for line in lines) + "\n"
+    return changelog_text[:match.start()] + entry + changelog_text[match.start():]
+
+
+def gem_target(name: str, have: str, need: str, versions: list[dict]) -> tuple[str, str, str] | str:
+    """(target version, ``bundle lock`` strategy, its created_at) for moving ``name`` from
+    ``have`` to at least ``need``: the newest release on ``have``'s minor line (``patch``),
+    else on its major line (``minor``); a reason string when only a major upgrade fixes it."""
+    candidates = [v for v in versions if not v.get("prerelease") and not _vlt(v["number"], need)]
+    for strategy, width in (("patch", 2), ("minor", 1)):
+        line = _minor_line(have)[:width]
+        same = [v for v in candidates if _minor_line(v["number"])[:width] == line]
+        if same:
+            best = max(same, key=lambda v: _vkey(v["number"]))
+            return best["number"], strategy, str(best.get("created_at") or "")
+    return f"{name}: the fix ({need}) needs a major upgrade from {have}; left for Carter"
+
+
 # --- helpers -----------------------------------------------------------------
 
 def _repo_dir(spec: ComponentSpec) -> Path:
@@ -496,6 +581,10 @@ def _edit_kind(finding: Finding, spec: ComponentSpec) -> tuple[str | None, str]:
         return "go-module", ""
     if pkg.ecosystem == "PyPI":
         return "pip-pin", ""
+    if pkg.ecosystem == "RubyGems":
+        return "gem-update", ""
+    if pkg.is_runtime and pkg.name == "ruby":
+        return "ruby-version", ""
     return None, f"no repo edit for ecosystem {pkg.ecosystem}"
 
 
@@ -636,6 +725,10 @@ def _deploy_step(spec: ComponentSpec, repo: Path) -> str:
     kind, _, arg = str(spec.get("deploy", "")).partition(":")
     if kind == "steward-app":
         return f"under lock {spec.lock}: steward P1 app_deploy {arg} (CI-green origin/main)"
+    if kind == "tag-release":
+        version_file = spec.get("release_version_file") or "config/version.rb"
+        return (f"under lock {spec.lock}: wait for CI green on the merge commit, then tag it v<{version_file} "
+                "VERSION> in the repo and push the tag (the repo's release workflow publishes it)")
     return (f"under lock {spec.lock}: git pull --ff-only origin main in {_tilde(repo)}, wait for CI green "
             f"on that commit (repos with CI), journal 'deploying', bash {arg}, health check")
 
@@ -679,12 +772,15 @@ class RepoPrPlaybook:
 
     def __init__(self, *, app_deploy: Callable[..., dict] | None = None,
                  deploy_registry: dict | None = None, auto_merge_repos: set[str] | None = None,
-                 sleep: Callable[[float], None] = time.sleep,
+                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic,
+                 health_probe: health.Probe | None = None,
                  script_run: Callable[..., Any] | None = None, querybatch: Callable[..., Any] | None = None):
         self._app_deploy = app_deploy
         self._deploy_registry = deploy_registry
         self._auto_merge_repos = auto_merge_repos
         self._sleep = sleep
+        self._clock = clock
+        self._health_probe = health_probe or health.http_status
         # Release/deploy scripts and pre-push checks: own process group, killed whole on timeout.
         self._script_run = script_run if script_run is not None else inventory.run_group
         self._querybatch = querybatch   # OSV batch for image checks (None: the production query)
@@ -786,6 +882,10 @@ class RepoPrPlaybook:
                 part = getattr(self, "_plan_" + edit.replace("-", "_"))(group, spec, ctx, read)
             if isinstance(part, Refusal):
                 return part
+            if part.get("deploy_only") and spec.get("deploy") == "tag-release":
+                # A released repo is scanned at origin/main itself: a fix already there clears
+                # on the next scan, and an untagged one waits for the next release.
+                return refuse(f"origin/main of {spec.repo} already carries the fix ({part['stale']})", alert=False)
             main_sha, has_ci = self._origin_main(repo, ctx) if part.get("deploy_only") else ("", True)
         except RuntimeError as exc:
             return refuse(str(exc)[:500], alert=False)
@@ -1095,6 +1195,143 @@ class RepoPrPlaybook:
                 "step": "pin " + ", ".join(f"{n}=={v}" for n, v in pairs) + " in requirements.txt",
                 "fixed_version": pins[bumped[0].package.name], "findings": findings, "skipped": skipped}
 
+    def _plan_ruby_version(self, group, spec, ctx, read):
+        current = inventory.version_token(read(".ruby-version") or "")
+        if not current:
+            return Refusal(self.id, spec.id, f"cannot read a version from origin/main:.ruby-version in {spec.repo}")
+        need = None
+        covered: list[Finding] = []
+        skipped: list[str] = []
+        line = ".".join(map(str, _minor_line(current)))
+        for finding in group:
+            fixed = _same_line_fixed(finding.fixed_versions, current)
+            if fixed is None:
+                skipped.append(f"{finding.group}: no fixed Ruby on the {line} line "
+                               f"(fixed: {', '.join(finding.fixed_versions) or 'none'})")
+                continue
+            need = _max_version(need, fixed)
+            covered.append(finding)
+        if need is None:
+            return Refusal(self.id, spec.id, skipped[0])
+        if not _vlt(current, need):
+            return {"deploy_only": True, "findings": covered, "skipped": skipped, "fixed_version": need,
+                    "stale": f".ruby-version already pins Ruby {current}"}
+        path = spec.get("dockerfile") or "Dockerfile"
+        text = read(path)
+        docker = ruby_dockerfile(text) if text is not None else None
+        image = ""
+        if docker is not None:
+            if docker["version"] != current:
+                return Refusal(self.id, spec.id, f"{spec.repo}/{path} ARG RUBY_VERSION={docker['version']} "
+                                                 f"differs from .ruby-version {current}")
+            if "@" in docker["suffix"]:
+                return Refusal(self.id, spec.id, f"{spec.repo}/{path} pins the ruby image by digest; "
+                                                 "ruby-version only moves tags")
+            image = f"ruby:{need}{docker['suffix']}"
+            try:
+                net.get_json(RUBY_HUB_TAG_URL.format(tag=f"{need}{docker['suffix']}"), fetch=ctx.fetch)
+            except net.FetchError as exc:
+                why = "is not on Docker Hub yet" if exc.status == 404 else f"lookup failed: {exc.reason}"
+                return Refusal(self.id, spec.id, f"{image} {why}", alert=False)
+        if self._uses_setup_ruby(spec, ctx) and need not in self._setup_ruby_versions(ctx):
+            return Refusal(self.id, spec.id, f"ruby/setup-ruby cannot install Ruby {need} yet (CI would fail)",
+                           alert=False)
+        try:
+            release = net.get_json(RUBY_RELEASE_URL.format(tag=need.replace(".", "_")), fetch=ctx.fetch)
+            published = model.iso(model.parse_iso(release.get("published_at")))
+        except (net.FetchError, AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"release date of Ruby {need} unknown: {exc}") from None
+        mentions = [str(p) for p in spec.get("ruby_version_mentions") or []]
+        files = ".ruby-version" + (f", {path} ARG RUBY_VERSION" if docker else "") + \
+            "".join(f", {p}" for p in mentions)
+        return {"target": f"{spec.id}: Ruby {current} -> {need}", "path": ".ruby-version",
+                "params": {"version": need, "from": current, "dockerfile": path if docker else "",
+                           "mentions": mentions},
+                "step": f"set Ruby {need} in {files}" + (f" ({image} exists on Docker Hub)" if image else ""),
+                "fixed_version": need, "published": published, "findings": covered, "skipped": skipped}
+
+    @staticmethod
+    def _uses_setup_ruby(spec: ComponentSpec, ctx) -> bool:
+        result = ctx.run(["git", "-C", str(_repo_dir(spec)), "grep", "-q", "ruby/setup-ruby", "origin/main",
+                          "--", ".github/workflows"], timeout=60)
+        return result.returncode == 0
+
+    @staticmethod
+    def _setup_ruby_versions(ctx) -> list[str]:
+        """Ruby versions ruby/setup-ruby can install (its ruby-builder-versions.json)."""
+        try:
+            meta = net.get_json(SETUP_RUBY_VERSIONS_URL, fetch=ctx.fetch)
+            data = json.loads(base64.b64decode(meta["content"]))
+        except (net.FetchError, KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"cannot read ruby/setup-ruby's version list: {exc}") from None
+        versions = data.get("ruby") if isinstance(data, dict) else None
+        return [str(v) for v in versions] if isinstance(versions, list) else []
+
+    @staticmethod
+    def _gem_versions(name: str, fetch) -> list[dict]:
+        """Published versions of a gem from rubygems.org (platform-specific builds folded)."""
+        try:
+            data = net.get_json(RUBYGEMS_VERSIONS_URL.format(gem=name), fetch=fetch)
+        except net.FetchError as exc:
+            raise RuntimeError(f"rubygems.org versions of {name} unavailable: {exc.reason}") from None
+        out: dict[str, dict] = {}
+        for entry in data if isinstance(data, list) else ():
+            if isinstance(entry, dict) and entry.get("number") and entry.get("platform", "ruby") == "ruby":
+                out.setdefault(str(entry["number"]), {"number": str(entry["number"]),
+                                                      "prerelease": bool(entry.get("prerelease")),
+                                                      "created_at": str(entry.get("created_at") or "")})
+        return list(out.values())
+
+    def _plan_gem_update(self, group, spec, ctx, read):
+        text = read("Gemfile.lock")
+        if text is None:
+            return Refusal(self.id, spec.id, f"cannot read origin/main:Gemfile.lock in {spec.repo}")
+        resolved = {p.name: p.version for p in inventory.parse_gemfile_lock(text)}
+        needs: dict[str, str] = {}
+        by_gem: dict[str, list[Finding]] = {}
+        stale: list[tuple[Finding, str, str]] = []
+        skipped: list[str] = []
+        for finding in group:
+            name = finding.package.name
+            have = resolved.get(name)
+            if have is None:
+                skipped.append(f"{name} is not in origin/main:Gemfile.lock of {spec.repo}")
+                continue
+            need = _smallest_fixed_above(finding.fixed_versions, finding.package.version)
+            if need is None:
+                skipped.append(f"{name}: no fixed version above {finding.package.version} "
+                               f"(fixed: {', '.join(finding.fixed_versions)})")
+                continue
+            if not _vlt(have, need):
+                stale.append((finding, f"{name} {have}", have))
+                continue
+            needs[name] = _max_version(needs.get(name), need)
+            by_gem.setdefault(name, []).append(finding)
+        bumps: list[list[str]] = []
+        published = ""
+        for name in sorted(needs):
+            choice = gem_target(name, resolved[name], needs[name], self._gem_versions(name, ctx.fetch))
+            if isinstance(choice, str):
+                skipped.append(choice)
+                continue
+            target, strategy, created = choice
+            if not created:
+                raise RuntimeError(f"rubygems.org names no release date for {name} {target}")
+            bumps.append([name, resolved[name], target, strategy, needs[name]])
+            published = max(published, model.iso(model.parse_iso(created)))
+        if not bumps and not stale:
+            return Refusal(self.id, spec.id, skipped[0])
+        findings = [f for name, *_ in bumps for f in by_gem[name]] + [f for f, _, _ in stale]
+        if not bumps:
+            return {"deploy_only": True, "findings": findings, "skipped": skipped, "fixed_version": stale[0][2],
+                    "stale": "Gemfile.lock already resolves " + ", ".join(dict.fromkeys(d for _, d, _ in stale))}
+        commands = [f"bundle lock --update {' '.join(b[0] for b in bumps if b[3] == s)} --conservative --{s} --strict"
+                    for s in ("patch", "minor") if any(b[3] == s for b in bumps)]
+        return {"target": f"{spec.id}: Gemfile.lock " + ", ".join(f"{n} {h} -> {t}" for n, h, t, _, _ in bumps),
+                "path": "Gemfile.lock", "params": {"gems": bumps},
+                "step": " && ".join(commands) + "; each gem must then resolve at least its fixed version",
+                "fixed_version": bumps[0][2], "published": published, "findings": findings, "skipped": skipped}
+
     # --- apply -----------------------------------------------------------
 
     def apply(self, plan: Plan, ctx) -> Outcome:
@@ -1130,6 +1367,12 @@ class RepoPrPlaybook:
             files, error = self._apply_edit(st, tmp, ctx)
             if error:
                 return fail(f"{edit} edit failed: {error}")
+            release = ""
+            if spec.get("deploy") == "tag-release":
+                extra, release, error = self._release_bump(plan, st, tmp, spec, ctx)
+                if error:
+                    return fail(f"release bump failed: {error}")
+                files = [*files, *extra]
             status = ctx.run(["git", "-C", str(tmp), "status", "--porcelain"], timeout=60)
             if status.returncode != 0 or not (status.stdout or "").strip():
                 return fail(f"{edit} edit produced no change on origin/main")
@@ -1175,7 +1418,8 @@ class RepoPrPlaybook:
             verify=False,
             state={"stage": "ci", "repo": spec.repo, "github": gh, "branch": branch, "pr": number,
                    "url": url, "edit": edit, "head": head, "has_ci": has_ci, "title": title,
-                   "created_at": model.iso(ctx.now), "production_touched": False},
+                   "created_at": model.iso(ctx.now), "production_touched": False,
+                   **({"release_version": release} if release else {})},
         )
 
     def _start_deploy_only(self, st: dict, spec: ComponentSpec, gh: str, ctx) -> Outcome:
@@ -1222,6 +1466,10 @@ class RepoPrPlaybook:
     def _apply_edit(self, st: dict, tmp: Path, ctx) -> tuple[list[str], str]:
         """Apply the planned edit inside the worktree: (changed files, error)."""
         edit, params = st["edit"], st.get("params") or {}
+        if edit == "gem-update":
+            return self._apply_gem_update(params, tmp, ctx)
+        if edit == "ruby-version":
+            return self._apply_ruby_version(params, tmp)
         if edit == "go-module":
             argv = ["go", "get", *(f"{m}@v{v}" for m, v in params.get("modules", []))]
             for command in (argv, ["go", "mod", "tidy"]):
@@ -1254,6 +1502,117 @@ class RepoPrPlaybook:
             return [], f"{edit} does not apply to origin/main:{path}"
         target.write_text(new)
         return [path], ""
+
+    @staticmethod
+    def _ruby_env(tmp: Path, ctx) -> dict[str, str]:
+        """rbenv environment for the worktree: its .ruby-version when installed, else the newest
+        installed Ruby on that minor line, else the newest installed (lockfile edits only)."""
+        from security_watch import rubysec
+        env = rubysec.tool_env()
+        requested = inventory.version_token((tmp / ".ruby-version").read_text()) \
+            if (tmp / ".ruby-version").is_file() else ""
+        listed = ctx.run(["rbenv", "versions", "--bare", "--skip-aliases"], timeout=30, env=env)
+        installed = sorted((v for v in (listed.stdout or "").split() if re.fullmatch(r"\d+\.\d+\.\d+", v)),
+                           key=_vkey, reverse=True) if listed.returncode == 0 else []
+        same = [v for v in installed if _minor_line(v) == _minor_line(requested)] if requested else []
+        pick = requested if requested in installed else (same or installed or [""])[0]
+        if pick:
+            env["RBENV_VERSION"] = pick
+        return env
+
+    def _apply_gem_update(self, params: dict, tmp: Path, ctx) -> tuple[list[str], str]:
+        gems = [list(g) for g in params.get("gems") or []]
+        env = self._ruby_env(tmp, ctx)
+        for strategy in ("patch", "minor"):
+            names = [g[0] for g in gems if g[3] == strategy]
+            if not names:
+                continue
+            argv = ["bundle", "lock", "--update", *names, "--conservative", f"--{strategy}", "--strict"]
+            result = ctx.run(argv, timeout=600, cwd=str(tmp), env=env)
+            if result.returncode != 0:
+                return [], f"bundle lock --{strategy} failed: {_tail(result)}"
+        try:
+            resolved = {p.name: p.version for p in inventory.parse_gemfile_lock((tmp / "Gemfile.lock").read_text())}
+        except OSError as exc:
+            return [], f"cannot read Gemfile.lock after bundle lock: {exc}"
+        for name, _, _, _, need in gems:
+            got = resolved.get(name)
+            if got is None or _vlt(got, need):
+                return [], f"{name} resolves {got or 'nothing'} after bundle lock; the fix needs {need}"
+        return ["Gemfile.lock"], ""
+
+    @staticmethod
+    def _apply_ruby_version(params: dict, tmp: Path) -> tuple[list[str], str]:
+        version, old = str(params["version"]), str(params["from"])
+        files: list[str] = []
+        pin = tmp / ".ruby-version"
+        try:
+            if inventory.version_token(pin.read_text()) != old:
+                return [], f".ruby-version no longer pins {old}"
+            pin.write_text(f"{version}\n")
+            files.append(".ruby-version")
+            if params.get("dockerfile"):
+                path = tmp / params["dockerfile"]
+                new = bump_ruby_arg(path.read_text(), old, version)
+                if new is None:
+                    return [], f"{params['dockerfile']} has no ARG RUBY_VERSION={old}"
+                path.write_text(new)
+                files.append(params["dockerfile"])
+            for rel in params.get("mentions") or []:
+                path = tmp / rel
+                if not path.is_file():
+                    continue
+                text = path.read_text()
+                new = replace_ruby_mentions(text, old, version)
+                if new != text:
+                    path.write_text(new)
+                    files.append(rel)
+        except OSError as exc:
+            return [], str(exc)
+        return files, ""
+
+    @staticmethod
+    def _release_notes(plan: Plan, st: dict, tmp: Path, ctx) -> list[str]:
+        """One CHANGELOG line per change, naming the advisories it fixes."""
+        found = [f for f in ((ctx.findings or {}).get(k) for k in plan.finding_keys) if f is not None]
+
+        def ids(match) -> str:
+            names = [i for f in found if match(f) for i in (f.cves or f.advisory_ids)]
+            return ", ".join(dict.fromkeys(names)) or ", ".join(plan.finding_keys)
+
+        params = st.get("params") or {}
+        if st["edit"] == "ruby-version":
+            where = "`.ruby-version`" + (" and the Dockerfile's `RUBY_VERSION`" if params.get("dockerfile") else "")
+            return [f"Bumped Ruby from {params['from']} to {params['version']} ({where}) for "
+                    f"{ids(lambda f: f.package.is_runtime)}."]
+        if st["edit"] == "gem-update":
+            resolved = {p.name: p.version
+                        for p in inventory.parse_gemfile_lock((tmp / "Gemfile.lock").read_text())}
+            return [f"Bumped {name} from {have} to {resolved.get(name, target)} "
+                    f"({ids(lambda f, n=name: f.package.name == n)})."
+                    for name, have, target, _, _ in params.get("gems") or []]
+        return [f"{plan.target} ({ids(lambda f: True)})."]
+
+    def _release_bump(self, plan: Plan, st: dict, tmp: Path, spec: ComponentSpec,
+                      ctx) -> tuple[list[str], str, str]:
+        """Patch-bump the version file and add a CHANGELOG release section for a
+        ``tag-release`` repo: (changed files, new version, error)."""
+        version_file = spec.get("release_version_file") or "config/version.rb"
+        changelog = spec.get("release_changelog") or "CHANGELOG.md"
+        try:
+            bumped = bump_release_version((tmp / version_file).read_text())
+            if bumped is None:
+                return [], "", f"{version_file} has no VERSION = \"X.Y.Z\" line"
+            text, version = bumped
+            entry = changelog_release((tmp / changelog).read_text(), version, ctx.now.date().isoformat(),
+                                      self._release_notes(plan, st, tmp, ctx))
+            if entry is None:
+                return [], "", f"{changelog} has no released ## [x.y.z] section to add above"
+            (tmp / version_file).write_text(text)
+            (tmp / changelog).write_text(entry)
+        except OSError as exc:
+            return [], "", str(exc)
+        return [version_file, changelog], version, ""
 
     def _pr_body(self, plan: Plan, ctx, spec: ComponentSpec) -> str:
         lines = [f"Opened by security-watch for `{spec.id}`.", "", f"**Target:** {plan.target}", "",
@@ -1462,6 +1821,8 @@ class RepoPrPlaybook:
             return self._deploy_app(action, arg, state, spec, ctx)
         if kind == "release" and arg:
             return self._deploy_release(action, arg, state, spec, ctx)
+        if kind == "tag-release":
+            return self._deploy_tag(action, state, spec, ctx)
         return Outcome("failed", f"unsupported deploy {spec.get('deploy')!r} for {spec.id}",
                        undo=self._undo(state, spec), verify=False, state=state)
 
@@ -1493,7 +1854,7 @@ class RepoPrPlaybook:
         state["production_touched"] = True
         undo = row.get("revert") or self._undo(state, spec)
         if status == "ok":
-            healthy, detail = self._health(spec, ctx)
+            healthy, detail = self._health(spec)
             if healthy:
                 return Outcome("done", f"deployed {service} via steward app_deploy ({reason}); {detail}",
                                undo=undo, verify=True, state=state)
@@ -1516,6 +1877,57 @@ class RepoPrPlaybook:
                 return None, f"{kind} lookup failed: {_tail(result, 150)}"
             payloads.append(data)
         return commit_ci_verdict(*payloads)
+
+    def _deploy_tag(self, action: dict, state: dict, spec: ComponentSpec, ctx) -> Outcome:
+        """A repo released for others to run: once CI on the merge commit is green, tag it
+        ``v<VERSION>`` (the version the PR bumped) and push the tag; the repo's release
+        workflow publishes the release."""
+        repo = _repo_dir(spec)
+        git = ["git", "-C", str(repo)]
+        gh = state.get("github") or _github(spec)
+        sha = str(state.get("merge_sha") or "")
+        if not sha:
+            return Outcome("failed", "merged PR reported no merge commit to tag", undo=self._undo(state, spec),
+                           verify=False, state=state)
+        result = ctx.run([*git, "fetch", "--quiet", "--tags", "origin"], timeout=120)
+        if result.returncode != 0:
+            return self._wait(state, "merged_at", f"git fetch --tags failed: {_tail(result, 200)}", spec, ctx)
+        if state.get("has_ci", True):
+            green, ci = self._commit_ci(gh, sha, ctx)
+            if green is None:
+                return self._wait(state, "merged_at", f"waiting for CI on {sha[:7]} before tagging: {ci}", spec, ctx)
+            if not green:
+                return self._wait(state, "merged_at", f"CI on {sha[:7]} is red; not tagging: {ci}", spec, ctx)
+        version_file = spec.get("release_version_file") or "config/version.rb"
+        shown = ctx.run([*git, "show", f"{sha}:{version_file}"], timeout=60)
+        version = release_version(shown.stdout or "") if shown.returncode == 0 else None
+        if not version:
+            return Outcome("failed", f"cannot read VERSION from {version_file} at {sha[:7]}",
+                           undo=self._undo(state, spec), verify=False, state=state)
+        tag = f"v{version}"
+        undo = (f"git -C {_tilde(repo)} push origin :refs/tags/{tag} && gh release delete {tag} --repo {gh}; "
+                f"then git -C {_tilde(repo)} revert --no-edit {sha} && git -C {_tilde(repo)} push origin main")
+        state["release_tag"] = tag
+        existing = ctx.run([*git, "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}"], timeout=30)
+        if existing.returncode == 0:
+            if (existing.stdout or "").strip() == sha:
+                return Outcome("done", f"{tag} already tags {sha[:7]}", undo=undo, verify=True, state=state)
+            return Outcome("failed", f"tag {tag} already exists on another commit; not retagging",
+                           undo=self._undo(state, spec), verify=False, state=state)
+        self._journal_deploying(action, state, f"tagging {sha[:7]} as {tag}", ctx)
+        result = ctx.run([*git, "tag", tag, sha], timeout=30)
+        if result.returncode != 0:
+            return Outcome("failed", f"git tag {tag} failed: {_tail(result, 200)}", undo=self._undo(state, spec),
+                           verify=False, state={**state, "production_touched": False})
+        result = ctx.run([*git, "push", "origin", f"refs/tags/{tag}"], timeout=120)
+        if result.returncode != 0:
+            ctx.run([*git, "tag", "-d", tag], timeout=30)
+            return Outcome("failed", f"git push of {tag} failed: {_tail(result, 200)}", undo=self._undo(state, spec),
+                           verify=False, state={**state, "production_touched": False})
+        state["production_touched"] = True
+        _log(f"{spec.id}: tagged {sha[:7]} as {tag}")
+        return Outcome("done", f"tagged {sha[:7]} as {tag} and pushed it; the release workflow publishes it",
+                       undo=undo, verify=True, state=state)
 
     def _deploy_release(self, action: dict, script: str, state: dict, spec: ComponentSpec, ctx) -> Outcome:
         repo = _repo_dir(spec)
@@ -1569,7 +1981,7 @@ class RepoPrPlaybook:
                                      f"changing production: {_tail(result, 200)}",
                            undo=undo, verify=False, state=state)
         state["production_touched"] = True
-        healthy, detail = self._health(spec, ctx)
+        healthy, detail = self._health(spec)
         if result.returncode == 0 and healthy:
             return Outcome("done", f"bash {script} ok; {detail}", undo=undo, verify=True, state=state)
         if result.returncode == 0:
@@ -1582,28 +1994,13 @@ class RepoPrPlaybook:
         return Outcome("failed", f"bash {script} exited {result.returncode}; {detail}: {_tail(result, 200)}",
                        undo=undo, verify=False, state=state)
 
-    def _health(self, spec: ComponentSpec, ctx) -> tuple[bool, str]:
+    def _health(self, spec: ComponentSpec) -> tuple[bool, str]:
+        """The shared health gate (``health.check_health``: health_host, no redirects)."""
         if not spec.health:
             return True, "no health URL"
-        problems = []
-        for url in spec.health:
-            last = ""
-            for attempt in range(HEALTH_ATTEMPTS):
-                try:
-                    response = ctx.fetch(url, timeout=10)
-                    if response.status < 400:
-                        last = ""
-                        break
-                    last = f"HTTP {response.status}"
-                except net.FetchError as exc:
-                    last = f"HTTP {exc.status}" if exc.status else exc.reason
-                except OSError as exc:
-                    last = str(exc)
-                if attempt + 1 < HEALTH_ATTEMPTS:
-                    self._sleep(HEALTH_RETRY_SECONDS)
-            if last:
-                problems.append(f"{url}: {last}")
-        return (False, "; ".join(problems)) if problems else (True, "health OK")
+        ok, detail = health.check_health(spec, probe=self._health_probe, sleep=self._sleep, clock=self._clock,
+                                         budget=HEALTH_BUDGET_SECONDS)
+        return (True, f"health OK ({detail})") if ok else (False, detail)
 
 
 def _checks(rollup: Any, has_ci: bool) -> tuple[str, str]:

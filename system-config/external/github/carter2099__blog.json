@@ -1,0 +1,131 @@
+{
+  "branch_protection": {
+    "allow_deletions": {
+      "enabled": false
+    },
+    "allow_force_pushes": {
+      "enabled": false
+    },
+    "allow_fork_syncing": {
+      "enabled": false
+    },
+    "block_creations": {
+      "enabled": false
+    },
+    "enforce_admins": {
+      "enabled": true
+    },
+    "lock_branch": {
+      "enabled": false
+    },
+    "required_conversation_resolution": {
+      "enabled": false
+    },
+    "required_linear_history": {
+      "enabled": false
+    },
+    "required_signatures": {
+      "enabled": false
+    }
+  },
+  "dependabot_security_updates": {
+    "enabled": true,
+    "paused": false
+  },
+  "labels": [
+    "bug",
+    "dependencies",
+    "documentation",
+    "duplicate",
+    "enhancement",
+    "github_actions",
+    "good first issue",
+    "help wanted",
+    "invalid",
+    "question",
+    "ruby",
+    "security-watch",
+    "wontfix"
+  ],
+  "repo": "carter2099/blog",
+  "rulesets": [
+    {
+      "bypass_actors": [
+        {
+          "actor_id": 5,
+          "actor_type": "RepositoryRole",
+          "bypass_mode": "always"
+        }
+      ],
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "~DEFAULT_BRANCH"
+          ]
+        }
+      },
+      "enforcement": "active",
+      "name": "steward-auto-merge-gate",
+      "rules": [
+        {
+          "parameters": {
+            "do_not_enforce_on_create": false,
+            "required_status_checks": [
+              {
+                "context": "lint",
+                "integration_id": 15368
+              },
+              {
+                "context": "test",
+                "integration_id": 15368
+              },
+              {
+                "context": "scan_js",
+                "integration_id": 15368
+              }
+            ],
+            "strict_required_status_checks_policy": false
+          },
+          "type": "required_status_checks"
+        }
+      ],
+      "target": "branch"
+    }
+  ],
+  "settings": {
+    "allow_auto_merge": true,
+    "allow_merge_commit": true,
+    "allow_rebase_merge": true,
+    "allow_squash_merge": true,
+    "allow_update_branch": false,
+    "archived": false,
+    "default_branch": "main",
+    "delete_branch_on_merge": false,
+    "security_and_analysis": {
+      "dependabot_security_updates": "enabled",
+      "secret_scanning": "enabled",
+      "secret_scanning_non_provider_patterns": "disabled",
+      "secret_scanning_push_protection": "enabled",
+      "secret_scanning_validity_checks": "disabled"
+    },
+    "visibility": "public"
+  },
+  "vulnerability_alerts": {
+    "enabled": true
+  },
+  "webhooks": [
+    {
+      "active": true,
+      "config": {
+        "content_type": "json",
+        "insecure_ssl": "0",
+        "url": "https://hooks.carter2099.com/webhook"
+      },
+      "events": [
+        "pull_request"
+      ],
+      "name": "web"
+    }
+  ]
+}

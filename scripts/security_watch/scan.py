@@ -1,6 +1,7 @@
 """Match deployed inventories against issuer records and prioritize the findings.
 
-``scan`` turns inventories into findings (OSV for package ecosystems; php.net,
+``scan`` turns inventories into findings (OSV for package ecosystems; ruby-advisory-db
+via bundler-audit for RubyGems, when an ``audit`` callable is wired in; php.net,
 nodejs.org and GitHub repository advisories for runtimes).  Anything that could not
 be checked becomes an ``unknown`` entry and keeps the component out of
 ``complete`` so its open findings are never closed on missing data.
@@ -348,9 +349,19 @@ def _check_repo(comp: str, pkg: Package, repo: str, col: _Collector, store) -> N
                     summary=sig.summary or sig.title)
 
 
-def _scan_runtimes(inv: Inventory, spec: ComponentSpec | None, col: _Collector, store) -> None:
+def _repo_covers(spec: ComponentSpec | None, name: str) -> bool:
     repo = spec.get("advisory_repo") if spec else None
     spec_runtime = spec.get("runtime") if spec else None
+    return bool(repo and (not spec_runtime or spec_runtime == name))
+
+
+def has_runtime_feed(spec: ComponentSpec | None, name: str) -> bool:
+    """Whether a runtime ``name`` on ``spec`` is matched against an advisory source:
+    php.net / nodejs.org release data, or the component's GitHub ``advisory_repo``."""
+    return name in ("php", "node") or _repo_covers(spec, name)
+
+
+def _scan_runtimes(inv: Inventory, spec: ComponentSpec | None, col: _Collector, store) -> None:
     for pkg in inv.packages:
         if not pkg.is_runtime or not pkg.version:
             continue
@@ -362,8 +373,8 @@ def _scan_runtimes(inv: Inventory, spec: ComponentSpec | None, col: _Collector, 
             elif pkg.name == "node":
                 _check_node(inv.component_id, pkg, col, store)
                 checked = True
-            if repo and (not spec_runtime or spec_runtime == pkg.name):
-                _check_repo(inv.component_id, pkg, repo, col, store)
+            if _repo_covers(spec, pkg.name):
+                _check_repo(inv.component_id, pkg, spec.get("advisory_repo"), col, store)
                 checked = True
         except Exception as exc:  # noqa: BLE001 - a bad feed entry must not abort the scan
             _log(f"{inv.component_id}: runtime check for {pkg.name} failed: {exc}")
@@ -373,10 +384,36 @@ def _scan_runtimes(inv: Inventory, spec: ComponentSpec | None, col: _Collector, 
             col.add_unknown(inv.component_id, f"no advisory feed for {pkg.name}", incomplete=False)
 
 
+# --- ruby-advisory-db (bundler-audit) -------------------------------------------------
+
+def _scan_rubysec(inventories: list[Inventory], col: _Collector, audit, stats: dict) -> None:
+    """Gem advisories OSV lacks: ``audit(packages) -> bundler-audit results`` per component."""
+    from security_watch import rubysec
+    hits = 0
+    for inv in inventories:
+        gems = {(p.name, p.version): p for p in inv.packages if p.ecosystem == "RubyGems"}
+        if not gems:
+            continue
+        try:
+            results = audit(list(gems.values()))
+        except Exception as exc:  # noqa: BLE001 - unknown, never clean
+            col.add_unknown(inv.component_id, f"bundler-audit unavailable: {exc}"[:300])
+            continue
+        for result in results:
+            gem = result.get("gem") or {}
+            pkg = gems.get((str(gem.get("name") or ""), str(gem.get("version") or "")))
+            if pkg is None:
+                continue
+            fields = rubysec.finding_fields(result)
+            if col.add(inv.component_id, fields.pop("group"), pkg, **fields):
+                hits += 1
+    stats["rubysec_findings"] = hits
+
+
 # --- entry points ------------------------------------------------------------------
 
 def scan(inventories: list[Inventory], specs: dict[str, ComponentSpec], *, store, fetch, now,
-         deadline: float | None = None) -> ScanResult:
+         deadline: float | None = None, audit=None) -> ScanResult:
     """``deadline`` is a ``time.monotonic()`` value: once passed, no further OSV record
     fetches are submitted and affected components are reported pending (not complete);
     later ticks continue from the record cache."""
@@ -390,6 +427,8 @@ def scan(inventories: list[Inventory], specs: dict[str, ComponentSpec], *, store
             col.add_unknown(inv.component_id, inv.reason or f"inventory status {inv.status}")
     stats["packages"] = sum(len(inv.packages) for inv in scanned)
     _scan_osv(scanned, col, store=store, fetch=fetch, now=now, stats=stats, deadline=deadline)
+    if audit is not None:
+        _scan_rubysec(scanned, col, audit, stats)
     for inv in scanned:
         _scan_runtimes(inv, specs.get(inv.component_id), col, store)
     complete = {inv.component_id for inv in inventories
@@ -485,7 +524,13 @@ def _rate(finding: Finding, spec: ComponentSpec | None, policy, *, zero_wire: di
             reasons.append(not_reachable_note)
         finding.reasons = reasons
         return
-    if finding.fix_available and verdict != "not_reachable" and (serious or exposure in _EXPOSED):
+    # A component whose repo CI runs bundler-audit/brakeman (``ci_gated``) fails every build
+    # while a gem or Ruby finding with a fix is open, so those are fixed even when unexposed
+    # or judged unreachable.
+    gated = bool(spec is not None and spec.get("ci_gated")
+                 and (finding.package.ecosystem == "RubyGems" or finding.package.is_runtime))
+    exposed = verdict != "not_reachable" and (serious or exposure in _EXPOSED)
+    if finding.fix_available and (exposed or gated):
         reasons = ["fix available" + (f", {finding.severity}" if serious else "")]
         if exposure in _EXPOSED:
             reasons.append(f"{exposure} surface")
@@ -493,6 +538,9 @@ def _rate(finding: Finding, spec: ComponentSpec | None, policy, *, zero_wire: di
             reasons.append(reachable_note)
             if serious:
                 reasons.append(f"first seen more than {policy.urgent_window_hours}h ago")
+        if gated and not exposed:
+            reasons.append("fails the repo's CI security gate"
+                           + (f"; {not_reachable_note}" if not_reachable_note else ""))
         finding.urgency = URGENCY_NORMAL
         finding.reasons = reasons
         return

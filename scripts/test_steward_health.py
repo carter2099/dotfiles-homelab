@@ -64,6 +64,9 @@ class P3aReportOnlyTests(unittest.TestCase):
             return ""
 
         with patch.object(health, "UFW_EXPECTED_RULES", self.expected), \
+                patch.object(health, "EXPECTED_USER_UNITS", self.root / "missing-units.txt"), \
+                patch.object(health.external_settings, "check",
+                             return_value={"status": "ok", "files": [], "errors": []}), \
                 patch.object(health, "run_capture", side_effect=self._record(capture)), \
                 patch.object(health, "run_capture_ok", side_effect=self._record(
                     lambda cmd: (ADDED, "", 0) if "ufw" in cmd else ("", "", 7))), \
@@ -99,6 +102,8 @@ class P3aReportOnlyTests(unittest.TestCase):
         self.expected.write_text(ADDED.split("\n", 1)[1], encoding="utf-8")
         data = self.run_phase(publisher="blog-web-1 Up 3 hours")
         self.assertEqual(data["ufw_drift"]["status"], "ok")
+        self.assertEqual(data["unit_drift"]["reason"], "expected unit list missing")
+        self.assertEqual(data["external_settings"]["status"], "ok")
         self.assertEqual(data["docker_proxy"][0]["action"], "ok")
         self.assert_no_mutation()
 

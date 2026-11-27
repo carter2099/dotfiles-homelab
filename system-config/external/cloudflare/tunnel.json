@@ -1,0 +1,101 @@
+{
+  "ingress": [
+    {
+      "hostname": "hooks.carter2099.com",
+      "service": "http://localhost:9099"
+    },
+    {
+      "hostname": "chat.carter2099.com",
+      "originRequest": {
+        "access": {
+          "audTag": [
+            "sha256:3d867d4b09d8"
+          ],
+          "required": true,
+          "teamName": "carter2099"
+        }
+      },
+      "service": "http://localhost:48100"
+    },
+    {
+      "hostname": "freshrss.carter2099.com",
+      "service": "http://localhost:30149"
+    },
+    {
+      "hostname": "blog.carter2099.com",
+      "service": "http://127.0.0.1:33099"
+    },
+    {
+      "hostname": "ssh.carter2099.com",
+      "service": "ssh://localhost:22"
+    },
+    {
+      "hostname": "beatz.carter2099.com",
+      "service": "http://localhost:30142"
+    },
+    {
+      "hostname": "rig.carter2099.com",
+      "originRequest": {
+        "access": {
+          "audTag": [
+            "sha256:3c7dd7ad96a2"
+          ],
+          "required": true,
+          "teamName": "carter2099"
+        }
+      },
+      "service": "http://localhost:30143"
+    },
+    {
+      "hostname": "news.carter2099.com",
+      "service": "http://localhost:30144"
+    },
+    {
+      "hostname": "remote.carter2099.com",
+      "originRequest": {
+        "access": {
+          "audTag": [
+            "sha256:5a1532dc3310"
+          ],
+          "required": true,
+          "teamName": "carter2099"
+        }
+      },
+      "service": "http://localhost:30145"
+    },
+    {
+      "hostname": "comfy.carter2099.com",
+      "originRequest": {
+        "access": {
+          "audTag": [
+            "sha256:66870d57d06b"
+          ],
+          "required": true,
+          "teamName": "carter2099"
+        }
+      },
+      "service": "http://localhost:30147"
+    },
+    {
+      "hostname": "monitor.carter2099.com",
+      "service": "http://127.0.0.1:30148"
+    },
+    {
+      "hostname": "login.carter2099.com",
+      "originRequest": {
+        "access": {
+          "audTag": [
+            "sha256:6732e4f22d6c"
+          ],
+          "required": true,
+          "teamName": "carter2099"
+        }
+      },
+      "service": "http://127.0.0.1:30146"
+    },
+    {
+      "service": "http_status:404"
+    }
+  ],
+  "tunnel": "homelab"
+}

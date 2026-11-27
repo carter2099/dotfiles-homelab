@@ -1,0 +1,42 @@
+{
+  "branch_protection": null,
+  "dependabot_security_updates": {
+    "enabled": false,
+    "paused": false
+  },
+  "labels": [
+    "bug",
+    "documentation",
+    "duplicate",
+    "enhancement",
+    "good first issue",
+    "help wanted",
+    "invalid",
+    "question",
+    "wontfix"
+  ],
+  "repo": "carter2099/opencode-go-proxy",
+  "rulesets": [],
+  "settings": {
+    "allow_auto_merge": false,
+    "allow_merge_commit": true,
+    "allow_rebase_merge": true,
+    "allow_squash_merge": true,
+    "allow_update_branch": false,
+    "archived": false,
+    "default_branch": "main",
+    "delete_branch_on_merge": false,
+    "security_and_analysis": {
+      "dependabot_security_updates": "disabled",
+      "secret_scanning": "enabled",
+      "secret_scanning_non_provider_patterns": "disabled",
+      "secret_scanning_push_protection": "enabled",
+      "secret_scanning_validity_checks": "disabled"
+    },
+    "visibility": "public"
+  },
+  "vulnerability_alerts": {
+    "enabled": true
+  },
+  "webhooks": []
+}

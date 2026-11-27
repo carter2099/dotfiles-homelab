@@ -60,6 +60,7 @@ upstream_repos = [
   "cloudflare/cloudflared",
   "moby/moby",
   "php/php-src",
+  "ruby/ruby",
 ]
 
 # Per-source poll intervals in seconds.

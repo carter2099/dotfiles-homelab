@@ -1,5 +1,6 @@
 """Inventory of what is DEPLOYED: host dpkg + running kernel, container OS/pip/gem/Go
-packages, host Go binaries, venvs, runtimes and the rig (when it runs Linux).
+packages, host Go binaries, venvs, runtimes, the rig (when it runs Linux), and the
+origin/main of repos released for others to run (``repo``: Gemfile.lock + pinned runtimes).
 
 Every collector returns an ``Inventory``; failures yield status "unknown" (nothing
 usable) or "partial" (some parts missing) with a non-empty reason.  ``collect``
@@ -638,7 +639,42 @@ def _collect_container(spec: ComponentSpec, run: Run, fetch, now: datetime) -> I
             b.packages.append(Package(RUNTIME_ECOSYSTEM, name, version, location=container))
         else:
             b.fail(f"runtime {name} version unknown ({_err(proc)})")
+    if not spec.get("distroless"):
+        interpreters, err = _container_interpreters(container, run)
+        if err:
+            # Coverage is a self-check, not part of the package scan: never makes the inventory partial.
+            b.meta["interpreters_error"] = err
+        else:
+            b.meta["interpreters"] = interpreters
     return b.build()
+
+
+# Interpreters an image can ship from source (official ruby/python/node/php images build them
+# under /usr/local): no dpkg/apk record, so OSV never sees them.  Each is listed with the OS
+# package owning it ("" when none); selfcheck reports unowned ones without an advisory source.
+INTERPRETERS = ("ruby", "python3", "node", "php")
+_INTERPRETER_SCRIPT = (
+    'for b in ' + ' '.join(INTERPRETERS) + '; do '
+    'p=$(command -v "$b" 2>/dev/null) || continue; '
+    'r=$(readlink -f "$p" 2>/dev/null) || r="$p"; o=""; '
+    'if command -v dpkg >/dev/null 2>&1; then '
+    'o=$( (dpkg -S "$r" 2>/dev/null || dpkg -S "$p" 2>/dev/null) | head -n 1 | cut -d: -f1); fi; '
+    'if [ -z "$o" ] && command -v apk >/dev/null 2>&1; then '
+    'o=$(apk info --who-owns "$r" 2>/dev/null | sed -n "s/.* is owned by //p" | head -n 1); fi; '
+    'printf "%s\\t%s\\t%s\\t%s\\n" "$b" "$p" "$r" "$o"; done'
+)
+
+
+def _container_interpreters(container: str, run: Run) -> tuple[list[dict], str]:
+    proc = run(["docker", "exec", container, "sh", "-c", _INTERPRETER_SCRIPT], timeout=60)
+    if proc.returncode != 0:
+        return [], f"interpreter scan failed ({_err(proc)})"
+    rows = []
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) == 4 and parts[0] in INTERPRETERS:
+            rows.append({"name": parts[0], "path": parts[1], "resolved": parts[2], "owner": parts[3]})
+    return rows, ""
 
 
 def _revision_from_cmd(spec: ComponentSpec, run: Run) -> tuple[str, str]:
@@ -798,6 +834,47 @@ def _collect_rig(spec: ComponentSpec, run: Run, fetch, now: datetime) -> Invento
     return b.build()
 
 
+def _repo_path(spec: ComponentSpec) -> Path:
+    return config.expand(f"~/dev/{spec.repo}")
+
+
+def _collect_repo(spec: ComponentSpec, run: Run, fetch, now: datetime) -> Inventory:
+    """origin/main of a repo that is released, not deployed here: its Gemfile.lock gems and
+    the runtimes it pins (``repo_runtimes``: name -> repo-relative version file)."""
+    repo = _repo_path(spec)
+    git = ["git", "-C", str(repo)]
+    proc = run([*git, "fetch", "--quiet", "origin"], timeout=120)
+    if proc.returncode != 0:
+        return _unknown(spec, now, f"git fetch failed in ~/dev/{spec.repo} ({_err(proc)})")
+    proc = run([*git, "rev-parse", "--verify", "origin/main^{commit}"], timeout=30)
+    sha = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not _GIT_SHA.fullmatch(sha):
+        return _unknown(spec, now, f"cannot resolve origin/main in ~/dev/{spec.repo} ({_err(proc)})")
+    b = _Builder(spec, now)
+    b.fingerprint = sha
+    b.meta.update({"repo": spec.repo, "revision": sha})
+
+    def show(path: str) -> str | None:
+        result = run([*git, "show", f"{sha}:{path}"], timeout=60)
+        return result.stdout if result.returncode == 0 else None
+
+    lock = spec.get("gemfile_lock")
+    if lock:
+        text = show(lock)
+        gems = parse_gemfile_lock(text, f"{spec.repo}@{sha[:7]}:{lock}") if text is not None else []
+        if not gems:
+            b.fail(f"origin/main:{lock} unreadable or empty")
+        b.packages.extend(gems)
+    for name, path in (spec.get("repo_runtimes") or {}).items():
+        text = show(str(path))
+        version = version_token(text) if text is not None else ""
+        if version:
+            b.packages.append(Package(RUNTIME_ECOSYSTEM, name, version, location=f"{spec.repo}@{sha[:7]}:{path}"))
+        else:
+            b.fail(f"runtime {name}: no version in origin/main:{path}")
+    return b.build()
+
+
 _COLLECTORS: dict[str, Callable[[ComponentSpec, Run, Any, datetime], Inventory]] = {
     "host-dpkg": _collect_host,
     "container": _collect_container,
@@ -806,6 +883,7 @@ _COLLECTORS: dict[str, Callable[[ComponentSpec, Run, Any, datetime], Inventory]]
     "runtime": _collect_runtime,
     "go-toolchain": _collect_go_toolchain,
     "rig": _collect_rig,
+    "repo": _collect_repo,
 }
 
 
@@ -852,6 +930,10 @@ def fingerprint(spec: ComponentSpec, *, run: Run = default_run) -> str:
         if spec.collector in {"runtime", "go-toolchain"}:
             out, err = _cmd_output(spec, run)
             return "" if err else _sha256_text(out)
+        if spec.collector == "repo":
+            proc = run(["git", "-C", str(_repo_path(spec)), "ls-remote", "origin", "refs/heads/main"], timeout=60)
+            sha = (proc.stdout or "").split()[0] if proc.returncode == 0 and proc.stdout.strip() else ""
+            return sha if _GIT_SHA.fullmatch(sha) else ""
     except Exception as exc:  # noqa: BLE001
         _log(f"{spec.id}: fingerprint failed: {type(exc).__name__}: {exc}")
     return ""

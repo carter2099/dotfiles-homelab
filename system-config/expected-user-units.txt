@@ -1,0 +1,26 @@
+# Expected enabled systemd user units (carter), one unit name per line.
+# Source of truth for steward P3a (report-only: each unit must be
+# `systemctl --user is-enabled` = enabled, and every enabled homelab user unit
+# must be listed here) and for the backup RESTORE.md re-enable step:
+#   grep -v '^\s*#' ~/system-config/expected-user-units.txt | xargs systemctl --user enable --now
+# Edited by hand when a unit is added or retired. OS-default units (gpg-agent*,
+# dirmngr*, keyboxd*, pk-debconf-helper*, launchpadlib-cache-clean*,
+# session-migration*) and template instances (name@...) are not listed.
+cleanup-rig-requests.timer
+comfy-web.service
+dependabot-webhook.service
+digests-daily.timer
+herdr-server.service
+herdr-web-client.service
+homelab-backup-restore-drill.timer
+homelab-backup.timer
+homelab-dashboard-collector.service
+homelab-steward-resume.timer
+homelab-steward.timer
+hyperliquid-sdk.timer
+llm-proxy.service
+omp-login-web.service
+opencode-go-proxy.service
+prompt-guard.service
+rig-dashboard.service
+security-watch.timer

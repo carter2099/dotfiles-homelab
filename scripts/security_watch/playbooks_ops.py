@@ -35,19 +35,15 @@ import shutil
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import deploy_lock
-from security_watch import config, model
+from security_watch import config, health, model
 from security_watch.model import Finding, Outcome, Package, Plan, Refusal
 
-HEALTH_BUDGET_SECONDS = 60.0
-HEALTH_POLL_SECONDS = 2.0
 PULL_TIMEOUT = 600
 RELEASE_TIMEOUT = 1800        # security-watch.service allows 2 h (TimeoutStartSec) for this path
 TOOLCHAIN_BUDGET_SECONDS = 1800
@@ -242,53 +238,6 @@ class _Track:
         self.undo = ""
 
 
-# --- health ----------------------------------------------------------------------
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):  # a 3xx answer is itself healthy
-        return None
-
-
-def http_status(url: str, host: str = "", timeout: float = 10.0) -> int:
-    """HTTP status of a loopback GET (0 when unreachable or not loopback)."""
-    parts = urllib.parse.urlsplit(url)
-    if parts.scheme != "http" or parts.hostname != "127.0.0.1":
-        return 0
-    headers = {"User-Agent": config.USER_AGENT}
-    if host:
-        headers["Host"] = host
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
-    try:
-        with opener.open(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
-            return int(resp.status)
-    except urllib.error.HTTPError as exc:
-        with contextlib.suppress(Exception):
-            exc.close()
-        return int(exc.code)
-    except Exception:
-        return 0
-
-
-def check_health(spec: config.ComponentSpec, *, probe: Callable[[str, str], int] = http_status,
-                 sleep: Callable[[float], None] = time.sleep,
-                 clock: Callable[[], float] = time.monotonic,
-                 budget: float = HEALTH_BUDGET_SECONDS) -> tuple[bool, str]:
-    """GET every spec.health URL until status < 400, retrying within ``budget`` seconds."""
-    host = str(spec.get("health_host", "") or "")
-    deadline = clock() + budget
-    seen: list[str] = []
-    for url in spec.health:
-        while True:
-            status = probe(url, host)
-            if 0 < status < 400:
-                seen.append(f"{url} {status}")
-                break
-            if clock() >= deadline:
-                return False, f"{url} answered {status or 'nothing'} within {int(budget)}s"
-            sleep(HEALTH_POLL_SECONDS)
-    return True, "; ".join(seen) or "no health URLs"
-
-
 # --- candidate image verification -----------------------------------------------
 
 def _norm_py(name: str) -> str:
@@ -466,7 +415,7 @@ class _Base:
                  sleep: Callable[[float], None] | None = None,
                  clock: Callable[[], float] | None = None, querybatch=None,
                  updates=None, toolchains=None, releases=None):
-        self.probe = probe or http_status
+        self.probe = probe or health.http_status
         self.sleep = sleep or time.sleep
         self.clock = clock or time.monotonic
         self.querybatch = querybatch or _querybatch
@@ -488,7 +437,7 @@ class _Base:
         return Refusal(playbook=self.id, component_id=spec_id, reason=reason, alert=alert)
 
     def health(self, spec) -> tuple[bool, str]:
-        return check_health(spec, probe=self.probe, sleep=self.sleep, clock=self.clock)
+        return health.check_health(spec, probe=self.probe, sleep=self.sleep, clock=self.clock)
 
     def lock(self, spec, ctx):
         return ctx.lock(spec.lock, timeout=ctx.policy.lock_timeout_seconds, holder=self.holder)

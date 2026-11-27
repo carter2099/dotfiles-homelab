@@ -98,11 +98,17 @@ class Deps:
     # ``notify.omp_explainer``-style factory (tick deadline -> prompt -> text) for the email's
     # plain-language lines; None keeps them deterministic (replay/tests).
     explainer: Callable[[float], Callable[[str], str]] | None = None
+    # ``rubysec.audit``-style matcher (RubyGems packages -> bundler-audit results); None skips
+    # ruby-advisory-db matching (replay/tests).
+    audit_gems: Callable[[list[model.Package]], list[dict]] | None = None
+    # ``health.http_status``-style probe for the hourly self-checks (selfcheck.py); None skips
+    # the self-check phase (replay/tests never reach live services).
+    health_probe: Callable[[str, str], int] | None = None
 
 
 def default_deps() -> Deps:
     import deploy_lock
-    from security_watch import inventory, notify
+    from security_watch import health, inventory, notify, rubysec
 
     def collect(spec, now):
         return inventory.collect(spec, run=inventory.default_run, fetch=net.fetch, now=now)
@@ -110,9 +116,13 @@ def default_deps() -> Deps:
     def fingerprint(spec):
         return inventory.fingerprint(spec, run=inventory.default_run)
 
+    def audit_gems(packages):
+        return rubysec.audit(packages, run=inventory.default_run)
+
     return Deps(fetch=net.fetch, run=inventory.default_run, collect=collect, fingerprint=fingerprint,
                 steward_active=steward_active, send=None, lock=deploy_lock.surface_lock,
-                host_lock=deploy_lock.host_lock, explainer=notify.omp_explainer)
+                host_lock=deploy_lock.host_lock, explainer=notify.omp_explainer, audit_gems=audit_gems,
+                health_probe=health.http_status)
 
 
 class _Phases:
@@ -192,7 +202,7 @@ def act_ctx(store, policy: config.Policy, specs: dict[str, config.ComponentSpec]
         at = deps.clock()
         inv = deps.collect(spec, at)
         store.put_inventory(inv)
-        result = scan.scan([inv], specs, store=store, fetch=deps.fetch, now=at)
+        result = scan.scan([inv], specs, store=store, fetch=deps.fetch, now=at, audit=deps.audit_gems)
         _store_scan(store, result, now=at, only={component_id})
         complete = set(store.get_kv("last_complete", []) or [])
         is_complete = component_id in result.complete
@@ -216,7 +226,7 @@ def run_tick(store, policy: config.Policy, specs: dict[str, config.ComponentSpec
              force_inventory: bool = False, force_scan: bool = False, act_enabled: bool = True) -> dict:
     """One pass over every phase; returns the run summary (also recorded in the store)."""
     from security_watch import act as act_mod
-    from security_watch import feeds, notify, reach, report, scan
+    from security_watch import feeds, notify, reach, report, scan, selfcheck
 
     started = deps.clock()
     now = started
@@ -289,7 +299,8 @@ def run_tick(store, policy: config.Policy, specs: dict[str, config.ComponentSpec
     if force_scan or changed_inventory or new_signals or rescan_due:
         def scan_phase():
             inventories = [inv for inv in store.inventories() if inv.component_id in specs]
-            result = scan.scan(inventories, specs, store=store, fetch=deps.fetch, now=now, deadline=deadline)
+            result = scan.scan(inventories, specs, store=store, fetch=deps.fetch, now=now, deadline=deadline,
+                               audit=deps.audit_gems)
             changed_findings.extend(_store_scan(store, result, now=now))
             # A scan cut short by the tick deadline continues on the next tick instead of
             # waiting for the hourly rescan.
@@ -378,6 +389,15 @@ def run_tick(store, policy: config.Policy, specs: dict[str, config.ComponentSpec
         return notify.send_urgent(items, store=store, policy=policy, now=now, send=deps.send,
                                   open_now=open_now, explainer=explainer, deadline=deadline)
     summary["urgent_email"] = bool(phases.run("notify", notify_phase, default=False))
+
+    # self-checks of the machinery itself (hourly; report.json -> steward email)
+    if deps.health_probe is None:
+        phases.skip("selfcheck", "not wired")
+    elif over_budget():
+        phases.skip("selfcheck", "tick budget exhausted")
+    else:
+        phases.run("selfcheck", lambda: selfcheck.run_checks(store, specs, run=deps.run, now=now,
+                                                             probe=deps.health_probe))
 
     # report
     finished = deps.clock()

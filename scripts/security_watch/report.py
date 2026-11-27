@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from security_watch import config, feeds, model, notify
+from security_watch import config, feeds, model, notify, selfcheck
 
 SCHEMA = 1
 _URGENCY_RANK = {model.URGENCY_URGENT: 0, model.URGENCY_NORMAL: 1, model.URGENCY_LOW: 2}
@@ -277,6 +277,8 @@ def build_report(store, policy, specs, scan_result, act_result, tick: dict, now:
         "not_affected": not_affected_rows(not_affected or ()),
         "last_tick": {"started": _iso(tick.get("started")), "finished": _iso(tick.get("finished")),
                       "outcome": tick.get("outcome") or "ok"},
+        # health_probes / unexercised / coverage_gaps / tooling from the hourly self-check
+        **selfcheck.report_fields(store),
     }
 
 

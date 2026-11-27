@@ -4,6 +4,7 @@ from __future__ import annotations
 import deploy_lock
 import jev
 
+from . import external_settings
 from .config import (
     AUTO_PKGS,
     DEFAULT_TEMPLATE,
@@ -779,13 +780,87 @@ def ufw_rule_drift(expected_path=None):
     }
 
 
+EXPECTED_USER_UNITS = HOME / "system-config" / "expected-user-units.txt"
+# Enabled user units that come with the OS, not the homelab; never "extra".
+OS_DEFAULT_USER_UNIT_PREFIXES = (
+    "gpg-agent", "dirmngr", "keyboxd", "pk-debconf-helper",
+    "launchpadlib-cache-clean", "session-migration",
+)
+_UNIT_NAME = re.compile(r"^[A-Za-z0-9:_.@\\-]+\.(?:service|timer|socket|path|target|mount)$")
+
+
+def _read_expected_units(path=EXPECTED_USER_UNITS):
+    """Expected unit names; None when the file is missing. Raises ValueError on a bad line."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    units = []
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not _UNIT_NAME.match(line):
+            raise ValueError(f"line {number} is not a unit name: {line[:80]}")
+        units.append(line)
+    return units
+
+
+def _homelab_unit(name):
+    return "@" not in name and not name.startswith(OS_DEFAULT_USER_UNIT_PREFIXES)
+
+
+def expected_unit_drift(expected_path=None):
+    """Expected user units not enabled, and enabled homelab units not listed. Never mutates."""
+    expected_path = Path(expected_path or EXPECTED_USER_UNITS)
+    base = {"expected_path": str(expected_path)}
+    try:
+        expected = _read_expected_units(expected_path)
+    except (OSError, ValueError) as e:
+        return {**base, "status": "error", "reason": f"cannot parse the expected list: {e}"[:300]}
+    if expected is None:
+        return {**base, "status": "attention_needed", "reason": "expected unit list missing"}
+    env = user_env()
+    not_enabled = []
+    for unit in expected:
+        out, err, rc = run_capture_ok(["systemctl", "--user", "is-enabled", unit],
+                                      timeout=15, env=env)
+        lines = (out or "").strip().splitlines()
+        state = lines[-1].strip() if lines else ""
+        if not state:
+            return {**base, "status": "error",
+                    "reason": f"systemctl --user is-enabled {unit} failed (rc={rc}): "
+                              f"{(err or '').strip()[:200]}"}
+        if state != "enabled":
+            not_enabled.append({"unit": unit, "state": state})
+    out, err, rc = run_capture_ok(
+        ["systemctl", "--user", "list-unit-files", "--state=enabled", "--no-legend", "--plain"],
+        timeout=15, env=env)
+    if rc != 0:
+        return {**base, "status": "error",
+                "reason": f"systemctl --user list-unit-files failed (rc={rc}): "
+                          f"{(err or out or '').strip()[:200]}"}
+    enabled = sorted({line.split()[0] for line in out.splitlines() if line.split()})
+    listed = set(expected)
+    extra = [u for u in enabled if _homelab_unit(u) and u not in listed]
+    return {
+        **base,
+        "status": "drift" if not_enabled or extra else "ok",
+        "expected_count": len(expected),
+        "not_enabled": not_enabled,
+        "extra": extra,
+    }
+
+
 def phase_3a_remediation(run_dir, dry_run=False):
     """Phase 3a: deterministic, report-only drift checks — no LLM, no mutation.
 
     Checks:
     1. Documented ports held by an orphaned docker-proxy (reported, never killed)
     2. UFW rule drift: `ufw show added` vs ~/system-config/ufw-expected-rules.txt
-    3. Open WebUI → host 8082 reachability probe (health signal)
+    3. Expected user units: ~/system-config/expected-user-units.txt vs systemctl --user
+    4. External settings: GitHub/Cloudflare vs ~/system-config/external/** (bounded)
+    5. Open WebUI → host 8082 reachability probe (health signal)
     """
     print("[P3a] report-only drift checks")
 
@@ -835,7 +910,20 @@ def phase_3a_remediation(run_dir, dry_run=False):
     except Exception as e:
         ufw_drift = {"status": "error", "reason": str(e)[:300]}
 
-    # ── 3. Open WebUI → host 8082 reachability (read-only probe) ──
+    # ── 3. Expected user units (report only) ──
+    try:
+        unit_drift = expected_unit_drift()
+    except Exception as e:
+        unit_drift = {"status": "error", "reason": str(e)[:300]}
+
+    # ── 4. External settings snapshots (report only, time-bounded) ──
+    try:
+        external_drift = external_settings.check()
+    except Exception as e:
+        external_drift = {"status": "error", "files": [], "errors": [str(e)[:300]],
+                          "refresh": external_settings.REFRESH_COMMAND}
+
+    # ── 5. Open WebUI → host 8082 reachability (read-only probe) ──
     _, _, probe_rc = run_capture_ok(["docker", "exec", "open-webui", "curl", "-sf",
                                      "-o", "/dev/null", "--connect-timeout", "5",
                                      "http://host.docker.internal:8082/health"])
@@ -847,11 +935,14 @@ def phase_3a_remediation(run_dir, dry_run=False):
         "report_only": True,
         "docker_proxy": docker_proxy_results,
         "ufw_drift": ufw_drift,
+        "unit_drift": unit_drift,
+        "external_settings": external_drift,
         "bridge_probe": bridge_probe,
     }
     write_json(run_dir / "03a-remediation.json", data)
     print(f"[P3a] done -> {run_dir / '03a-remediation.json'} "
-          f"(ufw: {ufw_drift.get('status')}, 8082 probe: {bridge_probe['status']})")
+          f"(ufw: {ufw_drift.get('status')}, units: {unit_drift.get('status')}, "
+          f"external: {external_drift.get('status')}, 8082 probe: {bridge_probe['status']})")
     return data
 
 
