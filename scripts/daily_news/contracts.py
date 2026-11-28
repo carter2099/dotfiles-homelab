@@ -223,6 +223,26 @@ def is_non_article_page(url: str) -> bool:
         or is_asset_cdn_url(candidate)
     )
 
+# Section fronts are bare word paths under a "news"/"section" segment
+# (`euronews.com/en/news/europe`, `bbc.com/news/world`): pages of many stories,
+# so a Jev-"same" row linking one never names an event (digest-quality finding
+# 2026-11-26: a World same_event_keys list carried a `/en/news/europe` key).
+_SECTION_FRONT_SEGMENTS = frozenset({"news", "section", "sections"})
+_BARE_WORD_SEGMENT = re.compile(r"[a-z]+")
+
+def is_section_front_url(url: str) -> bool:
+    """True for a query-less path of bare words that includes a section segment."""
+    try:
+        parts = urlsplit(_with_scheme(url))
+    except ValueError:
+        return False
+    segments = [segment.lower() for segment in parts.path.split("/") if segment]
+    return (
+        not parts.query
+        and any(segment in _SECTION_FRONT_SEGMENTS for segment in segments)
+        and all(_BARE_WORD_SEGMENT.fullmatch(segment) for segment in segments)
+    )
+
 def is_event_url(url: str) -> bool:
     """True when a URL or coverage key can identify a single event.
 
@@ -233,7 +253,7 @@ def is_event_url(url: str) -> bool:
     DeepSeek V4.1-Flash, AP "No Kings" rallies, and Microsoft Guardian Agents
     were dropped as already covered). Needs a host and a path plus query longer
     than 8 characters (no bare host or home page) on a page that is not
-    ``is_non_article_page``.
+    ``is_non_article_page`` or a section front (``is_section_front_url``).
     """
     try:
         parts = urlsplit(_with_scheme(url))
@@ -243,6 +263,7 @@ def is_event_url(url: str) -> bool:
         bool(parts.hostname)
         and len(parts.path.strip("/")) + len(parts.query) > 8
         and not is_non_article_page(url)
+        and not is_section_front_url(url)
     )
 
 # Publishers the Phase 4 reader cannot open: hard-paywalled or anti-bot

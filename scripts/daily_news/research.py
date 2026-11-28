@@ -1519,6 +1519,52 @@ def _cross_day_same_event(story: dict, item: dict, frequency: Any, issue_date: d
                 return False
     return abs((item_day - story_day).days) <= CROSS_DAY_EVENT_MAX_DATE_GAP_DAYS
 
+# World runs another day of an incident under new wording: a candidate Jev judges
+# only the next step of a situation (attention's continuing/decisive Nouls, the
+# thresholds that discount such a story's editorial points) repeats a story
+# published within CROSS_DAY_DEDUP_DAYS when one of its event terms names
+# a corpus-rare entity that story's title or event already named (11-23/25 World:
+# the drone strike on the Russian cargo ship Sparta II ran again as Zelenskyy's
+# confirmation of the attack). Limited to attention.CONTINUATION_SECTIONS, where
+# those Nouls were evaluated.
+def _continues_published_event(story: dict, item: dict, frequency: Any) -> bool:
+    """``item`` is Jev's next step of the situation ``story`` reported, naming its rare entity.
+
+    Requires news_publish's minimum shared title/event wording, Jev
+    ``continuing`` >= attention.CONTINUING_MIN_PROBABILITY and ``decisive`` <=
+    attention.DECISIVE_MAX_PROBABILITY, and an event term of ``item`` whose
+    entity tokens are all corpus-rare and which appears in ``story``'s title or event.
+    """
+    from news_publish import (EVENT_MIN_SHARED_TOKENS, EVENT_MIN_TOKEN_OVERLAP,
+                              _event_tokens, _story_event_tokens)
+
+    answers = (item.get("jev_importance") or {}).get("answers") or {}
+    continuing, decisive = answers.get("continuing"), answers.get("decisive")
+    if not (isinstance(continuing, (int, float)) and isinstance(decisive, (int, float))
+            and continuing >= attention.CONTINUING_MIN_PROBABILITY
+            and decisive <= attention.DECISIVE_MAX_PROBABILITY):
+        return False
+    story_tokens = _story_event_tokens(story)
+    item_tokens = _story_event_tokens(item)
+    if not story_tokens or not item_tokens:
+        return False
+    shared = story_tokens & item_tokens
+    if (len(shared) < EVENT_MIN_SHARED_TOKENS
+            or len(shared) / min(len(story_tokens), len(item_tokens)) < EVENT_MIN_TOKEN_OVERLAP):
+        return False
+    counts, documents = frequency
+    rare_limit = max(2, documents // 100)
+    story_text = _normalize_quantities(f"{story.get('title') or ''} {story.get('event') or ''}")
+    for term in item.get("event_terms") or []:
+        if not isinstance(term, str):
+            continue
+        tokens = _event_tokens(" ".join(sorted(attention_match.entity_tokens(term))))
+        if (tokens and all(counts[token] <= rare_limit for token in tokens)
+                and attention_match.terms_all_present([_normalize_quantities(term)], story_text, 1)):
+            return True
+    return False
+
+
 @runtime.track_phase_failure("rank")
 def phase_3_rank(
     topic: dict,
@@ -1582,6 +1628,9 @@ def phase_3_rank(
             "fresh_days_back": FRESH_DAYS_BACK,
             "cross_day_event_strong_coverage": CROSS_DAY_EVENT_STRONG_COVERAGE,
             "cross_day_event_strong_min_rare": CROSS_DAY_EVENT_STRONG_MIN_RARE,
+            "continuation_dedup_sections": sorted(attention.CONTINUATION_SECTIONS),
+            "continuing_min_probability": attention.CONTINUING_MIN_PROBABILITY,
+            "decisive_max_probability": attention.DECISIVE_MAX_PROBABILITY,
         },
     )
     state, cached = runtime.begin_or_load_phase(
@@ -1633,6 +1682,7 @@ def phase_3_rank(
     # A publisher re-dating the same article's URL (/2026/10/16/<slug> ->
     # /2026/10/17/<slug>) defeats exact key matches and often the wording test.
     recent_dateless = dateless_coverage_index(recent_coverage)
+    continuation_dedup = topic["web_slug"] in attention.CONTINUATION_SECTIONS
 
     def _repeat_of(item: dict) -> dict | None:
         """Rejection record when ``item`` repeats covered or already-selected coverage."""
@@ -1654,6 +1704,17 @@ def phase_3_rank(
                 matched = [coverage_key(matched_story.get("url", ""))]
                 reason = (f"same event published in the previous {CROSS_DAY_DEDUP_DAYS} days "
                           "(headline/event wording)")
+        if not matched and continuation_dedup:
+            matched_story = next(
+                (story for story in recent_stories
+                 if not is_non_article_page(story.get("url", ""))
+                 and _continues_published_event(story, item, event_frequency)),
+                None,
+            )
+            if matched_story is not None:
+                matched = [coverage_key(matched_story.get("url", ""))]
+                reason = (f"continuation of an event published in the previous "
+                          f"{CROSS_DAY_DEDUP_DAYS} days (Jev continuing, shared rare event term)")
         if not matched:
             redated = recent_coverage_match(item.get("url", ""), recent_coverage, recent_dateless)
             if redated:

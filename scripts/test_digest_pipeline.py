@@ -1275,6 +1275,87 @@ def test_recent_publication_blocks_repeat_with_common_headline_words() -> None:
               and rejected["matched_story"]["url"] == original["url"], rejected)
 
 
+def test_world_continuation_naming_published_rare_entity_is_a_repeat() -> None:
+    """A World follow-up Jev judges continuing is a repeat when it names the published incident.
+
+    Regression for 2026-11-23/25 World: the drone strike on the Russian cargo
+    ship Sparta II ran again as Zelenskyy's confirmation of the attack; its
+    headline shared only common words and Zelenskyy was not in the 11-23 text.
+    A decisive follow-up and the same follow-up outside World still run.
+    """
+    original = {
+        "title": "Russian cargo ship burns in Baltic Sea after drone strike, crew evacuates",
+        "event": "Drones struck Russian cargo ship Sparta II in the Gulf of Finland, setting it "
+                 "ablaze; Finnish military said Ukraine was likely responsible",
+        "url": "https://www.example-news.com/2026/11/22/russian-cargo-ship-burns-baltic",
+        "editorial_significance": "high", "date_published": "2026-11-22",
+    }
+    corpus_titles = (
+        "Russian ship detained off Norway over sanctions",
+        "Russian navy ship shadows NATO drills",
+        "Russian ship carrying grain docks in Syria",
+    )
+    follow_up = {
+        "title": "Ukraine confirms hit on Russian ship in Gulf of Finland as escalation fears grow",
+        "event": "Zelenskyy confirms Ukrainian drone strike on Russian cargo ship Sparta II in the "
+                 "Gulf of Finland",
+        "event_terms": ["Sparta II", "Zelenskyy"],
+        "url": "https://www.example-wire.com/2026/11/24/ukraine-confirms-sparta-strike",
+        "editorial_significance": "high", "date_published": "2026-11-24",
+    }
+
+    def judged(continuing: float, decisive: float) -> dict:
+        return {**copy.deepcopy(follow_up),
+                "jev_importance": {"score": 60.0, "confidence": 0.8, "answers": {
+                    "continuing": continuing, "decisive": decisive}}}
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        older = root / "news" / "publications" / "2026-11-10"
+        older.mkdir(parents=True)
+        (older / f"{catalog.TOPICS['world']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [
+                {"title": title, "event": title, "url": f"https://example.com/2026/11/10/ship-{index}",
+                 "editorial_significance": "medium", "date_published": "2026-11-10"}
+                for index, title in enumerate(corpus_titles)
+            ],
+        }))
+        published = root / "news" / "publications" / "2026-11-23"
+        published.mkdir(parents=True)
+        (published / f"{catalog.TOPICS['world']['web_slug']}.json").write_text(json.dumps({
+            "status": "published", "fresh": [original],
+        }))
+        runs = (
+            ("world", "2026-11-25", judged(0.9, 0.1)),
+            ("world", "2026-11-26", judged(0.9, 0.6)),
+            ("ai-tech", "2026-11-25", judged(0.9, 0.1)),
+        )
+        queues = []
+        for slug, day, candidate in runs:
+            run_dir = root / catalog.TOPICS[slug]["category"] / day
+            run_dir.mkdir(parents=True)
+            with patch.object(runtime, "DIGESTS_DIR", root):
+                queues.append(research.phase_3_rank(catalog.TOPICS[slug], [candidate], run_dir))
+        check(queues[0] == [], f"World continuation reached the fetch queue: {queues[0]!r}")
+        artifact = json.loads((root / catalog.TOPICS["world"]["category"] / "2026-11-25"
+                               / "03-urls-ranked.json").read_text())
+        (rejected,) = artifact["recent_coverage_rejected"]
+        check(rejected["matched_story"]["url"] == original["url"]
+              and "continuation" in rejected["rejection_reason"], rejected)
+        check([item["url"] for item in queues[1]] == [follow_up["url"]], f"decisive={queues[1]!r}")
+        check([item["url"] for item in queues[2]] == [follow_up["url"]], f"ai-tech={queues[2]!r}")
+
+
+def test_section_front_is_not_a_same_event_key() -> None:
+    """A bare-word section front (`/en/news/europe`) never names one event."""
+    check(not contracts.is_event_url("euronews.com/en/news/europe"), "section front kept")
+    check(not contracts.is_event_url("https://www.bbc.com/news/world"), "section front kept")
+    check(contracts.is_event_url("euronews.com/en/news/europe/sparta-ii-drone-strike"),
+          "article under a section dropped")
+    check(contracts.is_event_url("bbc.com/news/articles/c4g2x8"), "article id dropped")
+    check(contracts.is_event_url("github.com/karpathy/nanochat"), "non-section bare path dropped")
+
+
 def test_recent_publication_keeps_result_previewed_by_earlier_summary() -> None:
     """A result is not a repeat of the earlier story whose summary previewed it.
 
@@ -4342,6 +4423,8 @@ def main() -> None:
         test_recent_publication_blocks_repeat_named_by_event_terms,
         test_recent_publication_blocks_event_terms_repeat_beyond_date_gap,
         test_recent_publication_blocks_repeat_with_common_headline_words,
+        test_world_continuation_naming_published_rare_entity_is_a_repeat,
+        test_section_front_is_not_a_same_event_key,
         test_recent_publication_keeps_result_previewed_by_earlier_summary,
         test_recent_publication_blocks_repeat_sharing_precise_figures,
         test_fetch_alternate_repeating_published_story_is_not_assigned,
